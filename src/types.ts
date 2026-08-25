@@ -1,0 +1,58 @@
+export type SiteStatus = "healthy" | "updates" | "attention" | "problem" | "unreachable" | "unscanned";
+export type AuthMethod = "keyFile" | "password";
+export type StepStatus = "pending" | "running" | "success" | "warning" | "failed" | "skipped";
+
+export interface Site {
+  id: string;
+  name: string;
+  url: string;
+  sshHost: string;
+  sshPort: number;
+  sshUsername: string;
+  authMethod: AuthMethod;
+  keyPath?: string | null;
+  wordpressPath: string;
+  pinnedHostKey?: string | null;
+  status: SiteStatus;
+  wordpressVersion?: string | null;
+  phpVersion?: string | null;
+  updateCount: number;
+  securityStatus?: string | null;
+  lastScanAt?: string | null;
+  lastMaintenanceAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SiteInput {
+  id?: string;
+  name: string;
+  url: string;
+  sshHost: string;
+  sshPort: number;
+  sshUsername: string;
+  authMethod: AuthMethod;
+  keyPath?: string | null;
+  wordpressPath: string;
+  credentialSecret?: string;
+}
+
+export interface TechnicalError { category: string; userMessage: string; technicalDetails?: string; retryable: boolean }
+export interface ConnectionTestResult {
+  success: boolean;
+  steps: Array<{ key: string; label: string; status: StepStatus; detail?: string }>;
+  fingerprint?: string;
+  requiresHostKeyAcceptance: boolean;
+  wordpressVersion?: string;
+  phpVersion?: string;
+  wpCliVersion?: string;
+  detectedUrl?: string;
+  error?: TechnicalError;
+}
+
+export interface ScanCheck { key: string; label: string; status: StepStatus; summary: string; findings: Finding[] }
+export interface Finding { category: string; severity: "info" | "attention" | "problem"; title: string; detail: string; path?: string }
+export interface ScanResult { id: string; siteId: string; startedAt: string; finishedAt: string; status: SiteStatus; checks: ScanCheck[]; truncated: boolean }
+export interface UpdateItem { kind: "core" | "plugin" | "theme" | "language"; slug: string; name: string; currentVersion: string; newVersion: string; status: string }
+export interface MaintenanceStep { key: string; label: string; status: StepStatus; detail?: string }
+export interface MaintenanceRun { id: string; siteId: string; siteName?: string; startedAt: string; finishedAt?: string; status: StepStatus; durationMs?: number; backupPath?: string; steps: MaintenanceStep[]; beforeVersions?: string; afterVersions?: string }

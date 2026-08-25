@@ -1,0 +1,39 @@
+<script setup lang="ts">
+import { computed, reactive, ref, watchEffect } from "vue";
+import { useRoute, useRouter, RouterLink } from "vue-router";
+import { Check, ChevronDown, FileKey2, KeyRound, LoaderCircle, LockKeyhole, Server, ShieldQuestion } from "@lucide/vue";
+import { useSitesStore } from "../stores/sites";
+import { appApi } from "../services/tauri";
+import type { ConnectionTestResult, SiteInput } from "../types";
+
+const route = useRoute(); const router = useRouter(); const store = useSitesStore();
+const form = reactive<SiteInput>({ name: "", url: "https://", sshHost: "", sshPort: 22, sshUsername: "", authMethod: "keyFile", keyPath: "", wordpressPath: "/var/www/html", credentialSecret: "" });
+const saving = ref(false); const testing = ref(false); const result = ref<ConnectionTestResult>(); const error = ref<string>();
+const editing = computed(() => typeof route.params.id === "string");
+watchEffect(() => { const site = store.byId.get(String(route.params.id)); if (site) Object.assign(form, { id: site.id, name: site.name, url: site.url, sshHost: site.sshHost, sshPort: site.sshPort, sshUsername: site.sshUsername, authMethod: site.authMethod, keyPath: site.keyPath ?? "", wordpressPath: site.wordpressPath, credentialSecret: "" }); });
+const valid = computed(() => form.name.trim() && /^https?:\/\//.test(form.url) && form.sshHost.trim() && form.sshUsername.trim() && form.sshPort > 0 && form.sshPort <= 65535 && form.wordpressPath.startsWith("/") && (form.authMethod === "password" || form.keyPath));
+
+async function chooseKey() { try { const { open } = await import("@tauri-apps/plugin-dialog"); const selected = await open({ multiple: false, directory: false, title: "Kies een SSH private key" }); if (selected) form.keyPath = selected; } catch { error.value = "Een sleutelbestand kiezen werkt alleen in de desktopapp."; } }
+async function test() { testing.value = true; error.value = undefined; result.value = undefined; try { result.value = await appApi.testConnection({ ...form }); } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); } finally { testing.value = false; } }
+async function save() { if (!valid.value) return; saving.value = true; error.value = undefined; try { const site = await store.save({ ...form, credentialSecret: form.credentialSecret || undefined }); await router.push(`/websites/${site.id}`); } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); } finally { saving.value = false; } }
+</script>
+
+<template>
+  <section class="page-heading"><div><h2>{{ editing ? 'Website bewerken' : 'Nieuwe website' }}</h2><p>Vul de verbindingsgegevens in. Wachtwoorden en passphrases worden niet in de lokale database opgeslagen.</p></div><RouterLink class="button ghost" to="/websites">Annuleren</RouterLink></section>
+  <form class="form-layout" @submit.prevent="save">
+    <div class="card form-card"><div class="section-heading"><span class="section-icon"><Server :size="20" /></span><div><h3>Website</h3><p>De herkenbare naam en het openbare adres.</p></div></div>
+      <div class="form-grid"><label><span>Naam</span><input v-model.trim="form.name" required maxlength="100" placeholder="Bijvoorbeeld Bakkerij De Molen" /></label><label><span>Website-URL</span><input v-model.trim="form.url" required type="url" placeholder="https://voorbeeld.nl" /></label></div>
+    </div>
+    <div class="card form-card"><div class="section-heading"><span class="section-icon"><KeyRound :size="20" /></span><div><h3>SSH-verbinding</h3><p>Deze gegevens vind je in het hostingpaneel of bij je hostingprovider.</p></div></div>
+      <div class="form-grid three"><label class="span-2"><span>SSH host</span><input v-model.trim="form.sshHost" required placeholder="server.voorbeeld.nl" autocomplete="off" /></label><label><span>Poort</span><input v-model.number="form.sshPort" required type="number" min="1" max="65535" /></label><label><span>Gebruikersnaam</span><input v-model.trim="form.sshUsername" required autocomplete="username" /></label><label class="span-2"><span>WordPress-pad</span><input v-model.trim="form.wordpressPath" required placeholder="/var/www/voorbeeld/public" /><small>Absoluut pad op de Linux-server.</small></label></div>
+      <fieldset><legend>Authenticatiemethode</legend><div class="choice-grid"><label :class="['choice-card', { selected: form.authMethod === 'keyFile' }]"><input v-model="form.authMethod" type="radio" value="keyFile" /><FileKey2 /><span><strong>SSH-sleutelbestand</strong><small>Aanbevolen. De app bewaart alleen het lokale pad.</small></span></label><label :class="['choice-card', { selected: form.authMethod === 'password' }]"><input v-model="form.authMethod" type="radio" value="password" /><LockKeyhole /><span><strong>Wachtwoord</strong><small>Veilig opgeslagen in het besturingssysteem.</small></span></label></div></fieldset>
+      <div v-if="form.authMethod === 'keyFile'" class="form-grid"><label class="span-2"><span>Private-keybestand</span><div class="input-button"><input v-model="form.keyPath" required readonly placeholder="Kies een bestand…" /><button class="button secondary" type="button" @click="chooseKey">Bladeren</button></div></label><label class="span-2"><span>Passphrase <em>optioneel</em></span><input v-model="form.credentialSecret" type="password" autocomplete="new-password" :placeholder="editing ? 'Ongewijzigd laten' : 'Alleen als de sleutel beveiligd is'" /></label></div>
+      <div v-else class="form-grid"><label class="span-2"><span>SSH-wachtwoord</span><input v-model="form.credentialSecret" :required="!editing" type="password" autocomplete="new-password" :placeholder="editing ? 'Ongewijzigd laten' : 'Voer het SSH-wachtwoord in'" /></label></div>
+    </div>
+
+    <div class="card test-card"><div><h3>Verbinding controleren</h3><p>We controleren SSH, de serveridentiteit, authenticatie, WP-CLI, WordPress en de database.</p></div><button class="button secondary" type="button" :disabled="testing || !valid" @click="test"><LoaderCircle v-if="testing" class="spin" :size="17" /><ShieldQuestion v-else :size="17" />{{ testing ? 'Controleren…' : 'Verbinding testen' }}</button></div>
+    <div v-if="result" :class="['connection-result', result.success ? 'success-panel' : 'warning-panel']"><div class="result-heading"><Check v-if="result.success" /><ShieldQuestion v-else /><div><strong>{{ result.success ? 'Verbinding geslaagd' : (result.error?.userMessage ?? 'Verbinding niet voltooid') }}</strong><small v-if="result.success">WordPress {{ result.wordpressVersion }} · PHP {{ result.phpVersion }} · WP-CLI {{ result.wpCliVersion }}</small></div></div><ul><li v-for="step in result.steps" :key="step.key"><Check v-if="step.status === 'success'" :size="15" /><span v-else class="step-pending"></span>{{ step.label }}</li></ul><details v-if="result.error?.technicalDetails"><summary>Technische details <ChevronDown :size="14" /></summary><pre>{{ result.error.technicalDetails }}</pre></details></div>
+    <p v-if="error" class="error-banner">{{ error }}</p>
+    <div class="form-actions"><RouterLink class="button secondary" to="/websites">Annuleren</RouterLink><button class="button primary" type="submit" :disabled="saving || !valid">{{ saving ? 'Opslaan…' : (editing ? 'Wijzigingen opslaan' : 'Website toevoegen') }}</button></div>
+  </form>
+</template>
