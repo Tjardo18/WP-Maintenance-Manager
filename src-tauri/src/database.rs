@@ -37,6 +37,20 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let settings_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 2)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !settings_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!("../migrations/0002_settings.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -279,6 +293,28 @@ impl Database {
                 .collect::<rusqlite::Result<_>>()?;
         }
         Ok(runs)
+    }
+
+    pub fn scan_concurrency(&self) -> Result<usize, AppError> {
+        let connection = self.connect()?;
+        let value: String = connection.query_row(
+            "SELECT value FROM app_settings WHERE key='scan_concurrency'",
+            [],
+            |row| row.get(0),
+        )?;
+        value
+            .parse::<usize>()
+            .map(|value| value.clamp(1, 5))
+            .map_err(AppError::storage)
+    }
+
+    pub fn set_scan_concurrency(&self, value: usize) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT INTO app_settings(key,value,updated_at) VALUES('scan_concurrency',?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            params![value.to_string(), utc_now()],
+        )?;
+        Ok(())
     }
 }
 

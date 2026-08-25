@@ -62,7 +62,7 @@ Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.app
 - Live onderhoudsstappen en persistente rapporten met voor/na-versies, waarschuwingen, failures en backupregistratie.
 - Detailweergave met Updates, Security, Gebruikers, Bestanden, Database, Onderhoud en Historie.
 - Bevestigingsdialogen voor iedere muterende actie.
-- Begrensde bulkscaninterface (maximaal vier gelijktijdige taken).
+- Backend-bulkscans met live voortgang, foutisolatie per site, veilig stoppen en persistent instelbare paralleliteit (1–5 taken).
 - Developmentfixtures voor beoordeling zonder productiecredentials.
 - Restrictieve Tauri-capability en CSP zonder remote JavaScript.
 

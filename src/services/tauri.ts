@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { ConnectionTestResult, MaintenanceRun, MaintenanceStep, ScanResult, Site, SiteInput, UpdateItem } from "../types";
+import type { AppSettings, BulkScanProgress, BulkScanResult, ConnectionTestResult, MaintenanceRun, MaintenanceStep, ScanResult, Site, SiteInput, UpdateItem } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -34,4 +34,8 @@ export const appApi = {
   async runMaintenance(siteId: string): Promise<MaintenanceRun> { return isTauri() ? call("run_maintenance", { siteId }) : { ...structuredClone(demoHistory[0]), id: crypto.randomUUID(), siteId }; },
   async listHistory(siteId?: string): Promise<MaintenanceRun[]> { return isTauri() ? call("list_maintenance_runs", { siteId: siteId ?? null }) : structuredClone(demoHistory.filter((run) => !siteId || run.siteId === siteId)); },
   async onMaintenanceProgress(handler: (payload: { siteId: string; runId: string; step: MaintenanceStep }) => void): Promise<UnlistenFn> { if (!isTauri()) return () => undefined; return listen("maintenance-progress", (event) => handler(event.payload as { siteId: string; runId: string; step: MaintenanceStep })); },
+  async scanAllSites(onProgress: (progress: BulkScanProgress) => void): Promise<BulkScanResult> { if (isTauri()) { const unlisten = await listen("bulk-scan-progress", (event) => onProgress(event.payload as BulkScanProgress)); try { return await call("scan_all_sites"); } finally { unlisten(); } } let completed = 0; const failures: BulkScanResult["failures"] = []; const queue = [...browserSites]; while (queue.length) { const batch = queue.splice(0, 4); onProgress({ total: browserSites.length, completed, activeSites: batch.map((site) => site.name), failedSites: failures.map((item) => item.siteName) }); await Promise.all(batch.map(async (site) => { await new Promise((resolve) => setTimeout(resolve, 250)); if (site.status === "unreachable") failures.push({ siteId: site.id, siteName: site.name, error: { category: "dns_host_error", userMessage: "Niet bereikbaar", retryable: true } }); completed += 1; })); onProgress({ total: browserSites.length, completed, activeSites: [], failedSites: failures.map((item) => item.siteName) }); } return { total: browserSites.length, completed, cancelled: false, failures }; },
+  async cancelBulkScan(): Promise<void> { if (isTauri()) await call("cancel_bulk_scan"); },
+  async getSettings(): Promise<AppSettings> { return isTauri() ? call("get_settings") : { scanConcurrency: 4 }; },
+  async saveSettings(settings: AppSettings): Promise<AppSettings> { return isTauri() ? call("save_settings", { settings }) : settings; },
 };

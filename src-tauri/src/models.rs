@@ -264,3 +264,35 @@ pub struct MaintenanceRun {
     pub before_versions: Option<String>,
     pub after_versions: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkScanFailure {
+    pub site_id: String,
+    pub site_name: String,
+    pub error: crate::error::AppError,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkScanResult {
+    pub total: usize,
+    pub completed: usize,
+    pub cancelled: bool,
+    pub failures: Vec<BulkScanFailure>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkScanProgress {
+    pub total: usize,
+    pub completed: usize,
+    pub active_sites: Vec<String>,
+    pub failed_sites: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub scan_concurrency: usize,
+}

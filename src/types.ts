@@ -56,3 +56,6 @@ export interface ScanResult { id: string; siteId: string; startedAt: string; fin
 export interface UpdateItem { kind: "core" | "plugin" | "theme" | "language"; slug: string; name: string; currentVersion: string; newVersion: string; status: string }
 export interface MaintenanceStep { key: string; label: string; status: StepStatus; detail?: string }
 export interface MaintenanceRun { id: string; siteId: string; siteName?: string; startedAt: string; finishedAt?: string; status: StepStatus; durationMs?: number; backupPath?: string; steps: MaintenanceStep[]; beforeVersions?: string; afterVersions?: string }
+export interface BulkScanProgress { total: number; completed: number; activeSites: string[]; failedSites: string[] }
+export interface BulkScanResult { total: number; completed: number; cancelled: boolean; failures: Array<{ siteId: string; siteName: string; error: TechnicalError }> }
+export interface AppSettings { scanConcurrency: number }

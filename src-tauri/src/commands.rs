@@ -4,13 +4,18 @@ use crate::{
     error::AppError,
     maintenance,
     models::{
-        ConnectionStep, ConnectionTestResult, MaintenanceRun, MaintenanceStep, ScanResult, Site,
-        SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem,
+        AppSettings, BulkScanFailure, BulkScanProgress, BulkScanResult, ConnectionStep,
+        ConnectionTestResult, MaintenanceRun, MaintenanceStep, ScanResult, Site, SiteInput,
+        SiteStatus, StepStatus, StoredSite, UpdateItem,
     },
     state::AppState,
     validation::validate_site,
 };
 use serde::Serialize;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex, atomic::Ordering},
+};
 use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
@@ -271,10 +276,18 @@ pub fn scan_site(
     modified_days: u16,
     state: State<'_, AppState>,
 ) -> Result<ScanResult, AppError> {
+    scan_site_internal(&state, &site_id, modified_days)
+}
+
+fn scan_site_internal(
+    state: &AppState,
+    site_id: &str,
+    modified_days: u16,
+) -> Result<ScanResult, AppError> {
     crate::validation::validate_days(modified_days)?;
-    let stored = state.database.get_site(&site_id)?;
-    let credential = stored_credential(&state, &stored)?;
-    let outcome = match engine::scan_site(
+    let stored = state.database.get_site(site_id)?;
+    let credential = stored_credential_from_state(state, &stored)?;
+    let mut outcome = match engine::scan_site(
         state.ssh.as_ref(),
         &stored,
         credential.as_deref(),
@@ -286,21 +299,181 @@ pub fn scan_site(
                 error.category.as_str(),
                 "dns_host_error" | "timeout" | "authentication_failed" | "host_key_mismatch"
             ) {
-                state.database.mark_unreachable(&site_id)?;
+                state.database.mark_unreachable(site_id)?;
             }
             return Err(error);
         }
     };
     state
         .database
-        .update_versions(&site_id, &outcome.wordpress_version, &outcome.php_version)?;
+        .update_versions(site_id, &outcome.wordpress_version, &outcome.php_version)?;
+    match engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref()) {
+        Ok(updates) => state.database.save_updates(site_id, &updates)?,
+        Err(error) => {
+            outcome.result.checks.push(crate::models::ScanCheck {
+                key: "updates".into(),
+                label: "Updatecontrole".into(),
+                status: StepStatus::Failed,
+                summary: error.user_message,
+                findings: Vec::new(),
+            });
+            if outcome.result.status == SiteStatus::Healthy {
+                outcome.result.status = SiteStatus::Attention;
+            }
+        }
+    }
     state
         .database
         .save_scan(&outcome.result, &outcome.security_status)?;
-    if let Ok(updates) = engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref()) {
-        state.database.save_updates(&site_id, &updates)?;
-    }
     Ok(outcome.result)
+}
+
+#[tauri::command]
+pub fn scan_all_sites(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<BulkScanResult, AppError> {
+    let sites = state.database.list_sites()?;
+    let total = sites.len();
+    state.bulk_scan_cancelled.store(false, Ordering::SeqCst);
+    let queue = Arc::new(Mutex::new(VecDeque::from(
+        sites
+            .iter()
+            .map(|site| (site.id.clone(), site.name.clone()))
+            .collect::<Vec<_>>(),
+    )));
+    let active = Arc::new(Mutex::new(Vec::<String>::new()));
+    let failures = Arc::new(Mutex::new(Vec::<BulkScanFailure>::new()));
+    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let worker_count = state
+        .scan_concurrency
+        .load(Ordering::SeqCst)
+        .clamp(1, 5)
+        .min(total.max(1));
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let queue = Arc::clone(&queue);
+            let active = Arc::clone(&active);
+            let failures = Arc::clone(&failures);
+            let completed = Arc::clone(&completed);
+            let app = app.clone();
+            let state_ref: &AppState = &state;
+            scope.spawn(move || {
+                loop {
+                    if state_ref.bulk_scan_cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let next = match queue.lock() {
+                        Ok(mut items) => items.pop_front(),
+                        Err(error) => {
+                            eprintln!("bulk scan queue lock failed: {error}");
+                            break;
+                        }
+                    };
+                    let Some((site_id, site_name)) = next else {
+                        break;
+                    };
+                    match active.lock() {
+                        Ok(mut active_sites) => active_sites.push(site_name.clone()),
+                        Err(error) => eprintln!("bulk scan active-sites lock failed: {error}"),
+                    }
+                    emit_bulk_progress(&app, total, &completed, &active, &failures);
+                    if let Err(error) = scan_site_internal(state_ref, &site_id, 30) {
+                        match failures.lock() {
+                            Ok(mut failed) => failed.push(BulkScanFailure {
+                                site_id,
+                                site_name: site_name.clone(),
+                                error,
+                            }),
+                            Err(lock_error) => {
+                                eprintln!("bulk scan failures lock failed: {lock_error}")
+                            }
+                        }
+                    }
+                    match active.lock() {
+                        Ok(mut active_sites) => active_sites.retain(|name| name != &site_name),
+                        Err(error) => eprintln!("bulk scan active-sites lock failed: {error}"),
+                    }
+                    completed.fetch_add(1, Ordering::SeqCst);
+                    emit_bulk_progress(&app, total, &completed, &active, &failures);
+                }
+            });
+        }
+    });
+    let completed = completed.load(Ordering::SeqCst);
+    let failures = failures
+        .lock()
+        .map_err(|_| AppError::storage("Bulk scan failure lock poisoned"))?
+        .clone();
+    Ok(BulkScanResult {
+        total,
+        completed,
+        cancelled: state.bulk_scan_cancelled.load(Ordering::SeqCst),
+        failures,
+    })
+}
+
+#[tauri::command]
+pub fn cancel_bulk_scan(state: State<'_, AppState>) {
+    state.bulk_scan_cancelled.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> AppSettings {
+    AppSettings {
+        scan_concurrency: state.scan_concurrency.load(Ordering::SeqCst),
+    }
+}
+
+#[tauri::command]
+pub fn save_settings(
+    settings: AppSettings,
+    state: State<'_, AppState>,
+) -> Result<AppSettings, AppError> {
+    if !(1..=5).contains(&settings.scan_concurrency) {
+        return Err(AppError::validation(
+            "Gelijktijdige scans moeten tussen 1 en 5 liggen.",
+        ));
+    }
+    state
+        .database
+        .set_scan_concurrency(settings.scan_concurrency)?;
+    state
+        .scan_concurrency
+        .store(settings.scan_concurrency, Ordering::SeqCst);
+    Ok(settings)
+}
+
+fn emit_bulk_progress(
+    app: &AppHandle,
+    total: usize,
+    completed: &std::sync::atomic::AtomicUsize,
+    active: &Mutex<Vec<String>>,
+    failures: &Mutex<Vec<BulkScanFailure>>,
+) {
+    let active_sites = active
+        .lock()
+        .map_or_else(|_| Vec::new(), |items| items.clone());
+    let failed_sites = failures.lock().map_or_else(
+        |_| Vec::new(),
+        |items| {
+            items
+                .iter()
+                .map(|failure| failure.site_name.clone())
+                .collect()
+        },
+    );
+    if let Err(error) = app.emit(
+        "bulk-scan-progress",
+        BulkScanProgress {
+            total,
+            completed: completed.load(Ordering::SeqCst),
+            active_sites,
+            failed_sites,
+        },
+    ) {
+        eprintln!("bulk scan progress event failed: {error}");
+    }
 }
 
 #[tauri::command]
@@ -511,6 +684,16 @@ fn failed_connection(
 
 fn stored_credential(
     state: &State<'_, AppState>,
+    stored: &StoredSite,
+) -> Result<Option<String>, AppError> {
+    match stored.credential_ref.as_deref() {
+        Some(reference) => state.credentials.get_optional(reference),
+        None => Ok(None),
+    }
+}
+
+fn stored_credential_from_state(
+    state: &AppState,
     stored: &StoredSite,
 ) -> Result<Option<String>, AppError> {
     match stored.credential_ref.as_deref() {

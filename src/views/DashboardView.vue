@@ -11,6 +11,7 @@ const store = useSitesStore();
 const search = ref("");
 const filter = ref("all");
 const scanning = ref(false);
+const cancelling = ref(false);
 const completed = ref(0);
 const currentNames = ref<string[]>([]);
 const failures = ref<string[]>([]);
@@ -19,19 +20,10 @@ const count = (statuses: string[]) => store.sites.filter((site) => statuses.incl
 
 async function scanAll() {
   scanning.value = true; completed.value = 0; failures.value = []; currentNames.value = [];
-  const queue = [...store.sites];
-  const worker = async () => {
-    while (queue.length) {
-      const site = queue.shift(); if (!site) break;
-      currentNames.value.push(site.name);
-      try { await appApi.scanSite(site.id); }
-      catch { failures.value.push(site.name); }
-      finally { currentNames.value = currentNames.value.filter((name) => name !== site.name); completed.value += 1; }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker));
-  await store.load(); scanning.value = false;
+  try { const result = await appApi.scanAllSites((progress) => { completed.value = progress.completed; currentNames.value = progress.activeSites; failures.value = progress.failedSites; }); failures.value = result.failures.map((failure) => failure.siteName); }
+  finally { await store.load(); scanning.value = false; cancelling.value = false; }
 }
+async function cancelScan() { cancelling.value = true; await appApi.cancelBulkScan(); }
 </script>
 
 <template>
@@ -41,7 +33,7 @@ async function scanAll() {
   </section>
 
   <div v-if="scanning" class="progress-panel card">
-    <div class="progress-copy"><span class="progress-icon"><RefreshCw :size="18" class="spin" /></span><div><strong>{{ completed }} van {{ store.sites.length }} websites gecontroleerd</strong><small v-if="currentNames.length">Nu bezig: {{ currentNames.join(", ") }}</small><small v-else>Resultaten verwerken…</small></div><span>{{ Math.round(completed / store.sites.length * 100) }}%</span></div>
+    <div class="progress-copy"><span class="progress-icon"><RefreshCw :size="18" class="spin" /></span><div><strong>{{ completed }} van {{ store.sites.length }} websites gecontroleerd</strong><small v-if="currentNames.length">Nu bezig: {{ currentNames.join(", ") }}</small><small v-else>Resultaten verwerken…</small></div><span>{{ Math.round(completed / store.sites.length * 100) }}%</span><button class="button small secondary" :disabled="cancelling" @click="cancelScan">{{ cancelling ? 'Annuleren…' : 'Annuleren' }}</button></div>
     <div class="progress-track"><span :style="{ width: `${completed / store.sites.length * 100}%` }"></span></div>
     <p v-if="failures.length" class="inline-warning">Niet gelukt: {{ failures.join(", ") }}. Andere websites worden gewoon verder gecontroleerd.</p>
   </div>
