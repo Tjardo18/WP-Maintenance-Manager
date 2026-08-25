@@ -222,6 +222,53 @@ pub fn check_updates(
     Ok(updates)
 }
 
+pub fn run_update(
+    executor: &dyn SshExecutor,
+    stored: &StoredSite,
+    credential: Option<&str>,
+    kind: &str,
+    slug: Option<&str>,
+) -> Result<(), AppError> {
+    executor.authenticate(&stored.site, credential)?;
+    let actions = match kind {
+        "core" => vec![RemoteAction::UpdateCore],
+        "plugin" => vec![RemoteAction::UpdatePlugin {
+            slug: slug
+                .ok_or_else(|| AppError::validation("Kies een plugin om bij te werken."))?
+                .to_owned(),
+        }],
+        "theme" => vec![RemoteAction::UpdateTheme {
+            slug: slug
+                .ok_or_else(|| AppError::validation("Kies een thema om bij te werken."))?
+                .to_owned(),
+        }],
+        "plugins" => vec![RemoteAction::UpdateAllPlugins],
+        "themes" => vec![RemoteAction::UpdateAllThemes],
+        "languages" => vec![RemoteAction::UpdateLanguages],
+        "database" => vec![RemoteAction::UpdateDatabase],
+        "all" => vec![
+            RemoteAction::UpdateCore,
+            RemoteAction::UpdateAllPlugins,
+            RemoteAction::UpdateAllThemes,
+            RemoteAction::UpdateLanguages,
+            RemoteAction::UpdateDatabase,
+        ],
+        _ => {
+            return Err(AppError::validation("Deze updateactie is niet toegestaan."));
+        }
+    };
+    for action in actions {
+        let command = build(&stored.site.wordpress_path, action)?;
+        if !command.mutating {
+            return Err(AppError::validation(
+                "Een niet-muterende controle kan niet als update worden uitgevoerd.",
+            ));
+        }
+        checked_output(executor, &stored.site, credential, command)?;
+    }
+    Ok(())
+}
+
 pub fn text_action(
     executor: &dyn SshExecutor,
     stored: &StoredSite,
@@ -500,5 +547,14 @@ mod tests {
         let updates = check_updates(&ssh, &stored(), Some("secret")).unwrap();
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[1].slug, "seo");
+    }
+
+    #[test]
+    fn arbitrary_update_kinds_are_rejected() {
+        let ssh = MockSsh {
+            outputs: HashMap::new(),
+        };
+        let error = run_update(&ssh, &stored(), None, "shell", Some("id")).unwrap_err();
+        assert_eq!(error.category, "validation");
     }
 }

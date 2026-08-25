@@ -36,7 +36,8 @@ pub fn run() {
             commands::accept_host_key,
             commands::test_connection,
             commands::scan_site,
-            commands::check_updates
+            commands::check_updates,
+            commands::run_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

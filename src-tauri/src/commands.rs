@@ -313,6 +313,42 @@ pub fn check_updates(
     Ok(updates)
 }
 
+#[tauri::command]
+pub fn run_update(
+    site_id: String,
+    kind: String,
+    slug: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let stored = state.database.get_site(&site_id)?;
+    let credential = stored_credential(&state, &stored)?;
+    engine::run_update(
+        state.ssh.as_ref(),
+        &stored,
+        credential.as_deref(),
+        &kind,
+        slug.as_deref(),
+    )?;
+    let updates = engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref())?;
+    state.database.save_updates(&site_id, &updates)?;
+    let wordpress = engine::text_action(
+        state.ssh.as_ref(),
+        &stored,
+        credential.as_deref(),
+        RemoteAction::GetWordPressVersion,
+    )?;
+    let php = engine::text_action(
+        state.ssh.as_ref(),
+        &stored,
+        credential.as_deref(),
+        RemoteAction::GetPhpVersion,
+    )?;
+    state
+        .database
+        .update_versions(&site_id, wordpress.trim(), php.trim())?;
+    Ok(())
+}
+
 fn run_readonly(
     executor: &dyn crate::ssh::SshExecutor,
     site: &Site,
