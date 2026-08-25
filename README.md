@@ -1,8 +1,10 @@
 # WP Maintenance Manager
 
+[![CI](https://github.com/Tjardo18/WP-Maintenance-Manager/actions/workflows/ci.yml/badge.svg)](https://github.com/Tjardo18/WP-Maintenance-Manager/actions/workflows/ci.yml)
+
 Een lokale, Nederlandstalige Windows-desktopapp voor veilig beheer en onderhoud van meerdere WordPress-websites via SSH en WP-CLI. De gebruiker kiest alleen vooraf gedefinieerde acties; de interface bevat geen terminal of vrij commandoveld.
 
-> Status: functionele MVP in afronding. Sitebeheer, secure SSH, scans, updates, lokale databasebackups, volledige onderhoudsruns en historie zijn aangesloten. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan rapporteren.
+> Status: functionele MVP. Sitebeheer, secure SSH, scans, updates, lokale databasebackups, volledige onderhoudsruns en historie zijn aangesloten. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan rapporteren.
 
 ## Ondersteunde omgeving
 
@@ -32,6 +34,8 @@ npm run lint
 npm run typecheck
 npm run test
 npm run build
+# of alle frontendcontroles in één keer:
+npm run check
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -43,9 +47,11 @@ Een productie-installatiepakket maken:
 npm run tauri build
 ```
 
+Op Windows verschijnen daarna een MSI en NSIS-installer onder `src-tauri/target/release/bundle/`. Lokale builds zijn niet digitaal ondertekend; voor publieke distributie hoort daar een vertrouwd code-signingcertificaat bij.
+
 ## Lokale gegevens
 
-Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.app` levert. SQLite bevat nooit wachtwoorden of passphrases. Secrets worden via de credential store van het besturingssysteem opgeslagen. Databasebackups komen in een aparte `backups`-submap, buiten een website-documentroot. Databases, backups, keys en lokale logs zijn door `.gitignore` uitgesloten.
+Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.desktop` levert. SQLite bevat nooit wachtwoorden of passphrases. Secrets worden via de credential store van het besturingssysteem opgeslagen. Databasebackups komen in een aparte `backups`-submap, buiten een website-documentroot. Databases, backups, keys en lokale logs zijn door `.gitignore` uitgesloten.
 
 ## Huidige functies
 
@@ -60,6 +66,7 @@ Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.app
 - Bevestigde core-, plugin-, thema-, taal- en database-updates; status en versies worden na afloop opnieuw uitgelezen.
 - Volledige onderhoudspipeline met preflight, voorcontrole, verplichte databasebackup, updates, nacontrole en begrensde HTTP-homepagecheck.
 - Live onderhoudsstappen en persistente rapporten met voor/na-versies, waarschuwingen, failures en backupregistratie.
+- Laatste scanresultaten en findings worden na een app-herstart uit SQLite hersteld.
 - Detailweergave met Updates, Security, Gebruikers, Bestanden, Database, Onderhoud en Historie.
 - Bevestigingsdialogen voor iedere muterende actie.
 - Backend-bulkscans met live voortgang, foutisolatie per site, veilig stoppen en persistent instelbare paralleliteit (1–5 taken).
@@ -70,4 +77,4 @@ Zie [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md) en [docs/REMO
 
 ## Bekende beperkingen
 
-Versie 1 ondersteunt alleen WordPress op Linux/POSIX-hosting via SSH. Een geslaagde homepagecheck of securityscan is geen garantie dat een complete website foutloos of volledig veilig is. Automatische malwareverwijdering, rollback en volledige bestandsbackups vallen bewust buiten versie 1.
+Versie 1 ondersteunt alleen WordPress op Linux/POSIX-hosting via SSH. Een geslaagde homepagecheck of securityscan is geen garantie dat een complete website foutloos of volledig veilig is. Automatische malwareverwijdering, rollback, database-optimalisatie en volledige bestandsbackups vallen bewust buiten versie 1.

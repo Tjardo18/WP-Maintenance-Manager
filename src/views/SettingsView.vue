@@ -2,14 +2,15 @@
 import { onMounted, ref } from "vue";
 import { DatabaseBackup, Gauge, Info, LockKeyhole, Save } from "@lucide/vue";
 import { appApi } from "../services/tauri";
+import { errorMessage } from "../utils/errors";
 
 const concurrency = ref(4);
 const saved = ref(false);
 const saving = ref(false);
 const error = ref<string>();
 
-onMounted(async () => { const settings = await appApi.getSettings(); concurrency.value = settings.scanConcurrency; });
-async function save() { saving.value = true; error.value = undefined; try { const settings = await appApi.saveSettings({ scanConcurrency: concurrency.value }); concurrency.value = settings.scanConcurrency; saved.value = true; setTimeout(() => saved.value = false, 2000); } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); } finally { saving.value = false; } }
+onMounted(async () => { try { const settings = await appApi.getSettings(); concurrency.value = settings.scanConcurrency; } catch (cause) { error.value = errorMessage(cause); } });
+async function save() { saving.value = true; error.value = undefined; try { const settings = await appApi.saveSettings({ scanConcurrency: concurrency.value }); concurrency.value = settings.scanConcurrency; saved.value = true; setTimeout(() => saved.value = false, 2000); } catch (cause) { error.value = errorMessage(cause); } finally { saving.value = false; } }
 </script>
 <template>
   <section class="page-heading"><div><h2>Instellingen</h2><p>Veilige grenzen voor verbindingen, scans en lokale backups.</p></div></section>

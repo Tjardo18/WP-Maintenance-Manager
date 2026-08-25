@@ -4,13 +4,14 @@ use crate::{
     models::{AuthMethod, Site},
 };
 use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
+use chrono::{SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
 use ssh2::Session;
 use std::{
     io::Read,
     net::{TcpStream, ToSocketAddrs},
     path::Path,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone)]
@@ -221,71 +222,96 @@ impl SshExecutor for Ssh2Executor {
         credential: Option<&str>,
         command: &RemoteCommand,
     ) -> Result<ExecOutput, AppError> {
-        let session = self.verified_session(site, credential, command.timeout)?;
-        let mut channel = session.channel_session().map_err(|error| {
-            map_ssh_error(
-                "ssh_channel",
-                "De server kon geen uitvoerkanaal openen.",
-                error,
-            )
-        })?;
-        channel.exec(&command.command).map_err(|error| {
-            map_ssh_error(
-                "command_failed",
-                "De serveractie kon niet worden gestart.",
-                error,
-            )
-        })?;
-        let mut stdout = Vec::new();
-        channel
-            .by_ref()
-            .take(command.max_output_bytes as u64 + 1)
-            .read_to_end(&mut stdout)
-            .map_err(|error| {
-                AppError::ssh(
+        let started = Instant::now();
+        let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let result = (|| {
+            let session = self.verified_session(site, credential, command.timeout)?;
+            let mut channel = session.channel_session().map_err(|error| {
+                map_ssh_error(
                     "ssh_channel",
-                    "Het serverantwoord kon niet worden gelezen.",
+                    "De server kon geen uitvoerkanaal openen.",
                     error,
-                    true,
                 )
             })?;
-        if stdout.len() > command.max_output_bytes {
-            let _ = channel.close();
-            return Err(AppError::ssh(
-                "output_limit",
-                "De server stuurde te veel gegevens terug; de actie is veilig afgebroken.",
-                format!("limiet {} bytes", command.max_output_bytes),
-                false,
-            ));
+            channel.exec(&command.command).map_err(|error| {
+                map_ssh_error(
+                    "command_failed",
+                    "De serveractie kon niet worden gestart.",
+                    error,
+                )
+            })?;
+            let mut stdout = Vec::new();
+            channel
+                .by_ref()
+                .take(command.max_output_bytes as u64 + 1)
+                .read_to_end(&mut stdout)
+                .map_err(|error| {
+                    AppError::ssh(
+                        "ssh_channel",
+                        "Het serverantwoord kon niet worden gelezen.",
+                        error,
+                        true,
+                    )
+                })?;
+            if stdout.len() > command.max_output_bytes {
+                let _ = channel.close();
+                return Err(AppError::ssh(
+                    "output_limit",
+                    "De server stuurde te veel gegevens terug; de actie is veilig afgebroken.",
+                    format!("limiet {} bytes", command.max_output_bytes),
+                    false,
+                ));
+            }
+            let mut stderr = Vec::new();
+            channel
+                .stderr()
+                .take(256 * 1024)
+                .read_to_end(&mut stderr)
+                .map_err(|error| {
+                    AppError::ssh(
+                        "ssh_channel",
+                        "De technische servermelding kon niet worden gelezen.",
+                        error,
+                        true,
+                    )
+                })?;
+            channel.wait_close().map_err(|error| {
+                map_ssh_error(
+                    "ssh_channel",
+                    "De SSH-actie werd niet netjes afgesloten.",
+                    error,
+                )
+            })?;
+            let exit_code = channel.exit_status().map_err(|error| {
+                map_ssh_error("ssh_channel", "De server gaf geen exitstatus terug.", error)
+            })?;
+            Ok(ExecOutput {
+                stdout,
+                stderr,
+                exit_code,
+            })
+        })();
+        match &result {
+            Ok(output) => eprintln!(
+                "site_id={} action={} started_at={} ended_at={} duration_ms={} status=complete exit_code={}",
+                site.id,
+                command.action_name,
+                started_at,
+                Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                started.elapsed().as_millis(),
+                output.exit_code
+            ),
+            Err(error) => eprintln!(
+                "site_id={} action={} started_at={} ended_at={} duration_ms={} status=failed category={}",
+                site.id,
+                command.action_name,
+                started_at,
+                Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                started.elapsed().as_millis(),
+                error.category
+            ),
         }
-        let mut stderr = Vec::new();
-        channel
-            .stderr()
-            .take(256 * 1024)
-            .read_to_end(&mut stderr)
-            .map_err(|error| {
-                AppError::ssh(
-                    "ssh_channel",
-                    "De technische servermelding kon niet worden gelezen.",
-                    error,
-                    true,
-                )
-            })?;
-        channel.wait_close().map_err(|error| {
-            map_ssh_error(
-                "ssh_channel",
-                "De SSH-actie werd niet netjes afgesloten.",
-                error,
-            )
-        })?;
-        let exit_code = channel.exit_status().map_err(|error| {
-            map_ssh_error("ssh_channel", "De server gaf geen exitstatus terug.", error)
-        })?;
-        Ok(ExecOutput {
-            stdout,
-            stderr,
-            exit_code,
-        })
+        result
     }
 
     fn download(

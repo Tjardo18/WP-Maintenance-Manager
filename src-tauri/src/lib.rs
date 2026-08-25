@@ -45,6 +45,7 @@ pub fn run() {
             commands::accept_host_key,
             commands::test_connection,
             commands::scan_site,
+            commands::list_scan_runs,
             commands::scan_all_sites,
             commands::cancel_bulk_scan,
             commands::get_settings,

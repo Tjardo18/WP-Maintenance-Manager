@@ -175,6 +175,14 @@ impl FindingSeverity {
             Self::Problem => "problem",
         }
     }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "attention" => Self::Attention,
+            "problem" => Self::Problem,
+            _ => Self::Info,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

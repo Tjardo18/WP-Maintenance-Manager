@@ -26,8 +26,9 @@ pub fn list_sites(state: State<'_, AppState>) -> Result<Vec<Site>, AppError> {
 #[tauri::command]
 pub fn save_site(mut input: SiteInput, state: State<'_, AppState>) -> Result<Site, AppError> {
     validate_site(&input)?;
+    let is_new = input.id.is_none();
     let is_new_password =
-        input.id.is_none() && matches!(input.auth_method, crate::models::AuthMethod::Password);
+        is_new && matches!(input.auth_method, crate::models::AuthMethod::Password);
     if is_new_password && input.credential_secret.as_deref().is_none_or(str::is_empty) {
         return Err(AppError::validation("Vul het SSH-wachtwoord in."));
     }
@@ -55,7 +56,7 @@ pub fn save_site(mut input: SiteInput, state: State<'_, AppState>) -> Result<Sit
     {
         Ok(site) => Ok(site),
         Err(error) => {
-            if has_secret {
+            if is_new && has_secret {
                 let _ = state.credentials.delete(&credential_ref);
             }
             Err(error)
@@ -277,6 +278,16 @@ pub fn scan_site(
     state: State<'_, AppState>,
 ) -> Result<ScanResult, AppError> {
     scan_site_internal(&state, &site_id, modified_days)
+}
+
+#[tauri::command]
+pub fn list_scan_runs(
+    site_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ScanResult>, AppError> {
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    state.database.list_scans(&site_id)
 }
 
 fn scan_site_internal(

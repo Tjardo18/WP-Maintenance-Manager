@@ -1,8 +1,8 @@
 use crate::{
     error::AppError,
     models::{
-        AuthMethod, MaintenanceRun, MaintenanceStep, ScanResult, Site, SiteInput, SiteStatus,
-        StepStatus, StoredSite, UpdateItem,
+        AuthMethod, Finding, FindingSeverity, MaintenanceRun, MaintenanceStep, ScanCheck,
+        ScanResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem,
     },
 };
 use chrono::{SecondsFormat, Utc};
@@ -155,6 +155,71 @@ impl Database {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn list_scans(&self, site_id: &str) -> Result<Vec<ScanResult>, AppError> {
+        self.list_scans_with_limit(site_id, 50)
+    }
+
+    fn list_scans_with_limit(
+        &self,
+        site_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ScanResult>, AppError> {
+        let connection = self.connect()?;
+        let row_limit = i64::try_from(limit).map_err(AppError::storage)?;
+        let mut scan_statement = connection.prepare(
+            "SELECT id,site_id,started_at,COALESCE(finished_at,started_at),status,truncated FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC LIMIT ?2",
+        )?;
+        let scan_rows = scan_statement.query_map(params![site_id, row_limit], |row| {
+            Ok(ScanResult {
+                id: row.get(0)?,
+                site_id: row.get(1)?,
+                started_at: row.get(2)?,
+                finished_at: row.get(3)?,
+                status: SiteStatus::from_db(&row.get::<_, String>(4)?),
+                checks: Vec::new(),
+                truncated: row.get(5)?,
+            })
+        })?;
+        let mut scans: Vec<ScanResult> = scan_rows.collect::<rusqlite::Result<_>>()?;
+        for scan in &mut scans {
+            let mut check_statement = connection.prepare(
+                "SELECT id,check_key,label,status,summary FROM scan_checks WHERE scan_run_id=?1 ORDER BY rowid",
+            )?;
+            let check_rows = check_statement.query_map([&scan.id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    ScanCheck {
+                        key: row.get(1)?,
+                        label: row.get(2)?,
+                        status: StepStatus::from_db(&row.get::<_, String>(3)?),
+                        summary: row.get(4)?,
+                        findings: Vec::new(),
+                    },
+                ))
+            })?;
+            let mut checks: Vec<(String, ScanCheck)> =
+                check_rows.collect::<rusqlite::Result<_>>()?;
+            for (check_id, check) in &mut checks {
+                let mut finding_statement = connection.prepare(
+                    "SELECT category,severity,title,detail,path FROM findings WHERE scan_check_id=?1 ORDER BY rowid",
+                )?;
+                check.findings = finding_statement
+                    .query_map([check_id.as_str()], |row| {
+                        Ok(Finding {
+                            category: row.get(0)?,
+                            severity: FindingSeverity::from_db(&row.get::<_, String>(1)?),
+                            title: row.get(2)?,
+                            detail: row.get(3)?,
+                            path: row.get(4)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+            }
+            scan.checks = checks.into_iter().map(|(_, check)| check).collect();
+        }
+        Ok(scans)
     }
 
     pub fn save_updates(&self, site_id: &str, updates: &[UpdateItem]) -> Result<(), AppError> {
@@ -378,6 +443,43 @@ mod tests {
             database.delete_site(&saved.id).unwrap().as_deref(),
             Some("test-ref")
         );
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn restores_latest_scan_with_findings() {
+        let path = std::env::temp_dir().join(format!("wpmm-test-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let site = database.save_site(&input(), None).unwrap();
+        let scan = ScanResult {
+            id: Uuid::new_v4().to_string(),
+            site_id: site.id.clone(),
+            started_at: "2026-08-25T10:00:00.000Z".into(),
+            finished_at: "2026-08-25T10:00:01.000Z".into(),
+            status: SiteStatus::Attention,
+            checks: vec![ScanCheck {
+                key: "users".into(),
+                label: "Gebruikers".into(),
+                status: StepStatus::Warning,
+                summary: "Eén aandachtspunt".into(),
+                findings: vec![Finding {
+                    category: "users".into(),
+                    severity: FindingSeverity::Attention,
+                    title: "Controleer beheerder".into(),
+                    detail: "Handmatige beoordeling nodig.".into(),
+                    path: None,
+                }],
+            }],
+            truncated: false,
+        };
+        database.save_scan(&scan, "Aandacht nodig").unwrap();
+
+        let restored = database.list_scans(&site.id).unwrap().remove(0);
+        assert_eq!(restored.id, scan.id);
+        assert_eq!(restored.checks[0].findings, scan.checks[0].findings);
+        assert_eq!(database.list_scans(&site.id).unwrap().len(), 1);
+
         drop(database);
         let _ = fs::remove_file(path);
     }

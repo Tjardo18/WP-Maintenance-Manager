@@ -31,3 +31,6 @@ De Rust-backend wordt opgesplitst in domeinmodellen, SQLite-repositories, creden
 - Een onderhoudsrun stopt vóór mutaties wanneer preflight of databasebackup faalt.
 - Database-export gebruikt uitsluitend een backend-gegenereerde naam onder `/tmp`, downloadt via SFTP naar een gzipbestand in de app-datamap en valideert het pad opnieuw voordat remote cleanup wordt toegestaan.
 - De homepagecheck volgt maximaal vijf redirects en rapporteert bereikbaarheid, HTTP-status en globale reactietijd zonder bredere beschikbaarheidsclaim.
+- Bulkscans starten centraal maximaal 1–5 workers. Annuleren voorkomt nieuwe read-only scans; reeds actieve scans mogen veilig afronden en een fout van één site blokkeert de overige sites niet.
+- Scanruns blijven volledig in SQLite bewaard; de detailweergave kan de 50 recentste scans met checks en findings heropenen.
+- SSH-logging bevat alleen site-id, catalogusactie, UTC-start/eindtijd, duur, status, exitcode of foutcategorie. Commandostrings en remote output worden niet gelogd.

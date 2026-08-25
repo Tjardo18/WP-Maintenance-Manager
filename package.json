@@ -2,6 +2,11 @@
   "name": "wp-maintenance-manager",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "npm@11.17.0",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10.0.0"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,6 +15,7 @@
     "test:watch": "vitest",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "vue-tsc --noEmit",
+    "check": "npm run typecheck && npm run lint && npm run test && npm run build",
     "preview": "vite preview",
     "tauri": "tauri"
   },

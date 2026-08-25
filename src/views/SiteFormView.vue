@@ -5,6 +5,7 @@ import { Check, ChevronDown, FileKey2, KeyRound, LoaderCircle, LockKeyhole, Serv
 import { useSitesStore } from "../stores/sites";
 import { appApi } from "../services/tauri";
 import type { ConnectionTestResult, SiteInput } from "../types";
+import { errorMessage } from "../utils/errors";
 
 const route = useRoute(); const router = useRouter(); const store = useSitesStore();
 const form = reactive<SiteInput>({ name: "", url: "https://", sshHost: "", sshPort: 22, sshUsername: "", authMethod: "keyFile", keyPath: "", wordpressPath: "/var/www/html", credentialSecret: "" });
@@ -14,9 +15,9 @@ watchEffect(() => { const site = store.byId.get(String(route.params.id)); if (si
 const valid = computed(() => form.name.trim() && /^https?:\/\//.test(form.url) && form.sshHost.trim() && form.sshUsername.trim() && form.sshPort > 0 && form.sshPort <= 65535 && form.wordpressPath.startsWith("/") && (form.authMethod === "password" || form.keyPath));
 
 async function chooseKey() { try { const { open } = await import("@tauri-apps/plugin-dialog"); const selected = await open({ multiple: false, directory: false, title: "Kies een SSH private key" }); if (selected) form.keyPath = selected; } catch { error.value = "Een sleutelbestand kiezen werkt alleen in de desktopapp."; } }
-async function test() { testing.value = true; error.value = undefined; result.value = undefined; try { result.value = await appApi.testConnection({ ...form }); } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); } finally { testing.value = false; } }
-async function acceptFingerprint() { if (!result.value?.fingerprint) return; accepting.value = true; error.value = undefined; try { if (!form.id) { const saved = await store.save({ ...form, credentialSecret: form.credentialSecret || undefined }); form.id = saved.id; } await appApi.acceptHostKey(form.id, result.value.fingerprint); await test(); } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); } finally { accepting.value = false; } }
-async function save() { if (!valid.value) return; saving.value = true; error.value = undefined; try { const site = await store.save({ ...form, credentialSecret: form.credentialSecret || undefined }); await router.push(`/websites/${site.id}`); } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); } finally { saving.value = false; } }
+async function test() { testing.value = true; error.value = undefined; result.value = undefined; try { result.value = await appApi.testConnection({ ...form }); } catch (cause) { error.value = errorMessage(cause); } finally { testing.value = false; } }
+async function acceptFingerprint() { if (!result.value?.fingerprint) return; accepting.value = true; error.value = undefined; try { if (!form.id) { const saved = await store.save({ ...form, credentialSecret: form.credentialSecret || undefined }); form.id = saved.id; } await appApi.acceptHostKey(form.id, result.value.fingerprint); await test(); } catch (cause) { error.value = errorMessage(cause); } finally { accepting.value = false; } }
+async function save() { if (!valid.value) return; saving.value = true; error.value = undefined; try { const site = await store.save({ ...form, credentialSecret: form.credentialSecret || undefined }); await router.push(`/websites/${site.id}`); } catch (cause) { error.value = errorMessage(cause); } finally { saving.value = false; } }
 </script>
 
 <template>

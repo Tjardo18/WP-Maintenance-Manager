@@ -34,7 +34,7 @@ onMounted(() => sites.load());
         <div><p class="eyebrow">WordPress-beheer</p><h1>{{ pageTitle }}</h1></div>
         <div class="topbar-state"><Activity :size="17" /><span>{{ sites.loading ? "Gegevens laden…" : `${sites.sites.length} websites` }}</span></div>
       </header>
-      <div class="page-container"><RouterView /></div>
+      <div class="page-container"><p v-if="sites.error" class="error-banner">{{ sites.error }}</p><RouterView /></div>
     </main>
   </div>
 </template>

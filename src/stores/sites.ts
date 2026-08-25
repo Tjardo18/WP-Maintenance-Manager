@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { appApi } from "../services/tauri";
 import type { Site, SiteInput } from "../types";
+import { errorMessage } from "../utils/errors";
 
 export const useSitesStore = defineStore("sites", () => {
   const sites = ref<Site[]>([]);
@@ -13,7 +14,7 @@ export const useSitesStore = defineStore("sites", () => {
     loading.value = true;
     error.value = undefined;
     try { sites.value = await appApi.listSites(); }
-    catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); }
+    catch (cause) { error.value = errorMessage(cause); }
     finally { loading.value = false; }
   }
   async function save(input: SiteInput) { const site = await appApi.saveSite(input); await load(); return site; }

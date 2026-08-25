@@ -6,6 +6,7 @@ import StatusBadge from "../components/StatusBadge.vue";
 import { useSitesStore } from "../stores/sites";
 import { appApi } from "../services/tauri";
 import { formatDate } from "../utils/format";
+import { errorMessage } from "../utils/errors";
 
 const store = useSitesStore();
 const search = ref("");
@@ -15,15 +16,17 @@ const cancelling = ref(false);
 const completed = ref(0);
 const currentNames = ref<string[]>([]);
 const failures = ref<string[]>([]);
+const scanError = ref<string>();
 const filtered = computed(() => store.sites.filter((site) => (filter.value === "all" || site.status === filter.value) && `${site.name} ${site.url}`.toLowerCase().includes(search.value.toLowerCase())));
 const count = (statuses: string[]) => store.sites.filter((site) => statuses.includes(site.status)).length;
 
 async function scanAll() {
-  scanning.value = true; completed.value = 0; failures.value = []; currentNames.value = [];
+  scanning.value = true; completed.value = 0; failures.value = []; currentNames.value = []; scanError.value = undefined;
   try { const result = await appApi.scanAllSites((progress) => { completed.value = progress.completed; currentNames.value = progress.activeSites; failures.value = progress.failedSites; }); failures.value = result.failures.map((failure) => failure.siteName); }
+  catch (cause) { scanError.value = errorMessage(cause); }
   finally { await store.load(); scanning.value = false; cancelling.value = false; }
 }
-async function cancelScan() { cancelling.value = true; await appApi.cancelBulkScan(); }
+async function cancelScan() { cancelling.value = true; try { await appApi.cancelBulkScan(); } catch (cause) { scanError.value = errorMessage(cause); cancelling.value = false; } }
 </script>
 
 <template>
@@ -37,6 +40,7 @@ async function cancelScan() { cancelling.value = true; await appApi.cancelBulkSc
     <div class="progress-track"><span :style="{ width: `${completed / store.sites.length * 100}%` }"></span></div>
     <p v-if="failures.length" class="inline-warning">Niet gelukt: {{ failures.join(", ") }}. Andere websites worden gewoon verder gecontroleerd.</p>
   </div>
+  <p v-if="scanError" class="error-banner">{{ scanError }}</p>
 
   <div class="stat-grid">
     <button class="stat-card" @click="filter = 'all'"><span class="stat-icon blue"><Globe2 /></span><span><small>Websites</small><strong>{{ store.sites.length }}</strong></span></button>
