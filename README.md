@@ -2,7 +2,7 @@
 
 Een lokale, Nederlandstalige Windows-desktopapp voor veilig beheer en onderhoud van meerdere WordPress-websites via SSH en WP-CLI. De gebruiker kiest alleen vooraf gedefinieerde acties; de interface bevat geen terminal of vrij commandoveld.
 
-> Status: actieve MVP-ontwikkeling. De Vue-interface en developmentfixtures zijn bruikbaar; de Rust-services worden per milestone aangesloten. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan rapporteren.
+> Status: actieve MVP-ontwikkeling. Sitebeheer gebruikt in de desktopapp echte SQLite-migrations en de Windows Credential Manager; SSH/scans worden in de volgende milestones aangesloten. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan rapporteren.
 
 ## Ondersteunde omgeving
 
@@ -51,6 +51,8 @@ Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.app
 
 - Dashboard voor tientallen websites met status, zoeken en filters.
 - Website toevoegen/bewerken/verwijderen en veilige authenticatiekeuze.
+- Persistente SQLite-siteopslag met UUID's, UTC-timestamps en cascading historie-tabellen.
+- OS-credentialopslag voor wachtwoorden/passphrases; secrets komen nooit in SQLite of IPC-responses.
 - Detailweergave met Updates, Security, Gebruikers, Bestanden, Database, Onderhoud en Historie.
 - Bevestigingsdialogen voor iedere muterende actie.
 - Begrensde bulkscaninterface (maximaal vier gelijktijdige taken).
