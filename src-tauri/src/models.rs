@@ -111,6 +111,19 @@ pub enum StepStatus {
     Skipped,
 }
 
+impl StepStatus {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Success => "success",
+            Self::Warning => "warning",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionStep {
@@ -133,4 +146,85 @@ pub struct ConnectionTestResult {
     pub wp_cli_version: Option<String>,
     pub detected_url: Option<String>,
     pub error: Option<crate::error::AppError>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FindingSeverity {
+    Info,
+    Attention,
+    Problem,
+}
+
+impl FindingSeverity {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Attention => "attention",
+            Self::Problem => "problem",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Finding {
+    pub category: String,
+    pub severity: FindingSeverity,
+    pub title: String,
+    pub detail: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanCheck {
+    pub key: String,
+    pub label: String,
+    pub status: StepStatus,
+    pub summary: String,
+    pub findings: Vec<Finding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanResult {
+    pub id: String,
+    pub site_id: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub status: SiteStatus,
+    pub checks: Vec<ScanCheck>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateKind {
+    Core,
+    Plugin,
+    Theme,
+    Language,
+}
+
+impl UpdateKind {
+    pub fn as_db(&self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Plugin => "plugin",
+            Self::Theme => "theme",
+            Self::Language => "language",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateItem {
+    pub kind: UpdateKind,
+    pub slug: String,
+    pub name: String,
+    pub current_version: String,
+    pub new_version: String,
+    pub status: String,
 }

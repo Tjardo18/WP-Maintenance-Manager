@@ -1,6 +1,6 @@
 use crate::{
     error::AppError,
-    models::{AuthMethod, Site, SiteInput, SiteStatus, StoredSite},
+    models::{AuthMethod, ScanResult, Site, SiteInput, SiteStatus, StoredSite, UpdateItem},
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -109,6 +109,76 @@ impl Database {
         {
             return Err(AppError::not_found("Website"));
         }
+        Ok(())
+    }
+
+    pub fn save_scan(&self, scan: &ScanResult, security_status: &str) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO scan_runs(id,site_id,started_at,finished_at,status,truncated) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![scan.id, scan.site_id, scan.started_at, scan.finished_at, scan.status.as_db(), scan.truncated],
+        )?;
+        for check in &scan.checks {
+            let check_id = Uuid::new_v4().to_string();
+            transaction.execute(
+                "INSERT INTO scan_checks(id,scan_run_id,check_key,label,status,summary) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![check_id, scan.id, check.key, check.label, check.status.as_db(), check.summary],
+            )?;
+            for finding in &check.findings {
+                transaction.execute(
+                    "INSERT INTO findings(id,scan_check_id,category,severity,title,detail,path) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    params![Uuid::new_v4().to_string(), check_id, finding.category, finding.severity.as_db(), finding.title, finding.detail, finding.path],
+                )?;
+            }
+        }
+        transaction.execute(
+            "UPDATE sites SET status=?1,security_status=?2,last_scan_at=?3,updated_at=?3 WHERE id=?4",
+            params![scan.status.as_db(), security_status, scan.finished_at, scan.site_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn save_updates(&self, site_id: &str, updates: &[UpdateItem]) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute("DELETE FROM available_updates WHERE site_id=?1", [site_id])?;
+        let checked_at = utc_now();
+        for update in updates {
+            transaction.execute(
+                "INSERT INTO available_updates(id,site_id,kind,slug,name,current_version,new_version,checked_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![Uuid::new_v4().to_string(), site_id, update.kind.as_db(), update.slug, update.name, update.current_version, update.new_version, checked_at],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE sites SET update_count=?1,status=CASE WHEN ?1 > 0 AND status NOT IN ('problem','unreachable') THEN 'updates' WHEN ?1 = 0 AND status = 'updates' THEN 'healthy' ELSE status END,updated_at=?2 WHERE id=?3",
+            params![updates.len() as u32, checked_at, site_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn update_versions(
+        &self,
+        site_id: &str,
+        wordpress: &str,
+        php: &str,
+    ) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE sites SET wordpress_version=?1,php_version=?2,updated_at=?3 WHERE id=?4",
+            params![wordpress, php, utc_now(), site_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_unreachable(&self, site_id: &str) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE sites SET status='unreachable',security_status='Scan mislukt',last_scan_at=?1,updated_at=?1 WHERE id=?2",
+            params![utc_now(), site_id],
+        )?;
         Ok(())
     }
 }

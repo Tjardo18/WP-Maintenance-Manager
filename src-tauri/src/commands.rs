@@ -1,8 +1,10 @@
 use crate::{
     command_catalog::{RemoteAction, RemoteCommand, build},
+    engine,
     error::AppError,
     models::{
-        ConnectionStep, ConnectionTestResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite,
+        ConnectionStep, ConnectionTestResult, ScanResult, Site, SiteInput, SiteStatus, StepStatus,
+        StoredSite, UpdateItem,
     },
     state::AppState,
     validation::validate_site,
@@ -261,6 +263,56 @@ pub fn test_connection(
     })
 }
 
+#[tauri::command]
+pub fn scan_site(
+    site_id: String,
+    modified_days: u16,
+    state: State<'_, AppState>,
+) -> Result<ScanResult, AppError> {
+    crate::validation::validate_days(modified_days)?;
+    let stored = state.database.get_site(&site_id)?;
+    let credential = stored_credential(&state, &stored)?;
+    let outcome = match engine::scan_site(
+        state.ssh.as_ref(),
+        &stored,
+        credential.as_deref(),
+        modified_days,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if matches!(
+                error.category.as_str(),
+                "dns_host_error" | "timeout" | "authentication_failed" | "host_key_mismatch"
+            ) {
+                state.database.mark_unreachable(&site_id)?;
+            }
+            return Err(error);
+        }
+    };
+    state
+        .database
+        .update_versions(&site_id, &outcome.wordpress_version, &outcome.php_version)?;
+    state
+        .database
+        .save_scan(&outcome.result, &outcome.security_status)?;
+    if let Ok(updates) = engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref()) {
+        state.database.save_updates(&site_id, &updates)?;
+    }
+    Ok(outcome.result)
+}
+
+#[tauri::command]
+pub fn check_updates(
+    site_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<UpdateItem>, AppError> {
+    let stored = state.database.get_site(&site_id)?;
+    let credential = stored_credential(&state, &stored)?;
+    let updates = engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref())?;
+    state.database.save_updates(&site_id, &updates)?;
+    Ok(updates)
+}
+
 fn run_readonly(
     executor: &dyn crate::ssh::SshExecutor,
     site: &Site,
@@ -343,5 +395,15 @@ fn failed_connection(
         wp_cli_version: None,
         detected_url: None,
         error: Some(error),
+    }
+}
+
+fn stored_credential(
+    state: &State<'_, AppState>,
+    stored: &StoredSite,
+) -> Result<Option<String>, AppError> {
+    match stored.credential_ref.as_deref() {
+        Some(reference) => state.credentials.get_optional(reference),
+        None => Ok(None),
     }
 }

@@ -2,8 +2,10 @@ mod command_catalog;
 mod commands;
 mod credentials;
 mod database;
+mod engine;
 mod error;
 mod models;
+mod parsers;
 mod ssh;
 mod state;
 mod validation;
@@ -32,7 +34,9 @@ pub fn run() {
             commands::save_site,
             commands::delete_site,
             commands::accept_host_key,
-            commands::test_connection
+            commands::test_connection,
+            commands::scan_site,
+            commands::check_updates
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
