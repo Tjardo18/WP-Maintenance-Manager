@@ -47,6 +47,36 @@ impl AppError {
             retryable: false,
         }
     }
+
+    pub fn ssh(
+        category: &str,
+        message: impl Into<String>,
+        detail: impl Display,
+        retryable: bool,
+    ) -> Self {
+        Self {
+            category: category.into(),
+            user_message: message.into(),
+            technical_details: Some(detail.to_string()),
+            retryable,
+        }
+    }
+
+    pub fn command_failed(action: &str, exit_code: i32, stderr: &str) -> Self {
+        let redacted = if stderr.chars().count() > 2000 {
+            format!("{}…", stderr.chars().take(2000).collect::<String>())
+        } else {
+            stderr.to_owned()
+        };
+        Self {
+            category: "command_failed".into(),
+            user_message: "De servercontrole kon niet worden voltooid.".into(),
+            technical_details: Some(format!(
+                "Actie: {action}; exitstatus: {exit_code}; stderr: {redacted}"
+            )),
+            retryable: true,
+        }
+    }
 }
 
 impl Display for AppError {

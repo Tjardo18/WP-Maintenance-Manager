@@ -1,7 +1,8 @@
-use crate::{credentials::CredentialVault, database::Database};
+use crate::{credentials::CredentialVault, database::Database, ssh::SshExecutor};
+use std::sync::Arc;
 
-#[derive(Debug)]
 pub struct AppState {
     pub database: Database,
     pub credentials: CredentialVault,
+    pub ssh: Arc<dyn SshExecutor>,
 }

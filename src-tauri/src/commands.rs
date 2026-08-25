@@ -1,6 +1,9 @@
 use crate::{
+    command_catalog::{RemoteAction, RemoteCommand, build},
     error::AppError,
-    models::{Site, SiteInput},
+    models::{
+        ConnectionStep, ConnectionTestResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite,
+    },
     state::AppState,
     validation::validate_site,
 };
@@ -79,5 +82,266 @@ pub fn accept_host_key(
             "De SSH-fingerprint heeft een ongeldig formaat.",
         ));
     }
-    state.database.set_host_key(&site_id, &fingerprint)
+    let stored = state.database.get_site(&site_id)?;
+    let actual = state.ssh.fingerprint(&stored.site)?;
+    if actual != fingerprint {
+        return Err(AppError::ssh(
+            "host_key_changed_during_acceptance",
+            "De serveridentiteit veranderde tijdens het accepteren. Er is niets opgeslagen.",
+            format!("Getoond {fingerprint}; nu ontvangen {actual}"),
+            false,
+        ));
+    }
+    state.database.set_host_key(&site_id, &actual)
+}
+
+#[tauri::command]
+pub fn test_connection(
+    input: SiteInput,
+    state: State<'_, AppState>,
+) -> Result<ConnectionTestResult, AppError> {
+    validate_site(&input)?;
+    let existing = match input.id.as_deref() {
+        Some(id) => Some(state.database.get_site(id)?),
+        None => None,
+    };
+    let mut site = site_from_input(&input, existing.as_ref());
+    if existing.as_ref().is_some_and(|stored| {
+        stored.site.ssh_host != input.ssh_host || stored.site.ssh_port != input.ssh_port
+    }) {
+        site.pinned_host_key = None;
+    }
+    let credential = match input
+        .credential_secret
+        .as_deref()
+        .filter(|secret| !secret.is_empty())
+    {
+        Some(secret) => Some(secret.to_owned()),
+        None => match existing
+            .as_ref()
+            .and_then(|stored| stored.credential_ref.as_deref())
+        {
+            Some(reference) => state.credentials.get_optional(reference)?,
+            None => None,
+        },
+    };
+    let mut steps = connection_steps();
+    let fingerprint = match state.ssh.fingerprint(&site) {
+        Ok(fingerprint) => {
+            steps[0].status = StepStatus::Success;
+            fingerprint
+        }
+        Err(error) => {
+            steps[0].status = StepStatus::Failed;
+            return Ok(failed_connection(steps, None, error));
+        }
+    };
+    match site.pinned_host_key.as_deref() {
+        None => {
+            steps[1].status = StepStatus::Warning;
+            steps[1].detail = Some(fingerprint.clone());
+            return Ok(ConnectionTestResult {
+                success: false,
+                steps,
+                fingerprint: Some(fingerprint),
+                requires_host_key_acceptance: true,
+                wordpress_version: None,
+                php_version: None,
+                wp_cli_version: None,
+                detected_url: None,
+                error: None,
+            });
+        }
+        Some(expected) if expected != fingerprint => {
+            steps[1].status = StepStatus::Failed;
+            return Ok(failed_connection(
+                steps,
+                Some(fingerprint.clone()),
+                AppError::ssh(
+                    "host_key_mismatch",
+                    "Waarschuwing: de identiteit van de SSH-server is gewijzigd. De verbinding is geblokkeerd.",
+                    format!("Verwacht {expected}; ontvangen {fingerprint}"),
+                    false,
+                ),
+            ));
+        }
+        Some(_) => steps[1].status = StepStatus::Success,
+    }
+    if let Err(error) = state.ssh.authenticate(&site, credential.as_deref()) {
+        steps[2].status = StepStatus::Failed;
+        return Ok(failed_connection(steps, Some(fingerprint), error));
+    }
+    steps[2].status = StepStatus::Success;
+
+    if let Err(error) = run_readonly(
+        state.ssh.as_ref(),
+        &site,
+        credential.as_deref(),
+        build(&site.wordpress_path, RemoteAction::TestWordPressPath)?,
+    ) {
+        steps[3].status = StepStatus::Failed;
+        return Ok(failed_connection(steps, Some(fingerprint), error));
+    }
+    steps[3].status = StepStatus::Success;
+
+    let wp_cli_version = match run_readonly(
+        state.ssh.as_ref(),
+        &site,
+        credential.as_deref(),
+        build(&site.wordpress_path, RemoteAction::GetWpCliVersion)?,
+    ) {
+        Ok(value) => value.trim().trim_start_matches("WP-CLI ").to_owned(),
+        Err(mut error) => {
+            error.category = "wp_cli_missing".into();
+            error.user_message = "WP-CLI is niet beschikbaar op deze server.".into();
+            steps[4].status = StepStatus::Failed;
+            return Ok(failed_connection(steps, Some(fingerprint), error));
+        }
+    };
+    steps[4].status = StepStatus::Success;
+
+    if let Err(mut error) = run_readonly(
+        state.ssh.as_ref(),
+        &site,
+        credential.as_deref(),
+        build(&site.wordpress_path, RemoteAction::DetectWordPress)?,
+    ) {
+        error.category = "invalid_wordpress_path".into();
+        error.user_message = "Op dit pad is geen werkende WordPress-installatie gevonden.".into();
+        steps[5].status = StepStatus::Failed;
+        return Ok(failed_connection(steps, Some(fingerprint), error));
+    }
+    steps[5].status = StepStatus::Success;
+
+    if let Err(error) = run_readonly(
+        state.ssh.as_ref(),
+        &site,
+        credential.as_deref(),
+        build(&site.wordpress_path, RemoteAction::CheckDatabase)?,
+    ) {
+        steps[6].status = StepStatus::Failed;
+        return Ok(failed_connection(steps, Some(fingerprint), error));
+    }
+    steps[6].status = StepStatus::Success;
+
+    let wordpress_version = run_readonly(
+        state.ssh.as_ref(),
+        &site,
+        credential.as_deref(),
+        build(&site.wordpress_path, RemoteAction::GetWordPressVersion)?,
+    )?
+    .trim()
+    .to_owned();
+    let php_version = run_readonly(
+        state.ssh.as_ref(),
+        &site,
+        credential.as_deref(),
+        build(&site.wordpress_path, RemoteAction::GetPhpVersion)?,
+    )?
+    .trim()
+    .to_owned();
+    let detected_url = run_readonly(
+        state.ssh.as_ref(),
+        &site,
+        credential.as_deref(),
+        build(&site.wordpress_path, RemoteAction::GetSiteUrl)?,
+    )?
+    .trim()
+    .to_owned();
+    Ok(ConnectionTestResult {
+        success: true,
+        steps,
+        fingerprint: Some(fingerprint),
+        requires_host_key_acceptance: false,
+        wordpress_version: Some(wordpress_version),
+        php_version: Some(php_version),
+        wp_cli_version: Some(wp_cli_version),
+        detected_url: Some(detected_url),
+        error: None,
+    })
+}
+
+fn run_readonly(
+    executor: &dyn crate::ssh::SshExecutor,
+    site: &Site,
+    credential: Option<&str>,
+    command: RemoteCommand,
+) -> Result<String, AppError> {
+    if command.mutating {
+        return Err(AppError::validation(
+            "Een muterende actie is niet toegestaan tijdens een verbindingstest.",
+        ));
+    }
+    let output = executor.execute(site, credential, &command)?;
+    if output.exit_code != 0 {
+        return Err(AppError::command_failed(
+            command.action_name,
+            output.exit_code,
+            &String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    output.stdout_text()
+}
+
+fn site_from_input(input: &SiteInput, existing: Option<&StoredSite>) -> Site {
+    let now = crate::database::utc_now();
+    Site {
+        id: input.id.clone().unwrap_or_default(),
+        name: input.name.clone(),
+        url: input.url.clone(),
+        ssh_host: input.ssh_host.clone(),
+        ssh_port: input.ssh_port,
+        ssh_username: input.ssh_username.clone(),
+        auth_method: input.auth_method,
+        key_path: input.key_path.clone(),
+        wordpress_path: input.wordpress_path.clone(),
+        pinned_host_key: existing.and_then(|stored| stored.site.pinned_host_key.clone()),
+        status: existing.map_or(SiteStatus::Unscanned, |stored| stored.site.status),
+        wordpress_version: None,
+        php_version: None,
+        update_count: 0,
+        security_status: None,
+        last_scan_at: None,
+        last_maintenance_at: None,
+        created_at: now.clone(),
+        updated_at: now,
+    }
+}
+
+fn connection_steps() -> Vec<ConnectionStep> {
+    [
+        ("ssh", "SSH bereikbaar"),
+        ("host_key", "Host fingerprint gecontroleerd"),
+        ("authentication", "Authenticatie geslaagd"),
+        ("wordpress_path", "WordPress-pad gevonden"),
+        ("wp_cli", "WP-CLI werkt"),
+        ("wordpress", "WordPress-installatie gevonden"),
+        ("database", "Database bereikbaar"),
+    ]
+    .into_iter()
+    .map(|(key, label)| ConnectionStep {
+        key: key.into(),
+        label: label.into(),
+        status: StepStatus::Pending,
+        detail: None,
+    })
+    .collect()
+}
+
+fn failed_connection(
+    steps: Vec<ConnectionStep>,
+    fingerprint: Option<String>,
+    error: AppError,
+) -> ConnectionTestResult {
+    ConnectionTestResult {
+        success: false,
+        steps,
+        fingerprint,
+        requires_host_key_acceptance: false,
+        wordpress_version: None,
+        php_version: None,
+        wp_cli_version: None,
+        detected_url: None,
+        error: Some(error),
+    }
 }

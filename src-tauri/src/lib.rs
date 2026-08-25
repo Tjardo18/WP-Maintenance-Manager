@@ -1,8 +1,10 @@
+mod command_catalog;
 mod commands;
 mod credentials;
 mod database;
 mod error;
 mod models;
+mod ssh;
 mod state;
 mod validation;
 
@@ -21,6 +23,7 @@ pub fn run() {
             app.manage(AppState {
                 database,
                 credentials: credentials::CredentialVault,
+                ssh: std::sync::Arc::new(ssh::Ssh2Executor),
             });
             Ok(())
         })
@@ -28,7 +31,8 @@ pub fn run() {
             commands::list_sites,
             commands::save_site,
             commands::delete_site,
-            commands::accept_host_key
+            commands::accept_host_key,
+            commands::test_connection
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

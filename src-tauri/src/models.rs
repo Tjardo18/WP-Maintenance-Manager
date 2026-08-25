@@ -99,3 +99,38 @@ pub struct StoredSite {
     pub site: Site,
     pub credential_ref: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum StepStatus {
+    Pending,
+    Running,
+    Success,
+    Warning,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionStep {
+    pub key: String,
+    pub label: String,
+    pub status: StepStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionTestResult {
+    pub success: bool,
+    pub steps: Vec<ConnectionStep>,
+    pub fingerprint: Option<String>,
+    pub requires_host_key_acceptance: bool,
+    pub wordpress_version: Option<String>,
+    pub php_version: Option<String>,
+    pub wp_cli_version: Option<String>,
+    pub detected_url: Option<String>,
+    pub error: Option<crate::error::AppError>,
+}

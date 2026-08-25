@@ -1,0 +1,318 @@
+use crate::{
+    error::AppError,
+    validation::{validate_days, validate_slug, validate_wordpress_path},
+};
+use std::time::Duration;
+
+pub const MAX_SCAN_RESULTS: usize = 5_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+// The allowlist is intentionally complete before every UI flow is activated.
+#[allow(dead_code)]
+pub enum RemoteAction {
+    TestWordPressPath,
+    DetectWordPress,
+    GetWordPressVersion,
+    GetPhpVersion,
+    GetWpCliVersion,
+    GetSiteUrl,
+    VerifyCoreChecksums,
+    ListUsers,
+    FindPhpFiles,
+    FindPhpInUploads,
+    FindModifiedFiles { days: u16 },
+    CheckUnsafePermissions,
+    CheckSelectedWpConfigConstants,
+    CheckCoreUpdates,
+    ListPluginUpdates,
+    ListThemeUpdates,
+    CheckDatabase,
+    DatabaseSizes,
+    UpdateCore,
+    UpdatePlugin { slug: String },
+    UpdateAllPlugins,
+    UpdateTheme { slug: String },
+    UpdateAllThemes,
+    UpdateLanguages,
+    UpdateDatabase,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteCommand {
+    pub action_name: &'static str,
+    pub command: String,
+    pub mutating: bool,
+    pub timeout: Duration,
+    pub max_output_bytes: usize,
+}
+
+pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand, AppError> {
+    validate_wordpress_path(wordpress_path)?;
+    let path = shell_escape(wordpress_path);
+    let wp = format!("LC_ALL=C wp --no-color --path={path}");
+    let normal = Duration::from_secs(60);
+    let scan = Duration::from_secs(120);
+    let update = Duration::from_secs(600);
+    let (name, body, mutating, timeout, max) = match action {
+        RemoteAction::TestWordPressPath => (
+            "TestWordPressPath",
+            format!("test -d {path}"),
+            false,
+            Duration::from_secs(20),
+            1024,
+        ),
+        RemoteAction::DetectWordPress => (
+            "DetectWordPress",
+            format!("{wp} core is-installed"),
+            false,
+            normal,
+            16 * 1024,
+        ),
+        RemoteAction::GetWordPressVersion => (
+            "GetWordPressVersion",
+            format!("{wp} core version"),
+            false,
+            normal,
+            16 * 1024,
+        ),
+        RemoteAction::GetPhpVersion => (
+            "GetPhpVersion",
+            "LC_ALL=C php -r 'echo PHP_VERSION;'".into(),
+            false,
+            Duration::from_secs(20),
+            16 * 1024,
+        ),
+        RemoteAction::GetWpCliVersion => (
+            "GetWpCliVersion",
+            "LC_ALL=C wp --no-color cli version".into(),
+            false,
+            Duration::from_secs(20),
+            16 * 1024,
+        ),
+        RemoteAction::GetSiteUrl => (
+            "GetSiteUrl",
+            format!("{wp} option get siteurl"),
+            false,
+            normal,
+            16 * 1024,
+        ),
+        RemoteAction::VerifyCoreChecksums => (
+            "VerifyCoreChecksums",
+            format!("{wp} core verify-checksums"),
+            false,
+            scan,
+            512 * 1024,
+        ),
+        RemoteAction::ListUsers => (
+            "ListUsers",
+            format!(
+                "{wp} user list --fields=ID,user_login,user_email,roles,user_registered --format=json"
+            ),
+            false,
+            normal,
+            2 * 1024 * 1024,
+        ),
+        RemoteAction::FindPhpFiles => (
+            "FindPhpFiles",
+            format!(
+                "find {path}/wp-content -type f -name '*.php' -print0 | head -z -n {}",
+                MAX_SCAN_RESULTS + 1
+            ),
+            false,
+            scan,
+            4 * 1024 * 1024,
+        ),
+        RemoteAction::FindPhpInUploads => (
+            "FindPhpInUploads",
+            format!(
+                "find {path}/wp-content/uploads -type f -name '*.php' -print0 | head -z -n {}",
+                MAX_SCAN_RESULTS + 1
+            ),
+            false,
+            scan,
+            4 * 1024 * 1024,
+        ),
+        RemoteAction::FindModifiedFiles { days } => {
+            validate_days(days)?;
+            (
+                "FindModifiedFiles",
+                format!(
+                    "find {path} -xdev -type f -mtime -{days} -printf '%p\\0%T@\\0%m\\0' | head -z -n {}",
+                    (MAX_SCAN_RESULTS + 1) * 3
+                ),
+                false,
+                scan,
+                8 * 1024 * 1024,
+            )
+        }
+        RemoteAction::CheckUnsafePermissions => (
+            "CheckUnsafePermissions",
+            format!(
+                "find {path} -xdev \\( -type f -o -type d \\) -perm -0002 -print0 | head -z -n {}",
+                MAX_SCAN_RESULTS + 1
+            ),
+            false,
+            scan,
+            4 * 1024 * 1024,
+        ),
+        RemoteAction::CheckSelectedWpConfigConstants => {
+            let code = "echo json_encode(array('WP_DEBUG'=>defined('WP_DEBUG') ? (bool) WP_DEBUG : null,'DISALLOW_FILE_EDIT'=>defined('DISALLOW_FILE_EDIT') ? (bool) DISALLOW_FILE_EDIT : null,'WP_ENVIRONMENT_TYPE'=>defined('WP_ENVIRONMENT_TYPE') ? WP_ENVIRONMENT_TYPE : null));";
+            (
+                "CheckSelectedWpConfigConstants",
+                format!("{wp} eval {}", shell_escape(code)),
+                false,
+                normal,
+                64 * 1024,
+            )
+        }
+        RemoteAction::CheckCoreUpdates => (
+            "CheckCoreUpdates",
+            format!("{wp} core check-update --format=json"),
+            false,
+            normal,
+            512 * 1024,
+        ),
+        RemoteAction::ListPluginUpdates => (
+            "ListPluginUpdates",
+            format!(
+                "{wp} plugin list --update=available --fields=name,title,status,version,update_version --format=json"
+            ),
+            false,
+            normal,
+            2 * 1024 * 1024,
+        ),
+        RemoteAction::ListThemeUpdates => (
+            "ListThemeUpdates",
+            format!(
+                "{wp} theme list --update=available --fields=name,title,status,version,update_version --format=json"
+            ),
+            false,
+            normal,
+            2 * 1024 * 1024,
+        ),
+        RemoteAction::CheckDatabase => (
+            "CheckDatabase",
+            format!("{wp} db check"),
+            false,
+            Duration::from_secs(180),
+            2 * 1024 * 1024,
+        ),
+        RemoteAction::DatabaseSizes => (
+            "DatabaseSizes",
+            format!("{wp} db size --tables --format=json"),
+            false,
+            scan,
+            2 * 1024 * 1024,
+        ),
+        RemoteAction::UpdateCore => (
+            "UpdateCore",
+            format!("{wp} core update --format=json"),
+            true,
+            update,
+            2 * 1024 * 1024,
+        ),
+        RemoteAction::UpdatePlugin { slug } => {
+            validate_slug(&slug)?;
+            (
+                "UpdatePlugin",
+                format!("{wp} plugin update {} --format=json", shell_escape(&slug)),
+                true,
+                Duration::from_secs(300),
+                2 * 1024 * 1024,
+            )
+        }
+        RemoteAction::UpdateAllPlugins => (
+            "UpdateAllPlugins",
+            format!("{wp} plugin update --all --format=json"),
+            true,
+            Duration::from_secs(900),
+            4 * 1024 * 1024,
+        ),
+        RemoteAction::UpdateTheme { slug } => {
+            validate_slug(&slug)?;
+            (
+                "UpdateTheme",
+                format!("{wp} theme update {} --format=json", shell_escape(&slug)),
+                true,
+                Duration::from_secs(300),
+                2 * 1024 * 1024,
+            )
+        }
+        RemoteAction::UpdateAllThemes => (
+            "UpdateAllThemes",
+            format!("{wp} theme update --all --format=json"),
+            true,
+            update,
+            4 * 1024 * 1024,
+        ),
+        RemoteAction::UpdateLanguages => (
+            "UpdateLanguages",
+            format!(
+                "{wp} language core update && {wp} language plugin update --all && {wp} language theme update --all"
+            ),
+            true,
+            Duration::from_secs(300),
+            2 * 1024 * 1024,
+        ),
+        RemoteAction::UpdateDatabase => (
+            "UpdateDatabase",
+            format!("{wp} core update-db"),
+            true,
+            Duration::from_secs(300),
+            2 * 1024 * 1024,
+        ),
+    };
+    Ok(RemoteCommand {
+        action_name: name,
+        command: body,
+        mutating,
+        timeout,
+        max_output_bytes: max,
+    })
+}
+
+pub fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_single_quotes_for_posix_shells() {
+        assert_eq!(shell_escape("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn rejects_injected_slugs() {
+        assert!(
+            build(
+                "/var/www",
+                RemoteAction::UpdatePlugin {
+                    slug: "seo; id".into()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn generated_update_contains_only_validated_slug() {
+        let command = build(
+            "/var/www/site",
+            RemoteAction::UpdateTheme {
+                slug: "twenty-twenty-six".into(),
+            },
+        )
+        .unwrap();
+        assert!(command.mutating);
+        assert!(command.command.contains("'twenty-twenty-six'"));
+    }
+
+    #[test]
+    fn bounds_file_scan_days() {
+        assert!(build("/var/www", RemoteAction::FindModifiedFiles { days: 0 }).is_err());
+        assert!(build("/var/www", RemoteAction::FindModifiedFiles { days: 30 }).is_ok());
+    }
+}

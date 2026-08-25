@@ -7,7 +7,7 @@ De app beheert gevoelige SSH-toegang tot meerdere websites. Belangrijkste risico
 ## Bescherming
 
 - **Credentials:** secrets staan niet in SQLite, logs, fixtures of IPC-responses. Alleen een opaque credentialreferentie wordt als metadata bewaard. Private keys worden niet geïmporteerd; standaard bewaart de app alleen het lokale bestandspad.
-- **Hostidentiteit:** de eerste fingerprint moet zichtbaar worden geaccepteerd en wordt daarna gepind. Een mismatch is een blokkerende fout, nooit een stille heracceptatie.
+- **Hostidentiteit:** de SHA-256-fingerprint wordt uit de SSH-handshake berekend vóór authenticatie. De eerste fingerprint moet zichtbaar worden geaccepteerd en wordt daarna gepind. Tijdens acceptatie haalt de backend de fingerprint opnieuw op en vergelijkt die met de getoonde waarde. Een mismatch is een blokkerende fout, nooit een stille heracceptatie.
 - **Command injection:** er bestaat geen arbitrary-command-IPC. WordPress-paden, dagenwaarden en slugs worden centraal gevalideerd en POSIX-argumenten centraal ge-escaped.
 - **Tauri-grens:** de webview krijgt alleen core-permissies en toegang tot de native bestanddialoog. Er is geen shell- of generieke filesystempermissie. De CSP staat geen remote scripts, fonts of pagina-inhoud toe.
 - **Logging:** alleen site-id, catalogusactie, tijden, status en foutcategorie worden gelogd. Secrets en volledige remote output worden niet gelogd.

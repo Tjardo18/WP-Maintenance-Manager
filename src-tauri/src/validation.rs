@@ -85,6 +85,29 @@ pub fn validate_wordpress_path(path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn validate_slug(slug: &str) -> Result<(), AppError> {
+    if slug.is_empty()
+        || slug.len() > 200
+        || !slug
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(AppError::validation(
+            "De plugin- of themanaam bevat ongeldige tekens.",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_days(days: u16) -> Result<(), AppError> {
+    if !(1..=365).contains(&days) {
+        return Err(AppError::validation(
+            "Het aantal dagen moet tussen 1 en 365 liggen.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +124,18 @@ mod tests {
     fn rejects_shell_metacharacters_in_hosts() {
         assert!(validate_host("host; reboot").is_err());
         assert!(validate_host("example.org").is_ok());
+    }
+    #[test]
+    fn validates_plugin_and_theme_slugs() {
+        assert!(validate_slug("wordpress-seo").is_ok());
+        assert!(validate_slug("seo;reboot").is_err());
+        assert!(validate_slug("../plugin").is_err());
+    }
+    #[test]
+    fn bounds_modified_days() {
+        assert!(validate_days(1).is_ok());
+        assert!(validate_days(365).is_ok());
+        assert!(validate_days(0).is_err());
+        assert!(validate_days(366).is_err());
     }
 }

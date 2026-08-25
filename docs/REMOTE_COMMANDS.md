@@ -4,6 +4,7 @@ Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandos
 
 | Actie | Doel | Muterend | Parameters/validatie | Output | Standaardtimeout | Risico |
 |---|---|---:|---|---|---:|---|
+| TestWordPressPath | Controleren of het ingestelde pad bestaat | Nee | absoluut POSIX-pad | exitstatus | 20 s | laag |
 | DetectWordPress | Installatie en database detecteren | Nee | absoluut POSIX-pad | exitstatus | 30 s | laag |
 | GetWordPressVersion | Coreversie ophalen | Nee | pad | tekst | 20 s | laag |
 | GetPhpVersion | PHP-versie ophalen | Nee | geen | tekst | 20 s | laag |
