@@ -1,9 +1,12 @@
+mod backup;
 mod command_catalog;
 mod commands;
 mod credentials;
 mod database;
 mod engine;
 mod error;
+mod health;
+mod maintenance;
 mod models;
 mod parsers;
 mod ssh;
@@ -26,6 +29,7 @@ pub fn run() {
                 database,
                 credentials: credentials::CredentialVault,
                 ssh: std::sync::Arc::new(ssh::Ssh2Executor),
+                backup_directory: data_dir.join("backups"),
             });
             Ok(())
         })
@@ -37,7 +41,9 @@ pub fn run() {
             commands::test_connection,
             commands::scan_site,
             commands::check_updates,
-            commands::run_update
+            commands::run_update,
+            commands::run_maintenance,
+            commands::list_maintenance_runs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

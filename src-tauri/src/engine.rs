@@ -497,6 +497,15 @@ mod tests {
                     AppError::validation(format!("Geen fixture voor {}", command.action_name))
                 })
         }
+        fn download(
+            &self,
+            _: &Site,
+            _: Option<&str>,
+            _: &str,
+            _: &std::path::Path,
+        ) -> Result<u64, AppError> {
+            Err(AppError::validation("Geen downloadfixture"))
+        }
     }
     fn stored() -> StoredSite {
         StoredSite {

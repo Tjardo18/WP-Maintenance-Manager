@@ -28,6 +28,8 @@ pub enum RemoteAction {
     ListThemeUpdates,
     CheckDatabase,
     DatabaseSizes,
+    CreateDatabaseBackup,
+    DeleteTemporaryBackup { path: String },
     UpdateCore,
     UpdatePlugin { slug: String },
     UpdateAllPlugins,
@@ -204,6 +206,25 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
             scan,
             2 * 1024 * 1024,
         ),
+        RemoteAction::CreateDatabaseBackup => (
+            "CreateDatabaseBackup",
+            format!(
+                "remote_file=$(mktemp /tmp/wpmm-XXXXXXXX.sql) || exit 1; if {wp} db export \"$remote_file\" --quiet; then printf '%s' \"$remote_file\"; else rm -f -- \"$remote_file\"; exit 1; fi"
+            ),
+            true,
+            Duration::from_secs(600),
+            4096,
+        ),
+        RemoteAction::DeleteTemporaryBackup { path: remote_path } => {
+            validate_remote_backup_path(&remote_path)?;
+            (
+                "DeleteTemporaryBackup",
+                format!("rm -f -- {}", shell_escape(&remote_path)),
+                true,
+                Duration::from_secs(30),
+                4096,
+            )
+        }
         RemoteAction::UpdateCore => (
             "UpdateCore",
             format!("{wp} core update --format=json"),
@@ -275,6 +296,25 @@ pub fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+pub fn validate_remote_backup_path(path: &str) -> Result<(), AppError> {
+    let Some(name) = path.strip_prefix("/tmp/wpmm-") else {
+        return Err(AppError::validation(
+            "Het tijdelijke backuppad is ongeldig.",
+        ));
+    };
+    let Some(token) = name.strip_suffix(".sql") else {
+        return Err(AppError::validation(
+            "Het tijdelijke backuppad is ongeldig.",
+        ));
+    };
+    if token.len() != 8 || !token.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(AppError::validation(
+            "Het tijdelijke backuppad is ongeldig.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +354,12 @@ mod tests {
     fn bounds_file_scan_days() {
         assert!(build("/var/www", RemoteAction::FindModifiedFiles { days: 0 }).is_err());
         assert!(build("/var/www", RemoteAction::FindModifiedFiles { days: 30 }).is_ok());
+    }
+
+    #[test]
+    fn only_backend_temporary_backup_paths_can_be_deleted() {
+        assert!(validate_remote_backup_path("/tmp/wpmm-Ab12Cd34.sql").is_ok());
+        assert!(validate_remote_backup_path("/var/www/wp-config.php").is_err());
+        assert!(validate_remote_backup_path("/tmp/wpmm-../../etc.sql").is_err());
     }
 }

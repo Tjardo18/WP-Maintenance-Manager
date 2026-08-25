@@ -42,6 +42,13 @@ pub trait SshExecutor: Send + Sync {
         credential: Option<&str>,
         command: &RemoteCommand,
     ) -> Result<ExecOutput, AppError>;
+    fn download(
+        &self,
+        site: &Site,
+        credential: Option<&str>,
+        remote_path: &str,
+        local_path: &Path,
+    ) -> Result<u64, AppError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -279,6 +286,51 @@ impl SshExecutor for Ssh2Executor {
             stderr,
             exit_code,
         })
+    }
+
+    fn download(
+        &self,
+        site: &Site,
+        credential: Option<&str>,
+        remote_path: &str,
+        local_path: &Path,
+    ) -> Result<u64, AppError> {
+        let session = self.verified_session(site, credential, Duration::from_secs(600))?;
+        let sftp = session
+            .sftp()
+            .map_err(|error| map_ssh_error("sftp", "SFTP kon niet worden gestart.", error))?;
+        let mut remote = sftp.open(Path::new(remote_path)).map_err(|error| {
+            map_ssh_error(
+                "sftp",
+                "De tijdelijke database-export kon niet worden geopend.",
+                error,
+            )
+        })?;
+        let local = std::fs::File::create(local_path).map_err(AppError::storage)?;
+        let mut encoder = flate2::write::GzEncoder::new(local, flate2::Compression::default());
+        const MAX_BACKUP_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+        let copied = std::io::copy(
+            &mut remote.by_ref().take(MAX_BACKUP_BYTES + 1),
+            &mut encoder,
+        )
+        .map_err(|error| {
+            AppError::ssh(
+                "sftp",
+                "De databasebackup kon niet worden gedownload.",
+                error,
+                true,
+            )
+        })?;
+        encoder.finish().map_err(AppError::storage)?;
+        if copied > MAX_BACKUP_BYTES {
+            return Err(AppError::ssh(
+                "backup_size_limit",
+                "De databasebackup is groter dan de veilige limiet van 20 GB.",
+                format!("meer dan {MAX_BACKUP_BYTES} bytes"),
+                false,
+            ));
+        }
+        Ok(copied)
     }
 }
 

@@ -1,6 +1,9 @@
 use crate::{
     error::AppError,
-    models::{AuthMethod, ScanResult, Site, SiteInput, SiteStatus, StoredSite, UpdateItem},
+    models::{
+        AuthMethod, MaintenanceRun, MaintenanceStep, ScanResult, Site, SiteInput, SiteStatus,
+        StepStatus, StoredSite, UpdateItem,
+    },
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -180,6 +183,102 @@ impl Database {
             params![utc_now(), site_id],
         )?;
         Ok(())
+    }
+
+    pub fn start_maintenance(&self, run: &MaintenanceRun) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO maintenance_runs(id,site_id,started_at,status,before_versions) VALUES(?1,?2,?3,?4,?5)",
+            params![run.id, run.site_id, run.started_at, run.status.as_db(), run.before_versions],
+        )?;
+        for (position, step) in run.steps.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO maintenance_steps(id,maintenance_run_id,step_key,label,status,detail,position) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![Uuid::new_v4().to_string(), run.id, step.key, step.label, step.status.as_db(), step.detail, position as u32],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn update_maintenance_step(
+        &self,
+        run_id: &str,
+        step: &MaintenanceStep,
+    ) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE maintenance_steps SET status=?1,detail=?2 WHERE maintenance_run_id=?3 AND step_key=?4",
+            params![step.status.as_db(), step.detail, run_id, step.key],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_maintenance(
+        &self,
+        run: &MaintenanceRun,
+        backup: Option<(&str, u64, &str)>,
+    ) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE maintenance_runs SET finished_at=?1,status=?2,duration_ms=?3,before_versions=?4,after_versions=?5 WHERE id=?6",
+            params![run.finished_at, run.status.as_db(), run.duration_ms.and_then(|value| i64::try_from(value).ok()), run.before_versions, run.after_versions, run.id],
+        )?;
+        if let Some((path, size, sha256)) = backup {
+            transaction.execute(
+                "INSERT INTO backup_records(id,maintenance_run_id,local_path,size_bytes,sha256,created_at,status) VALUES(?1,?2,?3,?4,?5,?6,'success')",
+                params![Uuid::new_v4().to_string(), run.id, path, i64::try_from(size).unwrap_or(i64::MAX), sha256, utc_now()],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE sites SET last_maintenance_at=?1,updated_at=?1 WHERE id=?2",
+            params![run.finished_at, run.site_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn list_maintenance_runs(
+        &self,
+        site_id: Option<&str>,
+    ) -> Result<Vec<MaintenanceRun>, AppError> {
+        let connection = self.connect()?;
+        let sql = "SELECT r.id,r.site_id,s.name,r.started_at,r.finished_at,r.status,r.duration_ms,r.before_versions,r.after_versions,(SELECT local_path FROM backup_records b WHERE b.maintenance_run_id=r.id ORDER BY b.created_at DESC LIMIT 1) FROM maintenance_runs r JOIN sites s ON s.id=r.site_id WHERE (?1 IS NULL OR r.site_id=?1) ORDER BY r.started_at DESC LIMIT 500";
+        let mut statement = connection.prepare(sql)?;
+        let rows = statement.query_map([site_id], |row| {
+            Ok(MaintenanceRun {
+                id: row.get(0)?,
+                site_id: row.get(1)?,
+                site_name: row.get(2)?,
+                started_at: row.get(3)?,
+                finished_at: row.get(4)?,
+                status: StepStatus::from_db(&row.get::<_, String>(5)?),
+                duration_ms: row
+                    .get::<_, Option<i64>>(6)?
+                    .and_then(|value| u64::try_from(value).ok()),
+                before_versions: row.get(7)?,
+                after_versions: row.get(8)?,
+                backup_path: row.get(9)?,
+                steps: Vec::new(),
+            })
+        })?;
+        let mut runs: Vec<MaintenanceRun> = rows.collect::<rusqlite::Result<_>>()?;
+        for run in &mut runs {
+            let mut steps = connection.prepare("SELECT step_key,label,status,detail FROM maintenance_steps WHERE maintenance_run_id=?1 ORDER BY position")?;
+            run.steps = steps
+                .query_map([&run.id], |row| {
+                    Ok(MaintenanceStep {
+                        key: row.get(0)?,
+                        label: row.get(1)?,
+                        status: StepStatus::from_db(&row.get::<_, String>(2)?),
+                        detail: row.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+        }
+        Ok(runs)
     }
 }
 

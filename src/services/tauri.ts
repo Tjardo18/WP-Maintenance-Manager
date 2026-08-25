@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectionTestResult, MaintenanceRun, ScanResult, Site, SiteInput, UpdateItem } from "../types";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { ConnectionTestResult, MaintenanceRun, MaintenanceStep, ScanResult, Site, SiteInput, UpdateItem } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -32,4 +33,5 @@ export const appApi = {
   async runUpdate(siteId: string, kind: string, slug?: string): Promise<void> { if (isTauri()) await call("run_update", { siteId, kind, slug }); else await new Promise((resolve) => setTimeout(resolve, 700)); },
   async runMaintenance(siteId: string): Promise<MaintenanceRun> { return isTauri() ? call("run_maintenance", { siteId }) : { ...structuredClone(demoHistory[0]), id: crypto.randomUUID(), siteId }; },
   async listHistory(siteId?: string): Promise<MaintenanceRun[]> { return isTauri() ? call("list_maintenance_runs", { siteId: siteId ?? null }) : structuredClone(demoHistory.filter((run) => !siteId || run.siteId === siteId)); },
+  async onMaintenanceProgress(handler: (payload: { siteId: string; runId: string; step: MaintenanceStep }) => void): Promise<UnlistenFn> { if (!isTauri()) return () => undefined; return listen("maintenance-progress", (event) => handler(event.payload as { siteId: string; runId: string; step: MaintenanceStep })); },
 };

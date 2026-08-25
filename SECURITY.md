@@ -11,7 +11,7 @@ De app beheert gevoelige SSH-toegang tot meerdere websites. Belangrijkste risico
 - **Command injection:** er bestaat geen arbitrary-command-IPC. WordPress-paden, dagenwaarden en slugs worden centraal gevalideerd en POSIX-argumenten centraal ge-escaped.
 - **Tauri-grens:** de webview krijgt alleen core-permissies en toegang tot de native bestanddialoog. Er is geen shell- of generieke filesystempermissie. De CSP staat geen remote scripts, fonts of pagina-inhoud toe.
 - **Logging:** alleen site-id, catalogusactie, tijden, status en foutcategorie worden gelogd. Secrets en volledige remote output worden niet gelogd.
-- **Backups:** een zelf gegenereerde remote tijdelijke naam buiten de documentroot wordt na download verwijderd. Lokale backups worden gecomprimeerd en niet door Git gevolgd. Een mislukte backup stopt standaardonderhoud.
+- **Backups:** een zelf gegenereerde remote tijdelijke naam onder `/tmp` blijft buiten de documentroot. Alleen het strikte patroon `/tmp/wpmm-XXXXXXXX.sql` mag via de cleanupactie worden verwijderd. De export wordt via SFTP gestreamd, lokaal gecomprimeerd, begrensd op 20 GB en gehasht. Download én remote cleanup moeten slagen voordat updates starten; anders stopt standaardonderhoud.
 
 ## Scanbeperkingen
 

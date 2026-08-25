@@ -29,3 +29,5 @@ De Rust-backend wordt opgesplitst in domeinmodellen, SQLite-repositories, creden
 - Host-key-pinning is verplicht vóór authenticatie. Een gewijzigde fingerprint blokkeert de verbinding.
 - Remote scanoutput wordt begrensd en direct naar typed resultaten geparsed.
 - Een onderhoudsrun stopt vóór mutaties wanneer preflight of databasebackup faalt.
+- Database-export gebruikt uitsluitend een backend-gegenereerde naam onder `/tmp`, downloadt via SFTP naar een gzipbestand in de app-datamap en valideert het pad opnieuw voordat remote cleanup wordt toegestaan.
+- De homepagecheck volgt maximaal vijf redirects en rapporteert bereikbaarheid, HTTP-status en globale reactietijd zonder bredere beschikbaarheidsclaim.

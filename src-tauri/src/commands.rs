@@ -2,14 +2,16 @@ use crate::{
     command_catalog::{RemoteAction, RemoteCommand, build},
     engine,
     error::AppError,
+    maintenance,
     models::{
-        ConnectionStep, ConnectionTestResult, ScanResult, Site, SiteInput, SiteStatus, StepStatus,
-        StoredSite, UpdateItem,
+        ConnectionStep, ConnectionTestResult, MaintenanceRun, MaintenanceStep, ScanResult, Site,
+        SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem,
     },
     state::AppState,
     validation::validate_site,
 };
-use tauri::State;
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
 pub fn list_sites(state: State<'_, AppState>) -> Result<Vec<Site>, AppError> {
@@ -347,6 +349,79 @@ pub fn run_update(
         .database
         .update_versions(&site_id, wordpress.trim(), php.trim())?;
     Ok(())
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MaintenanceProgressEvent {
+    site_id: String,
+    run_id: String,
+    step: MaintenanceStep,
+}
+
+#[tauri::command]
+pub fn run_maintenance(
+    site_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<MaintenanceRun, AppError> {
+    let stored = state.database.get_site(&site_id)?;
+    let credential = stored_credential(&state, &stored)?;
+    let run = maintenance::new_run(&stored);
+    state.database.start_maintenance(&run)?;
+    let run_id = run.id.clone();
+    let event_site_id = site_id.clone();
+    let outcome = maintenance::execute(
+        state.ssh.as_ref(),
+        &stored,
+        credential.as_deref(),
+        &state.backup_directory,
+        run,
+        |step| {
+            state.database.update_maintenance_step(&run_id, step)?;
+            app.emit(
+                "maintenance-progress",
+                MaintenanceProgressEvent {
+                    site_id: event_site_id.clone(),
+                    run_id: run_id.clone(),
+                    step: step.clone(),
+                },
+            )
+            .map_err(AppError::storage)
+        },
+    )?;
+    for scan in &outcome.scans {
+        state
+            .database
+            .save_scan(&scan.result, &scan.security_status)?;
+        state
+            .database
+            .update_versions(&site_id, &scan.wordpress_version, &scan.php_version)?;
+    }
+    if outcome.run.before_versions.is_some() {
+        state
+            .database
+            .save_updates(&site_id, &outcome.updates_after)?;
+    }
+    let backup_values = outcome.backup.as_ref().map(|backup| {
+        (
+            backup.local_path.as_str(),
+            backup.size_bytes,
+            backup.sha256.as_str(),
+        )
+    });
+    state
+        .database
+        .finish_maintenance(&outcome.run, backup_values)?;
+    Ok(outcome.run)
+}
+
+#[tauri::command]
+pub fn list_maintenance_runs(
+    site_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<MaintenanceRun>, AppError> {
+    state.database.list_maintenance_runs(site_id.as_deref())
 }
 
 fn run_readonly(

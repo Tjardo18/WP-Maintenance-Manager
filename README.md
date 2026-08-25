@@ -2,7 +2,7 @@
 
 Een lokale, Nederlandstalige Windows-desktopapp voor veilig beheer en onderhoud van meerdere WordPress-websites via SSH en WP-CLI. De gebruiker kiest alleen vooraf gedefinieerde acties; de interface bevat geen terminal of vrij commandoveld.
 
-> Status: actieve MVP-ontwikkeling. Sitebeheer, secure SSH, securityscans, updatecontrole en bevestigde updates zijn aangesloten; backup en volledige onderhoudsrun volgen per milestone. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan rapporteren.
+> Status: functionele MVP in afronding. Sitebeheer, secure SSH, scans, updates, lokale databasebackups, volledige onderhoudsruns en historie zijn aangesloten. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan rapporteren.
 
 ## Ondersteunde omgeving
 
@@ -58,6 +58,8 @@ Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.app
 - Securityscan met corechecksums, accounts, PHP-inventaris, PHP in uploads, recente bestanden, world-writable permissions, geselecteerde configuratie en databasecheck.
 - WordPress-, plugin- en thema-updatecontrole via getypeerde JSON-parsers; teruggestuurde slugs worden opnieuw gevalideerd.
 - Bevestigde core-, plugin-, thema-, taal- en database-updates; status en versies worden na afloop opnieuw uitgelezen.
+- Volledige onderhoudspipeline met preflight, voorcontrole, verplichte databasebackup, updates, nacontrole en begrensde HTTP-homepagecheck.
+- Live onderhoudsstappen en persistente rapporten met voor/na-versies, waarschuwingen, failures en backupregistratie.
 - Detailweergave met Updates, Security, Gebruikers, Bestanden, Database, Onderhoud en Historie.
 - Bevestigingsdialogen voor iedere muterende actie.
 - Begrensde bulkscaninterface (maximaal vier gelijktijdige taken).

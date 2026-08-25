@@ -122,6 +122,17 @@ impl StepStatus {
             Self::Skipped => "skipped",
         }
     }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "running" => Self::Running,
+            "success" => Self::Success,
+            "warning" => Self::Warning,
+            "failed" => Self::Failed,
+            "skipped" => Self::Skipped,
+            _ => Self::Pending,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -227,4 +238,29 @@ pub struct UpdateItem {
     pub current_version: String,
     pub new_version: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceStep {
+    pub key: String,
+    pub label: String,
+    pub status: StepStatus,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceRun {
+    pub id: String,
+    pub site_id: String,
+    pub site_name: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub status: StepStatus,
+    pub duration_ms: Option<u64>,
+    pub backup_path: Option<String>,
+    pub steps: Vec<MaintenanceStep>,
+    pub before_versions: Option<String>,
+    pub after_versions: Option<String>,
 }
