@@ -1,21 +1,21 @@
 use crate::{
-    auth,
+    auth, checksum_files,
     command_catalog::{RemoteAction, RemoteCommand, build},
     engine,
     error::AppError,
     maintenance,
     models::{
         AppSettings, AuditEvent, AuthStatus, BulkScanFailure, BulkScanProgress, BulkScanResult,
-        ConnectionStep, ConnectionTestResult, LoginResult, MaintenanceRun, MaintenanceStep,
-        PasswordChangeInput, ScanResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite,
-        UpdateItem,
+        ChecksumDeleteFailure, ChecksumDeleteResult, ConnectionStep, ConnectionTestResult,
+        FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult,
+        Site, SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem,
     },
     state::AppState,
     validation::validate_site,
 };
 use serde::Serialize;
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     sync::{Arc, Mutex, atomic::Ordering},
 };
 use tauri::{AppHandle, Emitter, State};
@@ -480,6 +480,198 @@ pub fn list_scan_runs(
     state.database.list_scans(&site_id)
 }
 
+#[tauri::command]
+pub fn preview_checksum_finding(
+    session_token: String,
+    site_id: String,
+    finding_id: String,
+    state: State<'_, AppState>,
+) -> Result<FilePreview, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_checksum_ids(&site_id, std::slice::from_ref(&finding_id))?;
+    let stored = state.database.get_site(&site_id)?;
+    let record = state
+        .database
+        .current_unexpected_checksum_finding(&site_id, &finding_id)?;
+    let credential = stored_credential(&state, &stored)?;
+    checksum_files::preview(state.ssh.as_ref(), &stored, credential.as_deref(), &record)
+}
+
+#[tauri::command]
+pub fn delete_checksum_finding(
+    session_token: String,
+    site_id: String,
+    finding_id: String,
+    state: State<'_, AppState>,
+) -> Result<ChecksumDeleteResult, AppError> {
+    require_auth(&state, &session_token)?;
+    delete_checksum_findings_internal(&state, &site_id, vec![finding_id], false)
+}
+
+#[tauri::command]
+pub fn delete_checksum_findings(
+    session_token: String,
+    site_id: String,
+    finding_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<ChecksumDeleteResult, AppError> {
+    require_auth(&state, &session_token)?;
+    delete_checksum_findings_internal(&state, &site_id, finding_ids, true)
+}
+
+fn delete_checksum_findings_internal(
+    state: &AppState,
+    site_id: &str,
+    finding_ids: Vec<String>,
+    bulk: bool,
+) -> Result<ChecksumDeleteResult, AppError> {
+    if finding_ids.is_empty() || finding_ids.len() > 5_000 {
+        return Err(AppError::validation(
+            "Selecteer tussen 1 en 5.000 onverwachte checksum-bestanden.",
+        ));
+    }
+    validate_checksum_ids(site_id, &finding_ids)?;
+    let mut seen = HashSet::with_capacity(finding_ids.len());
+    let finding_ids: Vec<String> = finding_ids
+        .into_iter()
+        .filter(|finding_id| seen.insert(finding_id.clone()))
+        .collect();
+    let requested = finding_ids.len();
+    let stored = state.database.get_site(site_id)?;
+    let credential = stored_credential_from_state(state, &stored)?;
+    let mut deleted_paths = Vec::new();
+    let mut failures = Vec::new();
+
+    for finding_id in finding_ids {
+        let record = match state
+            .database
+            .current_unexpected_checksum_finding(site_id, &finding_id)
+        {
+            Ok(record) => record,
+            Err(error) => {
+                save_checksum_audit(
+                    state,
+                    site_id,
+                    "checksum_file_delete",
+                    &finding_id,
+                    "failed",
+                    &finding_id,
+                    &error.category,
+                );
+                failures.push(ChecksumDeleteFailure {
+                    finding_id,
+                    path: None,
+                    error,
+                });
+                continue;
+            }
+        };
+        let path = record.finding.path.clone();
+        match checksum_files::delete(state.ssh.as_ref(), &stored, credential.as_deref(), &record) {
+            Ok(deleted_path) => {
+                save_checksum_audit(
+                    state,
+                    site_id,
+                    "checksum_file_delete",
+                    &deleted_path,
+                    "success",
+                    &finding_id,
+                    "deleted",
+                );
+                deleted_paths.push(deleted_path);
+            }
+            Err(error) => {
+                save_checksum_audit(
+                    state,
+                    site_id,
+                    "checksum_file_delete",
+                    path.as_deref().unwrap_or(&finding_id),
+                    "failed",
+                    &finding_id,
+                    &error.category,
+                );
+                failures.push(ChecksumDeleteFailure {
+                    finding_id,
+                    path,
+                    error,
+                });
+            }
+        }
+    }
+
+    let (scan, rescan_error) = if deleted_paths.is_empty() {
+        (None, None)
+    } else {
+        match scan_site_internal(state, site_id, 30) {
+            Ok(scan) => (Some(scan), None),
+            Err(error) => (None, Some(error)),
+        }
+    };
+    if bulk {
+        let status = if failures.is_empty() && rescan_error.is_none() {
+            "success"
+        } else {
+            "failed"
+        };
+        let details = format!(
+            "requested={requested}; deleted={}; failures={}; rescan={}",
+            deleted_paths.len(),
+            failures.len(),
+            if rescan_error.is_some() {
+                "failed"
+            } else {
+                "complete"
+            }
+        );
+        if let Err(error) = state.database.save_audit_event(
+            Some(site_id),
+            "checksum_file_bulk_delete",
+            "unexpected_checksum_findings",
+            status,
+            Some(&details),
+        ) {
+            eprintln!("security audit write failed category={}", error.category);
+        }
+    }
+    Ok(ChecksumDeleteResult {
+        requested,
+        deleted: deleted_paths.len(),
+        deleted_paths,
+        failures,
+        scan,
+        rescan_error,
+    })
+}
+
+fn validate_checksum_ids(site_id: &str, finding_ids: &[String]) -> Result<(), AppError> {
+    uuid::Uuid::parse_str(site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    for finding_id in finding_ids {
+        uuid::Uuid::parse_str(finding_id)
+            .map_err(|_| AppError::validation("Een checksumfinding-id is ongeldig."))?;
+    }
+    Ok(())
+}
+
+fn save_checksum_audit(
+    state: &AppState,
+    site_id: &str,
+    action_type: &str,
+    target: &str,
+    status: &str,
+    finding_id: &str,
+    outcome: &str,
+) {
+    let details = format!("finding_id={finding_id}; outcome={outcome}");
+    if let Err(error) =
+        state
+            .database
+            .save_audit_event(Some(site_id), action_type, target, status, Some(&details))
+    {
+        eprintln!("security audit write failed category={}", error.category);
+    }
+}
+
 fn scan_site_internal(
     state: &AppState,
     site_id: &str,
@@ -918,5 +1110,172 @@ fn stored_credential_from_state(
     match stored.credential_ref.as_deref() {
         Some(reference) => state.credentials.get_optional(reference),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        auth::AuthManager,
+        credentials::CredentialVault,
+        database::Database,
+        models::{AuthMethod, ChecksumStatus, Finding, FindingSeverity, ScanCheck},
+        ssh::{ExecOutput, SshExecutor},
+    };
+    use std::{path::Path, sync::atomic::AtomicBool};
+    use uuid::Uuid;
+
+    #[derive(Default)]
+    struct CleanupMockSsh {
+        deleted: Mutex<Vec<String>>,
+    }
+
+    impl SshExecutor for CleanupMockSsh {
+        fn fingerprint(&self, _: &Site) -> Result<String, AppError> {
+            Ok("SHA256:test".into())
+        }
+
+        fn authenticate(&self, _: &Site, _: Option<&str>) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        fn execute(
+            &self,
+            _: &Site,
+            _: Option<&str>,
+            command: &RemoteCommand,
+        ) -> Result<ExecOutput, AppError> {
+            let stdout = match command.action_name {
+                "GetWordPressVersion" => b"6.8.2\n".to_vec(),
+                "GetPhpVersion" => b"8.3.12\n".to_vec(),
+                "VerifyCoreChecksums" => {
+                    b"Success: WordPress installation verifies against checksums.\n".to_vec()
+                }
+                "ListUsers" | "CheckCoreUpdates" | "ListPluginUpdates"
+                | "ListThemeUpdates" => b"[]".to_vec(),
+                "CheckSelectedWpConfigConstants" => b"{\"WP_DEBUG\":false,\"DISALLOW_FILE_EDIT\":true,\"WP_ENVIRONMENT_TYPE\":\"production\"}".to_vec(),
+                _ => Vec::new(),
+            };
+            Ok(ExecOutput {
+                stdout,
+                stderr: Vec::new(),
+                exit_code: 0,
+            })
+        }
+
+        fn download(&self, _: &Site, _: Option<&str>, _: &str, _: &Path) -> Result<u64, AppError> {
+            Ok(0)
+        }
+
+        fn delete_checksum_file(
+            &self,
+            _: &Site,
+            _: Option<&str>,
+            relative_path: &str,
+        ) -> Result<(), AppError> {
+            if relative_path.ends_with("locked.php") {
+                return Err(AppError::ssh(
+                    "sftp_delete",
+                    "Het checksum-bestand kon niet worden verwijderd.",
+                    "permission denied",
+                    false,
+                ));
+            }
+            self.deleted
+                .lock()
+                .map_err(|_| AppError::storage("delete lock poisoned"))?
+                .push(relative_path.into());
+            Ok(())
+        }
+    }
+
+    fn site_input() -> SiteInput {
+        SiteInput {
+            id: Some(Uuid::new_v4().to_string()),
+            name: "Testsite".into(),
+            url: "https://example.test".into(),
+            ssh_host: "example.test".into(),
+            ssh_port: 22,
+            ssh_username: "deploy".into(),
+            auth_method: AuthMethod::KeyFile,
+            key_path: Some("C:\\keys\\id_ed25519".into()),
+            wordpress_path: "/srv/site".into(),
+            credential_secret: None,
+        }
+    }
+
+    #[test]
+    fn bulk_cleanup_reports_partial_failure_and_rescans_once() {
+        let temp = std::env::temp_dir().join(format!("wpmm-cleanup-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        let site = database.save_site(&site_input(), None).unwrap();
+        let first_id = Uuid::new_v4().to_string();
+        let second_id = Uuid::new_v4().to_string();
+        let finding = |id: String, path: &str| Finding {
+            id: Some(id),
+            category: "wordpress-core-unexpected".into(),
+            severity: FindingSeverity::Attention,
+            title: "Hoort niet aanwezig te zijn".into(),
+            detail: "File should not exist".into(),
+            path: Some(path.into()),
+            checksum_status: Some(ChecksumStatus::Unexpected),
+            observed_at: Some("2026-08-31T10:00:00Z".into()),
+        };
+        database
+            .save_scan(
+                &ScanResult {
+                    id: Uuid::new_v4().to_string(),
+                    site_id: site.id.clone(),
+                    started_at: "2026-08-31T10:00:00Z".into(),
+                    finished_at: "2026-08-31T10:00:01Z".into(),
+                    status: SiteStatus::Attention,
+                    checks: vec![ScanCheck {
+                        key: "core_checksum".into(),
+                        label: "WordPress core".into(),
+                        status: StepStatus::Warning,
+                        summary: "2 onverwachte bestanden".into(),
+                        findings: vec![
+                            finding(first_id.clone(), "wp-admin/delete.php"),
+                            finding(second_id.clone(), "wp-admin/locked.php"),
+                        ],
+                    }],
+                    truncated: false,
+                },
+                "Aandacht nodig",
+            )
+            .unwrap();
+        let ssh = Arc::new(CleanupMockSsh::default());
+        let state = AppState {
+            database: database.clone(),
+            credentials: CredentialVault,
+            ssh: ssh.clone(),
+            backup_directory: temp.join("backups"),
+            scan_concurrency: std::sync::atomic::AtomicUsize::new(1),
+            bulk_scan_cancelled: Arc::new(AtomicBool::new(false)),
+            auth: AuthManager::default(),
+        };
+
+        let result =
+            delete_checksum_findings_internal(&state, &site.id, vec![first_id, second_id], true)
+                .unwrap();
+        assert_eq!(result.requested, 2);
+        assert_eq!(result.deleted, 1);
+        assert_eq!(result.failures.len(), 1);
+        assert!(result.scan.is_some());
+        assert_eq!(
+            ssh.deleted.lock().unwrap().as_slice(),
+            ["wp-admin/delete.php"]
+        );
+        assert_eq!(database.list_scans(&site.id).unwrap().len(), 2);
+        assert!(
+            database
+                .list_audit_events(Some(&site.id))
+                .unwrap()
+                .iter()
+                .any(|event| event.action_type == "checksum_file_bulk_delete")
+        );
+
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
     }
 }

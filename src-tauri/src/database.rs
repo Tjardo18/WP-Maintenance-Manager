@@ -1,9 +1,9 @@
 use crate::{
     error::AppError,
     models::{
-        AuditEvent, AuthConfig, AuthMethod, ChecksumStatus, Finding, FindingSeverity,
-        MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus,
-        StepStatus, StoredSite, UpdateItem,
+        AuditEvent, AuthConfig, AuthMethod, ChecksumFindingRecord, ChecksumStatus, Finding,
+        FindingSeverity, MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput,
+        SiteStatus, StepStatus, StoredSite, UpdateItem,
     },
 };
 use chrono::{SecondsFormat, Utc};
@@ -192,6 +192,49 @@ impl Database {
 
     pub fn list_scans(&self, site_id: &str) -> Result<Vec<ScanResult>, AppError> {
         self.list_scans_with_limit(site_id, 50)
+    }
+
+    pub fn current_unexpected_checksum_finding(
+        &self,
+        site_id: &str,
+        finding_id: &str,
+    ) -> Result<ChecksumFindingRecord, AppError> {
+        let connection = self.connect()?;
+        connection
+            .query_row(
+                "SELECT f.id,f.site_id,f.scan_run_id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at
+                 FROM findings f
+                 JOIN scan_checks sc ON sc.id=f.scan_check_id
+                 WHERE f.id=?1 AND f.site_id=?2 AND f.checksum_status='unexpected' AND sc.check_key='core_checksum'
+                   AND f.scan_run_id=(
+                     SELECT sr.id FROM scan_runs sr
+                     JOIN scan_checks latest_check ON latest_check.scan_run_id=sr.id AND latest_check.check_key='core_checksum'
+                     WHERE sr.site_id=?2
+                     ORDER BY sr.started_at DESC,sr.rowid DESC LIMIT 1
+                   )",
+                params![finding_id, site_id],
+                |row| {
+                    Ok(ChecksumFindingRecord {
+                        site_id: row.get(1)?,
+                        scan_run_id: row.get(2)?,
+                        finding: Finding {
+                            id: row.get(0)?,
+                            category: row.get(3)?,
+                            severity: FindingSeverity::from_db(&row.get::<_, String>(4)?),
+                            title: row.get(5)?,
+                            detail: row.get(6)?,
+                            path: row.get(7)?,
+                            checksum_status: row
+                                .get::<_, Option<String>>(8)?
+                                .as_deref()
+                                .and_then(ChecksumStatus::from_db),
+                            observed_at: row.get(9)?,
+                        },
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Actuele onverwachte checksumfinding"))
     }
 
     fn list_scans_with_limit(
@@ -596,8 +639,8 @@ mod tests {
             finished_at: "2026-08-25T10:00:01.000Z".into(),
             status: SiteStatus::Attention,
             checks: vec![ScanCheck {
-                key: "users".into(),
-                label: "Gebruikers".into(),
+                key: "core_checksum".into(),
+                label: "WordPress core".into(),
                 status: StepStatus::Warning,
                 summary: "Eén aandachtspunt".into(),
                 findings: vec![Finding {
@@ -619,6 +662,35 @@ mod tests {
         assert_eq!(restored.id, scan.id);
         assert_eq!(restored.checks[0].findings, scan.checks[0].findings);
         assert_eq!(database.list_scans(&site.id).unwrap().len(), 1);
+        let current = database
+            .current_unexpected_checksum_finding(&site.id, "finding-test")
+            .unwrap();
+        assert_eq!(current.site_id, site.id);
+        assert!(
+            database
+                .current_unexpected_checksum_finding("another-site", "finding-test")
+                .is_err()
+        );
+
+        let mut newer_scan = scan.clone();
+        newer_scan.id = Uuid::new_v4().to_string();
+        newer_scan.started_at = "2026-08-25T11:00:00.000Z".into();
+        newer_scan.finished_at = "2026-08-25T11:00:01.000Z".into();
+        newer_scan.checks[0].findings[0].id = Some("modified-finding".into());
+        newer_scan.checks[0].findings[0].checksum_status = Some(ChecksumStatus::Modified);
+        database
+            .save_scan(&newer_scan, "Probleem gevonden")
+            .unwrap();
+        assert!(
+            database
+                .current_unexpected_checksum_finding(&site.id, "finding-test")
+                .is_err()
+        );
+        assert!(
+            database
+                .current_unexpected_checksum_finding(&site.id, "modified-finding")
+                .is_err()
+        );
 
         drop(database);
         let _ = fs::remove_file(path);

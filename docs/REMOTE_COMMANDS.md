@@ -9,7 +9,7 @@ Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandos
 | GetWordPressVersion | Coreversie ophalen | Nee | pad | tekst | 20 s | laag |
 | GetPhpVersion | PHP-versie ophalen | Nee | geen | tekst | 20 s | laag |
 | GetWpCliInfo | WP-CLI-versie ophalen | Nee | geen | tekst | 20 s | laag |
-| VerifyCoreChecksums | Officiële core checksums | Nee | pad | exitstatus/regels | 120 s | serverbelasting |
+| VerifyCoreChecksums | Officiële core checksums inclusief root | Nee | expliciet pad, `core is-installed`, `--include-root` | JSON + exitstatus | 120 s | serverbelasting |
 | ListUsers | Accounts en rollen | Nee | pad, vaste velden | JSON | 60 s | privacy; niet loggen |
 | FindPhpFiles | PHP-inventaris in wp-content | Nee | pad, vaste limiet | NUL-records | 120 s | grote output |
 | FindPhpInUploads | PHP in uploads | Nee | pad, vaste limiet | NUL-paden | 120 s | grote output |
@@ -32,3 +32,15 @@ Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandos
 | UpdateDatabase | WordPress databaseschema | Ja | pad | tekst | 300 s | databasewijziging |
 
 Commands draaien met `LC_ALL=C` voor stabiele parsing. Stderr en exitstatus blijven gescheiden. Time-outs sluiten het kanaal en iedere SSH-sessie wordt altijd opgeruimd.
+
+## Begrensde SFTP-acties
+
+De volgende typed backendacties zijn bewust geen shellcommando en vormen geen algemene filemanager:
+
+| Actie | Invoer vanuit frontend | Backend-authorisatie | Bestandstype/limiet |
+|---|---|---|---|
+| PreviewChecksumFinding | `site_id`, `finding_id` | Alleen een `unexpected` finding uit de nieuwste checksumscan van die site | Regulier bestand, alleen-lezen, maximaal 256 KB |
+| DeleteChecksumFinding | `site_id`, `finding_id` | Zelfde controle; het pad komt uitsluitend uit de database | Regulier bestand, één unlink via SFTP |
+| DeleteChecksumFindings | `site_id`, lijst finding-id's | Iedere finding wordt afzonderlijk gevalideerd en gelogd | Maximaal 5.000 reguliere bestanden, gedeeltelijk resultaat |
+
+Voor iedere SFTP-actie wordt de canonieke WordPress-root bepaald, blijft het canonieke doel daar strikt onder en worden symlinks, mappen, traversal, `wp-content` en configuratiepaden geweigerd. De metadata wordt nogmaals gecontroleerd vlak vóór openen of verwijderen. Na één of meer geslaagde verwijderingen volgt één nieuwe scan. Bestandinhoud en credentials komen nooit in auditlogs.

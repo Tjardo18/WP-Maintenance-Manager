@@ -272,6 +272,47 @@ pub struct Finding {
     pub observed_at: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChecksumFindingRecord {
+    pub site_id: String,
+    pub scan_run_id: String,
+    pub finding: Finding,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePreview {
+    pub finding: Finding,
+    pub file_name: String,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub modified_at: Option<String>,
+    pub file_type: String,
+    pub extension: Option<String>,
+    pub text_content: Option<String>,
+    pub binary: bool,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecksumDeleteFailure {
+    pub finding_id: String,
+    pub path: Option<String>,
+    pub error: crate::error::AppError,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecksumDeleteResult {
+    pub requested: usize,
+    pub deleted: usize,
+    pub deleted_paths: Vec<String>,
+    pub failures: Vec<ChecksumDeleteFailure>,
+    pub scan: Option<ScanResult>,
+    pub rescan_error: Option<crate::error::AppError>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanCheck {

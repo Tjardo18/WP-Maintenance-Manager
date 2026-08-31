@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanProgress, BulkScanResult, ConnectionTestResult, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput, UpdateItem } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanProgress, BulkScanResult, ChecksumDeleteResult, ConnectionTestResult, FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput, UpdateItem } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -57,6 +57,9 @@ export const appApi = {
   async acceptHostKey(siteId: string, fingerprint: string): Promise<void> { if (isTauri()) await call("accept_host_key", { siteId, fingerprint }); },
   async scanSite(siteId: string, modifiedDays = 30): Promise<ScanResult> { return isTauri() ? call("scan_site", { siteId, modifiedDays }) : { ...structuredClone(demoScan), id: crypto.randomUUID(), siteId }; },
   async listScans(siteId: string): Promise<ScanResult[]> { return isTauri() ? call("list_scan_runs", { siteId }) : [{ ...structuredClone(demoScan), siteId }]; },
+  async previewChecksumFinding(siteId: string, findingId: string): Promise<FilePreview> { if (isTauri()) return call("preview_checksum_finding", { siteId, findingId }); const finding = demoScan.checks.flatMap((check) => check.findings).find((item) => item.id === findingId); if (!finding?.path) throw new Error("Checksumfinding niet gevonden."); const parts = finding.path.split("/"); return { finding: structuredClone(finding), fileName: parts[parts.length - 1] ?? finding.path, relativePath: finding.path, sizeBytes: 54, modifiedAt: new Date().toISOString(), fileType: "php-bestand", extension: "php", textContent: "<script>alert('preview wordt als tekst getoond')</script>\n<?php // demo ?>", binary: false, truncated: false }; },
+  async deleteChecksumFinding(siteId: string, findingId: string): Promise<ChecksumDeleteResult> { if (isTauri()) return call("delete_checksum_finding", { siteId, findingId }); const path = demoScan.checks.flatMap((check) => check.findings).find((item) => item.id === findingId)?.path; return { requested: 1, deleted: path ? 1 : 0, deletedPaths: path ? [path] : [], failures: [], scan: { ...structuredClone(demoScan), siteId } }; },
+  async deleteChecksumFindings(siteId: string, findingIds: string[]): Promise<ChecksumDeleteResult> { if (isTauri()) return call("delete_checksum_findings", { siteId, findingIds }); const paths = demoScan.checks.flatMap((check) => check.findings).filter((item) => item.id && findingIds.includes(item.id)).flatMap((item) => item.path ? [item.path] : []); return { requested: findingIds.length, deleted: paths.length, deletedPaths: paths, failures: [], scan: { ...structuredClone(demoScan), siteId } }; },
   async checkUpdates(siteId: string): Promise<UpdateItem[]> { return isTauri() ? call("check_updates", { siteId }) : structuredClone(demoUpdates); },
   async runUpdate(siteId: string, kind: string, slug?: string): Promise<void> { if (isTauri()) await call("run_update", { siteId, kind, slug }); else await new Promise((resolve) => setTimeout(resolve, 700)); },
   async runMaintenance(siteId: string): Promise<MaintenanceRun> { return isTauri() ? call("run_maintenance", { siteId }) : { ...structuredClone(demoHistory[0]), id: crypto.randomUUID(), siteId }; },

@@ -53,6 +53,9 @@ export interface ConnectionTestResult {
 export interface ScanCheck { key: string; label: string; status: StepStatus; summary: string; findings: Finding[] }
 export type ChecksumStatus = "modified" | "missing" | "unexpected" | "scan_error";
 export interface Finding { id?: string; category: string; severity: "info" | "attention" | "problem"; title: string; detail: string; path?: string; checksumStatus?: ChecksumStatus; observedAt?: string }
+export interface FilePreview { finding: Finding; fileName: string; relativePath: string; sizeBytes: number; modifiedAt?: string; fileType: string; extension?: string; textContent?: string; binary: boolean; truncated: boolean }
+export interface ChecksumDeleteFailure { findingId: string; path?: string; error: TechnicalError }
+export interface ChecksumDeleteResult { requested: number; deleted: number; deletedPaths: string[]; failures: ChecksumDeleteFailure[]; scan?: ScanResult; rescanError?: TechnicalError }
 export interface ScanResult { id: string; siteId: string; startedAt: string; finishedAt: string; status: SiteStatus; checks: ScanCheck[]; truncated: boolean }
 export interface UpdateItem { kind: "core" | "plugin" | "theme" | "language"; slug: string; name: string; currentVersion: string; newVersion: string; status: string }
 export interface MaintenanceStep { key: string; label: string; status: StepStatus; detail?: string }

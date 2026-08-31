@@ -19,7 +19,7 @@ export const demoUpdates: UpdateItem[] = [
 export const demoScan: ScanResult = {
   id: "scan-demo", siteId: "demo-1", startedAt: isoAgo(3), finishedAt: isoAgo(3), status: "updates", truncated: false,
   checks: [
-    { key: "core_checksum", label: "WordPress core", status: "success", summary: "Officiële corebestanden komen overeen.", findings: [] },
+    { key: "core_checksum", label: "WordPress core", status: "warning", summary: "Gewijzigd: 0 · Ontbreekt: 0 · Hoort niet aanwezig te zijn: 1 · Scanmeldingen: 0", findings: [{ id: "27f602cb-a50e-4b86-8220-a4f05b09a83a", category: "wordpress-core-unexpected", severity: "attention", title: "Hoort niet aanwezig te zijn", detail: "File should not exist", path: "wp-admin/cache-old.php", checksumStatus: "unexpected", observedAt: isoAgo(3) }] },
     { key: "users", label: "Gebruikersaccounts", status: "success", summary: "5 accounts gevonden, waarvan 2 beheerders.", findings: [] },
     { key: "php_uploads", label: "PHP in uploads", status: "warning", summary: "1 bestand vraagt aandacht.", findings: [{ category: "uploads", severity: "attention", title: "PHP-bestand gevonden in uploads", detail: "PHP-bestanden horen normaal niet in de uploadmap. Controleer het bestand voordat je actie onderneemt.", path: "wp-content/uploads/cache/legacy.php" }] },
     { key: "permissions", label: "Bestandsrechten", status: "success", summary: "Geen world-writable bestanden gevonden.", findings: [] },

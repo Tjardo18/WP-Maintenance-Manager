@@ -101,6 +101,22 @@ pub fn validate_checksum_relative_path(path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn validate_checksum_file_action_path(path: &str) -> Result<(), AppError> {
+    validate_checksum_relative_path(path)?;
+    let lower = path.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "wp-config.php" | ".env" | ".htaccess" | ".maintenance"
+    ) || lower == "wp-content"
+        || lower.starts_with("wp-content/")
+    {
+        return Err(AppError::validation(
+            "Dit configuratie- of contentpad mag niet via een checksumactie worden geopend of verwijderd.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_slug(slug: &str) -> Result<(), AppError> {
     if slug.is_empty()
         || slug.len() > 200
@@ -143,6 +159,13 @@ mod tests {
         assert!(validate_checksum_relative_path("../wp-config.php").is_err());
         assert!(validate_checksum_relative_path("wp-admin/../../etc/passwd").is_err());
         assert!(validate_checksum_relative_path("/etc/passwd").is_err());
+    }
+    #[test]
+    fn protects_configuration_and_content_from_checksum_file_actions() {
+        assert!(validate_checksum_file_action_path("wp-admin/extra.php").is_ok());
+        assert!(validate_checksum_file_action_path("wp-config.php").is_err());
+        assert!(validate_checksum_file_action_path("wp-content/cache/file.php").is_err());
+        assert!(validate_checksum_file_action_path(".env").is_err());
     }
     #[test]
     fn rejects_shell_metacharacters_in_hosts() {
