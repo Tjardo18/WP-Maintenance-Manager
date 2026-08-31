@@ -1,14 +1,15 @@
 use crate::{
     auth, checksum_files,
     command_catalog::{RemoteAction, RemoteCommand, build},
-    engine,
+    core_operations, engine,
     error::AppError,
     maintenance,
     models::{
         AppSettings, AuditEvent, AuthStatus, BulkScanFailure, BulkScanProgress, BulkScanResult,
         ChecksumDeleteFailure, ChecksumDeleteResult, ConnectionStep, ConnectionTestResult,
-        FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult,
-        Site, SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem, WordPressUserDeleteInput,
+        CoreOperationInfo, CoreOperationKind, CoreOperationResult, FilePreview, LoginResult,
+        MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput,
+        SiteStatus, StepStatus, StoredSite, UpdateItem, WordPressUserDeleteInput,
         WordPressUserUpdateInput, WordPressUsersData,
     },
     state::AppState,
@@ -1004,6 +1005,11 @@ pub fn run_update(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     require_auth(&state, &session_token)?;
+    if matches!(kind.as_str(), "core" | "all") {
+        return Err(AppError::validation(
+            "Gebruik voor WordPress core de beveiligde core-updateflow met preflight, backup en nacontrole.",
+        ));
+    }
     let stored = state.database.get_site(&site_id)?;
     let credential = stored_credential(&state, &stored)?;
     engine::run_update(
@@ -1039,6 +1045,132 @@ struct MaintenanceProgressEvent {
     site_id: String,
     run_id: String,
     step: MaintenanceStep,
+}
+
+#[tauri::command]
+pub fn inspect_core_operation(
+    session_token: String,
+    site_id: String,
+    state: State<'_, AppState>,
+) -> Result<CoreOperationInfo, AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    let stored = state.database.get_site(&site_id)?;
+    let credential = stored_credential(&state, &stored)?;
+    core_operations::inspect(state.ssh.as_ref(), &stored, credential.as_deref())
+}
+
+#[tauri::command]
+pub fn repair_wordpress_core(
+    session_token: String,
+    site_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CoreOperationResult, AppError> {
+    require_auth(&state, &session_token)?;
+    run_core_operation(&app, &state, &site_id, CoreOperationKind::Repair)
+}
+
+#[tauri::command]
+pub fn update_wordpress_core(
+    session_token: String,
+    site_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CoreOperationResult, AppError> {
+    require_auth(&state, &session_token)?;
+    run_core_operation(&app, &state, &site_id, CoreOperationKind::Update)
+}
+
+fn run_core_operation(
+    app: &AppHandle,
+    state: &AppState,
+    site_id: &str,
+    kind: CoreOperationKind,
+) -> Result<CoreOperationResult, AppError> {
+    uuid::Uuid::parse_str(site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    let stored = state.database.get_site(site_id)?;
+    let credential = stored_credential_from_state(state, &stored)?;
+    let run = core_operations::new_run(&stored, kind);
+    state.database.start_maintenance(&run)?;
+    let run_id = run.id.clone();
+    let event_site_id = site_id.to_owned();
+    let outcome = core_operations::execute(
+        state.ssh.as_ref(),
+        &stored,
+        credential.as_deref(),
+        &state.backup_directory,
+        kind,
+        run,
+        |step| {
+            state.database.update_maintenance_step(&run_id, step)?;
+            app.emit(
+                "maintenance-progress",
+                MaintenanceProgressEvent {
+                    site_id: event_site_id.clone(),
+                    run_id: run_id.clone(),
+                    step: step.clone(),
+                },
+            )
+            .map_err(AppError::storage)
+        },
+    )?;
+    if let Some(scan) = &outcome.scan {
+        state
+            .database
+            .save_scan(&scan.result, &scan.security_status)?;
+        state
+            .database
+            .update_versions(site_id, &scan.wordpress_version, &scan.php_version)?;
+    }
+    let updates_refreshed = outcome.run.steps.iter().any(|step| {
+        step.key == "updates" && matches!(step.status, StepStatus::Success | StepStatus::Warning)
+    });
+    if updates_refreshed {
+        state
+            .database
+            .save_updates(site_id, &outcome.updates_after)?;
+    }
+    let backup_values = outcome.backup.as_ref().map(|backup| {
+        (
+            backup.local_path.as_str(),
+            backup.size_bytes,
+            backup.sha256.as_str(),
+        )
+    });
+    state
+        .database
+        .finish_maintenance(&outcome.run, backup_values)?;
+    let action_type = match kind {
+        CoreOperationKind::Repair => "wordpress_core_repair",
+        CoreOperationKind::Update => "wordpress_core_update",
+    };
+    let audit_status = if outcome.run.status == StepStatus::Failed {
+        "failed"
+    } else {
+        "success"
+    };
+    let audit_details = format!(
+        "run_id={}; result={:?}; version={}",
+        outcome.run.id, outcome.run.status, outcome.current_version
+    );
+    if let Err(error) = state.database.save_audit_event(
+        Some(site_id),
+        action_type,
+        "wordpress_core",
+        audit_status,
+        Some(&audit_details),
+    ) {
+        eprintln!("security audit write failed category={}", error.category);
+    }
+    Ok(CoreOperationResult {
+        run: outcome.run,
+        scan: outcome.scan.map(|scan| scan.result),
+        updates_after: outcome.updates_after,
+        current_version: outcome.current_version,
+    })
 }
 
 #[tauri::command]

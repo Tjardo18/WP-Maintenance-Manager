@@ -3,6 +3,7 @@ mod backup;
 mod checksum_files;
 mod command_catalog;
 mod commands;
+mod core_operations;
 mod credentials;
 mod database;
 mod engine;
@@ -70,6 +71,9 @@ pub fn run() {
             commands::update_wordpress_user,
             commands::delete_wordpress_user,
             commands::run_update,
+            commands::inspect_core_operation,
+            commands::repair_wordpress_core,
+            commands::update_wordpress_core,
             commands::run_maintenance,
             commands::list_maintenance_runs
         ])

@@ -171,6 +171,36 @@ pub fn validate_role(role: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn validate_wordpress_version(version: &str) -> Result<(), AppError> {
+    if version.is_empty()
+        || version.eq_ignore_ascii_case("latest")
+        || version.len() > 50
+        || !version.as_bytes()[0].is_ascii_digit()
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(AppError::validation(
+            "De gedetecteerde WordPress-versie is ongeldig voor deze coreactie.",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_wordpress_locale(locale: &str) -> Result<(), AppError> {
+    if locale.is_empty()
+        || locale.len() > 50
+        || !locale
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'@'))
+    {
+        return Err(AppError::validation(
+            "De gedetecteerde WordPress-locale is ongeldig voor deze coreactie.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_days(days: u16) -> Result<(), AppError> {
     if !(1..=365).contains(&days) {
         return Err(AppError::validation(
@@ -228,6 +258,16 @@ mod tests {
         assert!(validate_email("not an email").is_err());
         assert!(validate_role("shop_manager").is_ok());
         assert!(validate_role("administrator;id").is_err());
+    }
+    #[test]
+    fn validates_detected_core_version_and_locale() {
+        assert!(validate_wordpress_version("6.8.2").is_ok());
+        assert!(validate_wordpress_version("7.0-RC1").is_ok());
+        assert!(validate_wordpress_version("latest").is_err());
+        assert!(validate_wordpress_version("6.8;reboot").is_err());
+        assert!(validate_wordpress_locale("nl_NL").is_ok());
+        assert!(validate_wordpress_locale("de_DE_formal").is_ok());
+        assert!(validate_wordpress_locale("nl_NL;id").is_err());
     }
     #[test]
     fn bounds_modified_days() {

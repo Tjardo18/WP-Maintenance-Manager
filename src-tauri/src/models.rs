@@ -356,6 +356,32 @@ pub struct WordPressUserDeleteInput {
     pub delete_content: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreOperationKind {
+    Repair,
+    Update,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreOperationInfo {
+    pub current_version: String,
+    pub locale: String,
+    pub wordpress_path: String,
+    pub available_version: Option<String>,
+    pub disk_available_mb: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreOperationResult {
+    pub run: MaintenanceRun,
+    pub scan: Option<ScanResult>,
+    pub updates_after: Vec<UpdateItem>,
+    pub current_version: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanCheck {

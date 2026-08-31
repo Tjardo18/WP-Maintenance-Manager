@@ -2,7 +2,8 @@ use crate::{
     error::AppError,
     validation::{
         validate_days, validate_display_name, validate_email, validate_role, validate_slug,
-        validate_user_id, validate_wordpress_path,
+        validate_user_id, validate_wordpress_locale, validate_wordpress_path,
+        validate_wordpress_version,
     },
 };
 use std::time::Duration;
@@ -19,6 +20,8 @@ pub enum RemoteAction {
     GetPhpVersion,
     GetWpCliVersion,
     GetSiteUrl,
+    GetCoreLocale,
+    CheckDiskSpace,
     VerifyCoreChecksums,
     ListUsers,
     ListRoles,
@@ -50,6 +53,13 @@ pub enum RemoteAction {
         path: String,
     },
     UpdateCore,
+    UpdateCoreTo {
+        version: String,
+    },
+    RepairCore {
+        version: String,
+        locale: String,
+    },
     UpdatePlugin {
         slug: String,
     },
@@ -59,6 +69,7 @@ pub enum RemoteAction {
     },
     UpdateAllThemes,
     UpdateLanguages,
+    UpdateCoreLanguages,
     UpdateDatabase,
 }
 
@@ -117,6 +128,20 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         RemoteAction::GetSiteUrl => (
             "GetSiteUrl",
             format!("{wp} option get siteurl"),
+            false,
+            normal,
+            16 * 1024,
+        ),
+        RemoteAction::GetCoreLocale => (
+            "GetCoreLocale",
+            format!("{wp} eval {}", shell_escape("echo determine_locale();")),
+            false,
+            normal,
+            16 * 1024,
+        ),
+        RemoteAction::CheckDiskSpace => (
+            "CheckDiskSpace",
+            format!("df -Pk {path} | awk 'NR==2 {{print $4}}'"),
             false,
             normal,
             16 * 1024,
@@ -327,6 +352,34 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
             update,
             2 * 1024 * 1024,
         ),
+        RemoteAction::UpdateCoreTo { version } => {
+            validate_wordpress_version(&version)?;
+            (
+                "UpdateCoreTo",
+                format!(
+                    "{wp} core update --version={} --format=json",
+                    shell_escape(&version)
+                ),
+                true,
+                update,
+                2 * 1024 * 1024,
+            )
+        }
+        RemoteAction::RepairCore { version, locale } => {
+            validate_wordpress_version(&version)?;
+            validate_wordpress_locale(&locale)?;
+            (
+                "RepairCore",
+                format!(
+                    "{wp} core download --version={} --locale={} --force --skip-content",
+                    shell_escape(&version),
+                    shell_escape(&locale)
+                ),
+                true,
+                update,
+                2 * 1024 * 1024,
+            )
+        }
         RemoteAction::UpdatePlugin { slug } => {
             validate_slug(&slug)?;
             (
@@ -366,6 +419,13 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
             format!(
                 "{wp} language core update && {wp} language plugin update --all && {wp} language theme update --all"
             ),
+            true,
+            Duration::from_secs(300),
+            2 * 1024 * 1024,
+        ),
+        RemoteAction::UpdateCoreLanguages => (
+            "UpdateCoreLanguages",
+            format!("{wp} language core update"),
             true,
             Duration::from_secs(300),
             2 * 1024 * 1024,
@@ -527,5 +587,45 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn repair_uses_exact_current_version_locale_root_and_preserves_content() {
+        let command = build(
+            "/srv/wordpress site",
+            RemoteAction::RepairCore {
+                version: "6.8.2".into(),
+                locale: "nl_NL".into(),
+            },
+        )
+        .unwrap();
+        assert!(command.command.contains("--path='/srv/wordpress site'"));
+        assert!(command.command.contains("--version='6.8.2'"));
+        assert!(command.command.contains("--locale='nl_NL'"));
+        assert!(command.command.contains("--force"));
+        assert!(command.command.contains("--skip-content"));
+        assert!(!command.command.contains("latest"));
+        assert!(!command.command.contains("rm "));
+        assert!(
+            build(
+                "/srv/site",
+                RemoteAction::RepairCore {
+                    version: "latest".into(),
+                    locale: "nl_NL".into()
+                }
+            )
+            .is_err()
+        );
+
+        let update = build(
+            "/srv/wordpress site",
+            RemoteAction::UpdateCoreTo {
+                version: "6.9.0".into(),
+            },
+        )
+        .unwrap();
+        assert!(update.command.contains("--path='/srv/wordpress site'"));
+        assert!(update.command.contains("--version='6.9.0'"));
+        assert!(!update.command.contains("latest"));
     }
 }

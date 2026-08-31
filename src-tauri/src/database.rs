@@ -708,4 +708,44 @@ mod tests {
         drop(database);
         let _ = fs::remove_file(path);
     }
+
+    #[test]
+    fn persists_core_operation_in_maintenance_history() {
+        let path = std::env::temp_dir().join(format!("wpmm-test-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let site = database.save_site(&input(), None).unwrap();
+        let stored = database.get_site(&site.id).unwrap();
+        let mut run =
+            crate::core_operations::new_run(&stored, crate::models::CoreOperationKind::Repair);
+
+        database.start_maintenance(&run).unwrap();
+        for step in &mut run.steps {
+            step.status = StepStatus::Success;
+            step.detail = Some("Teststap voltooid.".into());
+            database.update_maintenance_step(&run.id, step).unwrap();
+        }
+        run.status = StepStatus::Success;
+        run.finished_at = Some("2026-08-31T12:00:00.000Z".into());
+        run.duration_ms = Some(1_250);
+        run.before_versions = Some("WordPress 6.8.2".into());
+        run.after_versions = Some("WordPress 6.8.2".into());
+        database.finish_maintenance(&run, None).unwrap();
+
+        let restored = database
+            .list_maintenance_runs(Some(&site.id))
+            .unwrap()
+            .remove(0);
+        assert_eq!(restored.id, run.id);
+        assert_eq!(restored.status, StepStatus::Success);
+        assert_eq!(restored.steps.len(), run.steps.len());
+        assert_eq!(restored.steps[0].key, "preflight");
+        assert_eq!(restored.steps[2].key, "repair");
+        assert!(restored.steps.iter().all(|step| {
+            step.status == StepStatus::Success
+                && step.detail.as_deref() == Some("Teststap voltooid.")
+        }));
+
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
 }

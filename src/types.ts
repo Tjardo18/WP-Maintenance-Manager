@@ -61,6 +61,9 @@ export interface WordPressRole { role: string; name: string }
 export interface WordPressUsersData { users: WordPressUser[]; roles: WordPressRole[]; multisite: boolean }
 export interface WordPressUserUpdateInput { userId: number; displayName: string; email: string; role?: string }
 export interface WordPressUserDeleteInput { userId: number; reassignTo?: number; deleteContent: boolean }
+export type CoreOperationKind = "repair" | "update";
+export interface CoreOperationInfo { currentVersion: string; locale: string; wordpressPath: string; availableVersion?: string; diskAvailableMb: number }
+export interface CoreOperationResult { run: MaintenanceRun; scan?: ScanResult; updatesAfter: UpdateItem[]; currentVersion: string }
 export interface ScanResult { id: string; siteId: string; startedAt: string; finishedAt: string; status: SiteStatus; checks: ScanCheck[]; truncated: boolean }
 export interface UpdateItem { kind: "core" | "plugin" | "theme" | "language"; slug: string; name: string; currentVersion: string; newVersion: string; status: string }
 export interface MaintenanceStep { key: string; label: string; status: StepStatus; detail?: string }
