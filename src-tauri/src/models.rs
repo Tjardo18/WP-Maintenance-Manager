@@ -208,6 +208,36 @@ pub enum FindingSeverity {
     Problem,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecksumStatus {
+    Modified,
+    Missing,
+    Unexpected,
+    ScanError,
+}
+
+impl ChecksumStatus {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Modified => "modified",
+            Self::Missing => "missing",
+            Self::Unexpected => "unexpected",
+            Self::ScanError => "scan_error",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "modified" => Some(Self::Modified),
+            "missing" => Some(Self::Missing),
+            "unexpected" => Some(Self::Unexpected),
+            "scan_error" => Some(Self::ScanError),
+            _ => None,
+        }
+    }
+}
+
 impl FindingSeverity {
     pub fn as_db(self) -> &'static str {
         match self {
@@ -229,11 +259,17 @@ impl FindingSeverity {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub category: String,
     pub severity: FindingSeverity,
     pub title: String,
     pub detail: String,
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum_status: Option<ChecksumStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

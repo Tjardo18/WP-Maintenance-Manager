@@ -1,11 +1,12 @@
 use crate::{
     command_catalog::MAX_SCAN_RESULTS,
     error::AppError,
-    models::{Finding, FindingSeverity, UpdateItem, UpdateKind},
-    validation::validate_slug,
+    models::{ChecksumStatus, Finding, FindingSeverity, UpdateItem, UpdateKind},
+    validation::{validate_checksum_relative_path, validate_slug},
 };
 use chrono::{Duration, NaiveDateTime, Utc};
 use serde_json::Value;
+use uuid::Uuid;
 
 pub fn parse_nul_paths(
     output: &[u8],
@@ -27,6 +28,7 @@ pub fn parse_nul_paths(
                 && category == "uploads"
                 && path.to_ascii_lowercase().ends_with(".php");
             Finding {
+                id: None,
                 category,
                 severity: if is_upload_php {
                     FindingSeverity::Attention
@@ -44,6 +46,8 @@ pub fn parse_nul_paths(
                     "Dit bestand is alleen geïnventariseerd; PHP in plugins en thema's is normaal.".into()
                 },
                 path: Some(display_path(&path, wordpress_path)),
+                checksum_status: None,
+                observed_at: None,
             }
         })
         .collect();
@@ -71,6 +75,7 @@ pub fn parse_modified_files(output: &[u8], wordpress_path: &str) -> (Vec<Finding
             || (category == "root" && lower.ends_with(".php"))
             || (category == "uploads" && lower.ends_with(".php"));
         findings.push(Finding {
+            id: None,
             category,
             severity: if attention {
                 FindingSeverity::Attention
@@ -88,9 +93,99 @@ pub fn parse_modified_files(output: &[u8], wordpress_path: &str) -> (Vec<Finding
                 String::from_utf8_lossy(record[2])
             ),
             path: Some(display),
+            checksum_status: None,
+            observed_at: None,
         });
     }
     (findings, truncated)
+}
+
+pub fn parse_checksum_output(output: &str, observed_at: &str) -> Result<Vec<Finding>, AppError> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() || trimmed.starts_with("Success:") {
+        return Ok(Vec::new());
+    }
+    let mut stream = serde_json::Deserializer::from_str(trimmed).into_iter::<Vec<Value>>();
+    let rows = stream
+        .next()
+        .transpose()
+        .map_err(|error| {
+            AppError::ssh(
+                "checksum_parse_failed",
+                "De checksumresultaten konden niet veilig worden gelezen.",
+                error,
+                false,
+            )
+        })?
+        .ok_or_else(|| AppError::validation("De checksumuitvoer is leeg."))?;
+    let trailing = &trimmed[stream.byte_offset()..];
+    if !trailing.trim().is_empty()
+        && !trailing.trim_start().starts_with("Success:")
+        && !trailing.trim_start().starts_with("Error:")
+    {
+        return Err(AppError::validation(
+            "De checksumuitvoer bevat onverwachte gegevens.",
+        ));
+    }
+    let mut findings = Vec::with_capacity(rows.len().min(MAX_SCAN_RESULTS));
+    for row in rows.into_iter().take(MAX_SCAN_RESULTS) {
+        let path = row.get("file").and_then(Value::as_str).ok_or_else(|| {
+            AppError::validation("Een checksumresultaat bevat geen geldig bestandspad.")
+        })?;
+        validate_checksum_relative_path(path)?;
+        let message = row
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Onbekende checksummelding");
+        let lower = message.to_ascii_lowercase();
+        let (status, title, severity, category) =
+            if lower.contains("should not exist") || lower.contains("shouldn't exist") {
+                (
+                    ChecksumStatus::Unexpected,
+                    "Hoort niet aanwezig te zijn",
+                    FindingSeverity::Attention,
+                    "wordpress-core-unexpected",
+                )
+            } else if lower.contains("doesn't verify against checksum")
+                || lower.contains("does not verify against checksum")
+                || lower.contains("checksum mismatch")
+            {
+                (
+                    ChecksumStatus::Modified,
+                    "Gewijzigd",
+                    FindingSeverity::Problem,
+                    "wordpress-core-modified",
+                )
+            } else if lower.contains("doesn't exist")
+                || lower.contains("does not exist")
+                || lower.contains("is missing")
+            {
+                (
+                    ChecksumStatus::Missing,
+                    "Ontbreekt",
+                    FindingSeverity::Problem,
+                    "wordpress-core-missing",
+                )
+            } else {
+                (
+                    ChecksumStatus::ScanError,
+                    "Scanmelding niet herkend",
+                    FindingSeverity::Problem,
+                    "wordpress-core-scan-error",
+                )
+            };
+        findings.push(Finding {
+            id: Some(Uuid::new_v4().to_string()),
+            category: category.into(),
+            severity,
+            title: title.into(),
+            detail: message.into(),
+            path: Some(path.into()),
+            checksum_status: Some(status),
+            observed_at: Some(observed_at.into()),
+        });
+    }
+    Ok(findings)
 }
 
 pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
@@ -114,6 +209,7 @@ pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
                 .ok()
                 .is_some_and(|date| date > (Utc::now() - Duration::days(30)).naive_utc());
             Finding {
+                id: None,
                 category: if administrator {
                     "administrator".into()
                 } else {
@@ -138,6 +234,8 @@ pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
                     }
                 ),
                 path: None,
+                checksum_status: None,
+                observed_at: None,
             }
         })
         .collect())
@@ -172,11 +270,14 @@ pub fn parse_config(output: &str) -> Result<Vec<Finding>, AppError> {
         .and_then(Value::as_str)
         .unwrap_or("niet ingesteld");
     findings.push(Finding {
+        id: None,
         category: "configuration".into(),
         severity: FindingSeverity::Info,
         title: "WordPress-omgevingstype".into(),
         detail: environment.into(),
         path: None,
+        checksum_status: None,
+        observed_at: None,
     });
     Ok(findings)
 }
@@ -307,11 +408,14 @@ fn role_strings(value: &Value) -> Vec<String> {
 
 fn config_finding(category: &str, title: &str, detail: &str) -> Finding {
     Finding {
+        id: None,
         category: category.into(),
         severity: FindingSeverity::Attention,
         title: title.into(),
         detail: detail.into(),
         path: None,
+        checksum_status: None,
+        observed_at: None,
     }
 }
 
@@ -347,6 +451,50 @@ mod tests {
     fn rejects_untrusted_slug_returned_by_wp_cli() {
         let json = r#"[{"name":"safe;id","title":"Bad","version":"1","update_version":"2"}]"#;
         assert!(parse_update_list(json, UpdateKind::Plugin).is_err());
+    }
+
+    #[test]
+    fn parses_typed_checksum_findings() {
+        let findings = parse_checksum_output(
+            r#"[{"file":"index.php","message":"File doesn't verify against checksum"},{"file":"wp-admin/old.php","message":"File should not exist"},{"file":"wp-includes/version.php","message":"File doesn't exist"}]"#,
+            "2026-08-31T10:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(findings[0].checksum_status, Some(ChecksumStatus::Modified));
+        assert_eq!(
+            findings[1].checksum_status,
+            Some(ChecksumStatus::Unexpected)
+        );
+        assert_eq!(findings[2].checksum_status, Some(ChecksumStatus::Missing));
+        assert!(findings.iter().all(|finding| finding.id.is_some()));
+        assert!(findings.iter().all(|finding| finding.observed_at.is_some()));
+    }
+
+    #[test]
+    fn parses_success_and_known_status_after_json() {
+        assert!(
+            parse_checksum_output(
+                "Success: WordPress installation verifies against checksums.",
+                "2026-08-31T10:00:00Z"
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let findings = parse_checksum_output(
+            "[{\"file\":\"extra.php\",\"message\":\"File should not exist\"}]\nSuccess: WordPress installation verifies against checksums.",
+            "2026-08-31T10:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(
+            findings[0].checksum_status,
+            Some(ChecksumStatus::Unexpected)
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_checksum_paths() {
+        let json = r#"[{"file":"../wp-config.php","message":"File should not exist"}]"#;
+        assert!(parse_checksum_output(json, "2026-08-31T10:00:00Z").is_err());
     }
 
     #[test]

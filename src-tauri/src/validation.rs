@@ -85,6 +85,22 @@ pub fn validate_wordpress_path(path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn validate_checksum_relative_path(path: &str) -> Result<(), AppError> {
+    if path.is_empty()
+        || path.len() > 4096
+        || path.starts_with('/')
+        || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(AppError::validation(
+            "Het checksum-bestandspad is geen veilig relatief pad.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_slug(slug: &str) -> Result<(), AppError> {
     if slug.is_empty()
         || slug.len() > 200
@@ -119,6 +135,14 @@ mod tests {
     #[test]
     fn accepts_normal_wordpress_path() {
         assert!(validate_wordpress_path("/var/www/example/public").is_ok());
+    }
+    #[test]
+    fn validates_checksum_paths_without_treating_them_as_shell_input() {
+        assert!(validate_checksum_relative_path("wp-includes/version.php").is_ok());
+        assert!(validate_checksum_relative_path("odd; but valid.txt").is_ok());
+        assert!(validate_checksum_relative_path("../wp-config.php").is_err());
+        assert!(validate_checksum_relative_path("wp-admin/../../etc/passwd").is_err());
+        assert!(validate_checksum_relative_path("/etc/passwd").is_err());
     }
     #[test]
     fn rejects_shell_metacharacters_in_hosts() {

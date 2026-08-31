@@ -1,9 +1,9 @@
 use crate::{
     error::AppError,
     models::{
-        AuditEvent, AuthConfig, AuthMethod, Finding, FindingSeverity, MaintenanceRun,
-        MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus, StepStatus,
-        StoredSite, UpdateItem,
+        AuditEvent, AuthConfig, AuthMethod, ChecksumStatus, Finding, FindingSeverity,
+        MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus,
+        StepStatus, StoredSite, UpdateItem,
     },
 };
 use chrono::{SecondsFormat, Utc};
@@ -62,6 +62,20 @@ impl Database {
             transaction.execute_batch(include_str!("../migrations/0003_auth_and_audit.sql"))?;
             transaction.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(3, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
+        let checksum_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 4)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !checksum_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!("../migrations/0004_checksum_findings.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(4, ?1)",
                 [utc_now()],
             )?;
             transaction.commit()?;
@@ -158,9 +172,13 @@ impl Database {
                 params![check_id, scan.id, check.key, check.label, check.status.as_db(), check.summary],
             )?;
             for finding in &check.findings {
+                let finding_id = finding
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| Uuid::new_v4().to_string());
                 transaction.execute(
-                    "INSERT INTO findings(id,scan_check_id,category,severity,title,detail,path) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                    params![Uuid::new_v4().to_string(), check_id, finding.category, finding.severity.as_db(), finding.title, finding.detail, finding.path],
+                    "INSERT INTO findings(id,scan_check_id,category,severity,title,detail,path,checksum_status,observed_at,site_id,scan_run_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                    params![finding_id, check_id, finding.category, finding.severity.as_db(), finding.title, finding.detail, finding.path, finding.checksum_status.map(ChecksumStatus::as_db), finding.observed_at, scan.site_id, scan.id],
                 )?;
             }
         }
@@ -218,16 +236,22 @@ impl Database {
                 check_rows.collect::<rusqlite::Result<_>>()?;
             for (check_id, check) in &mut checks {
                 let mut finding_statement = connection.prepare(
-                    "SELECT category,severity,title,detail,path FROM findings WHERE scan_check_id=?1 ORDER BY rowid",
+                    "SELECT id,category,severity,title,detail,path,checksum_status,observed_at FROM findings WHERE scan_check_id=?1 ORDER BY rowid",
                 )?;
                 check.findings = finding_statement
                     .query_map([check_id.as_str()], |row| {
                         Ok(Finding {
-                            category: row.get(0)?,
-                            severity: FindingSeverity::from_db(&row.get::<_, String>(1)?),
-                            title: row.get(2)?,
-                            detail: row.get(3)?,
-                            path: row.get(4)?,
+                            id: row.get(0)?,
+                            category: row.get(1)?,
+                            severity: FindingSeverity::from_db(&row.get::<_, String>(2)?),
+                            title: row.get(3)?,
+                            detail: row.get(4)?,
+                            path: row.get(5)?,
+                            checksum_status: row
+                                .get::<_, Option<String>>(6)?
+                                .as_deref()
+                                .and_then(ChecksumStatus::from_db),
+                            observed_at: row.get(7)?,
                         })
                     })?
                     .collect::<rusqlite::Result<_>>()?;
@@ -577,11 +601,14 @@ mod tests {
                 status: StepStatus::Warning,
                 summary: "Eén aandachtspunt".into(),
                 findings: vec![Finding {
-                    category: "users".into(),
+                    id: Some("finding-test".into()),
+                    category: "wordpress-core-unexpected".into(),
                     severity: FindingSeverity::Attention,
-                    title: "Controleer beheerder".into(),
+                    title: "Hoort niet aanwezig te zijn".into(),
                     detail: "Handmatige beoordeling nodig.".into(),
-                    path: None,
+                    path: Some("unexpected.php".into()),
+                    checksum_status: Some(ChecksumStatus::Unexpected),
+                    observed_at: Some("2026-08-25T10:00:00.000Z".into()),
                 }],
             }],
             truncated: false,

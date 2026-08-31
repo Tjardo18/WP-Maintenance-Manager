@@ -100,7 +100,9 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         ),
         RemoteAction::VerifyCoreChecksums => (
             "VerifyCoreChecksums",
-            format!("{wp} core verify-checksums"),
+            format!(
+                "{wp} core is-installed && {wp} core verify-checksums --include-root --format=json"
+            ),
             false,
             scan,
             512 * 1024,
@@ -361,5 +363,15 @@ mod tests {
         assert!(validate_remote_backup_path("/tmp/wpmm-Ab12Cd34.sql").is_ok());
         assert!(validate_remote_backup_path("/var/www/wp-config.php").is_err());
         assert!(validate_remote_backup_path("/tmp/wpmm-../../etc.sql").is_err());
+    }
+
+    #[test]
+    fn checksum_command_is_root_scoped_and_structured() {
+        let command = build("/srv/example site", RemoteAction::VerifyCoreChecksums).unwrap();
+        assert!(command.command.contains("--path='/srv/example site'"));
+        assert!(command.command.contains("core is-installed"));
+        assert!(command.command.contains("--include-root"));
+        assert!(command.command.contains("--format=json"));
+        assert!(!command.mutating);
     }
 }

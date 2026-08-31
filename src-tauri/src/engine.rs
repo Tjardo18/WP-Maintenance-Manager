@@ -3,8 +3,8 @@ use crate::{
     database::utc_now,
     error::AppError,
     models::{
-        Finding, FindingSeverity, ScanCheck, ScanResult, SiteStatus, StepStatus, StoredSite,
-        UpdateItem, UpdateKind,
+        ChecksumStatus, Finding, FindingSeverity, ScanCheck, ScanResult, SiteStatus, StepStatus,
+        StoredSite, UpdateItem, UpdateKind,
     },
     parsers,
     ssh::{ExecOutput, SshExecutor},
@@ -321,57 +321,78 @@ fn checksum_check(
     stored: &StoredSite,
     credential: Option<&str>,
 ) -> ScanCheck {
+    let observed_at = utc_now();
     let command = match build(
         &stored.site.wordpress_path,
         RemoteAction::VerifyCoreChecksums,
     ) {
         Ok(command) => command,
-        Err(error) => return failed_check("core_checksum", "WordPress core", error),
+        Err(error) => return failed_checksum_check(error, &observed_at),
     };
     match executor.execute(&stored.site, credential, &command) {
-        Ok(output) if output.exit_code == 0 => ScanCheck {
-            key: "core_checksum".into(),
-            label: "WordPress core".into(),
-            status: StepStatus::Success,
-            summary: "WordPress core: in orde.".into(),
-            findings: Vec::new(),
-        },
         Ok(output) => {
-            let text = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let mut findings: Vec<Finding> = text
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .take(200)
-                .map(|line| Finding {
-                    category: "wordpress-core".into(),
-                    severity: FindingSeverity::Problem,
-                    title: "Core checksum wijkt af".into(),
-                    detail: line.trim().to_owned(),
-                    path: extract_checksum_path(line),
-                })
-                .collect();
-            if findings.is_empty() {
-                findings.push(Finding {
-                    category: "wordpress-core".into(),
-                    severity: FindingSeverity::Problem,
-                    title: "Core checksumcontrole mislukt".into(),
-                    detail: format!("WP-CLI exitstatus {}", output.exit_code),
-                    path: None,
-                });
-            }
-            ScanCheck {
-                key: "core_checksum".into(),
-                label: "WordPress core".into(),
-                status: StepStatus::Warning,
-                summary: format!("{} checksumafwijkingen gemeld.", findings.len()),
-                findings,
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            match parsers::parse_checksum_output(&stdout, &observed_at) {
+                Ok(findings) if output.exit_code == 0 && findings.is_empty() => ScanCheck {
+                    key: "core_checksum".into(),
+                    label: "WordPress core".into(),
+                    status: StepStatus::Success,
+                    summary: "Correct: geen checksumafwijkingen gevonden.".into(),
+                    findings,
+                },
+                Ok(findings) if !findings.is_empty() => {
+                    let modified = checksum_count(&findings, ChecksumStatus::Modified);
+                    let missing = checksum_count(&findings, ChecksumStatus::Missing);
+                    let unexpected = checksum_count(&findings, ChecksumStatus::Unexpected);
+                    let scan_errors = checksum_count(&findings, ChecksumStatus::ScanError);
+                    ScanCheck {
+                        key: "core_checksum".into(),
+                        label: "WordPress core".into(),
+                        status: StepStatus::Warning,
+                        summary: format!(
+                            "Gewijzigd: {modified} · Ontbreekt: {missing} · Hoort niet aanwezig te zijn: {unexpected} · Scanmeldingen: {scan_errors}"
+                        ),
+                        findings,
+                    }
+                }
+                Ok(_) => failed_checksum_check(
+                    AppError::command_failed(
+                        command.action_name,
+                        output.exit_code,
+                        &String::from_utf8_lossy(&output.stderr),
+                    ),
+                    &observed_at,
+                ),
+                Err(error) => failed_checksum_check(error, &observed_at),
             }
         }
-        Err(error) => failed_check("core_checksum", "WordPress core", error),
+        Err(error) => failed_checksum_check(error, &observed_at),
+    }
+}
+
+fn checksum_count(findings: &[Finding], status: ChecksumStatus) -> usize {
+    findings
+        .iter()
+        .filter(|finding| finding.checksum_status == Some(status))
+        .count()
+}
+
+fn failed_checksum_check(error: AppError, observed_at: &str) -> ScanCheck {
+    ScanCheck {
+        key: "core_checksum".into(),
+        label: "WordPress core".into(),
+        status: StepStatus::Failed,
+        summary: "Scan mislukt.".into(),
+        findings: vec![Finding {
+            id: Some(Uuid::new_v4().to_string()),
+            category: "wordpress-core-scan-error".into(),
+            severity: FindingSeverity::Problem,
+            title: "Scan mislukt".into(),
+            detail: error.user_message,
+            path: None,
+            checksum_status: Some(ChecksumStatus::ScanError),
+            observed_at: Some(observed_at.into()),
+        }],
     }
 }
 
@@ -457,12 +478,6 @@ fn security_summary(checks: &[ScanCheck]) -> &'static str {
     } else {
         "Geen aandachtspunten gevonden"
     }
-}
-
-fn extract_checksum_path(line: &str) -> Option<String> {
-    line.split_whitespace()
-        .find(|part| part.contains('/') || part.ends_with(".php"))
-        .map(|part| part.trim_matches([':', ',', '\'', '"']).to_owned())
 }
 
 #[cfg(test)]
