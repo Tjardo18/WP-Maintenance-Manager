@@ -1,6 +1,6 @@
 # Remote command catalog
 
-Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandostring wordt uitsluitend in Rust opgebouwd. Algemene limieten: pad maximaal 4096 bytes, slugs maximaal 200 ASCII-tekens, dagen 1–365 en scanresultaten standaard maximaal 5000 records.
+Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandostring wordt uitsluitend in Rust opgebouwd. Iedere hieronder genoemde remote actie is alleen bereikbaar vanuit een Tauri-command dat eerst een geldige backend-sessie vereist. De frontend kan catalogusacties of vrije commandotekst niet rechtstreeks aanroepen. Algemene limieten: pad maximaal 4096 bytes, slugs maximaal 200 ASCII-tekens, dagen 1–365 en scanresultaten standaard maximaal 5000 records.
 
 | Actie | Doel | Muterend | Parameters/validatie | Output | Standaardtimeout | Risico |
 |---|---|---:|---|---|---:|---|
@@ -29,7 +29,7 @@ Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandos
 | DatabaseSizes | Grootste tabellen | Nee | pad | JSON | 90 s | serverbelasting |
 | CreateDatabaseBackup | Export naar veilige tempdir | Ja | pad, backendnaam | temp-pad | 600 s | gevoelige data/schijf |
 | DeleteTemporaryBackup | Remote tempbestand opruimen | Ja | exact door backend gemaakt pad | exitstatus | 30 s | verwijderactie |
-| UpdateCore | WordPress core bijwerken | Ja | pad | JSON/exitstatus | 600 s | sitewijziging |
+| UpdateCore | WordPress core bijwerken | Ja | pad; alleen binnen de volledige maintenanceflow | JSON/exitstatus | 600 s | directe `run_update`-IPC voor core/all wordt geweigerd |
 | UpdateCoreTo | WordPress naar vooraf gedetecteerde doelversie bijwerken | Ja | gevalideerde expliciete versie, nooit `latest` | JSON/exitstatus | 600 s | sitewijziging |
 | RepairCore | Officiële huidige coreversie opnieuw downloaden | Ja | gedetecteerde versie + locale, `--force --skip-content` | tekst/exitstatus | 600 s | overschrijft alleen distributiebestanden |
 | UpdatePlugin | Eén plugin bijwerken | Ja | gevalideerde slug | JSON | 300 s | sitewijziging |
@@ -40,19 +40,32 @@ Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandos
 | UpdateCoreLanguages | Alleen corevertalingen bijwerken | Ja | pad | tekst | 300 s | sitewijziging |
 | UpdateDatabase | WordPress databaseschema | Ja | pad | tekst | 300 s | databasewijziging |
 
-Commands draaien met `LC_ALL=C` voor stabiele parsing. Stderr en exitstatus blijven gescheiden. Time-outs sluiten het kanaal en iedere SSH-sessie wordt altijd opgeruimd.
+Commands draaien met `LC_ALL=C` voor stabiele parsing. Stderr en exitstatus blijven gescheiden. Niet-nul exitcodes worden typed failures; onleesbare, ongeldige of te grote output faalt gesloten. Time-outs sluiten het kanaal en iedere SSH-sessie wordt altijd opgeruimd.
 
 ## Begrensde SFTP-acties
 
 De volgende typed backendacties zijn bewust geen shellcommando en vormen geen algemene filemanager:
 
-| Actie | Invoer vanuit frontend | Backend-authorisatie | Bestandstype/limiet |
-|---|---|---|---|
-| PreviewChecksumFinding | `site_id`, `finding_id` | Alleen een `unexpected` finding uit de nieuwste checksumscan van die site | Regulier bestand, alleen-lezen, maximaal 256 KB |
-| DeleteChecksumFinding | `site_id`, `finding_id` | Zelfde controle; het pad komt uitsluitend uit de database | Regulier bestand, één unlink via SFTP |
-| DeleteChecksumFindings | `site_id`, lijst finding-id's | Iedere finding wordt afzonderlijk gevalideerd en gelogd | Maximaal 5.000 reguliere bestanden, gedeeltelijk resultaat |
+| Actie | Read/write | Auth | Destructief | Invoer en backendvalidatie | Operatie/limiet | Failure handling |
+|---|---|---:|---:|---|---|---|
+| PreviewChecksumFinding | Read | Ja | Nee | UUID site/finding; actuele `unexpected` finding van die site; pad uitsluitend uit SQLite | SFTP read, regulier bestand, 60 s, maximaal 256 KB platte tekst | Stale/wrong-site, traversal, symlink, binary of gewijzigde metadata wordt geweigerd/veilig gemeld |
+| DeleteChecksumFinding | Write | Ja | Ja | Zelfde finding- en padcontrole; confirmatie in UI | Eén SFTP unlink, regulier bestand, 60 s; daarna checksumscan | Delete wordt geaudit; failure verwijdert niets via een alternatief pad; rescanfailure blijft apart zichtbaar |
+| BulkDeleteChecksumFindings | Write | Ja | Ja | 1–5.000 unieke UUID's; iedere finding afzonderlijk opnieuw geautoriseerd | Eén unlink per geldige finding; precies één rescan na één of meer successen | Gedeeltelijk resultaat per finding plus bulkaudit; één failure stopt andere geldige items niet |
 
 Voor iedere SFTP-actie wordt de canonieke WordPress-root bepaald, blijft het canonieke doel daar strikt onder en worden symlinks, mappen, traversal, `wp-content` en configuratiepaden geweigerd. De metadata wordt nogmaals gecontroleerd vlak vóór openen of verwijderen. Na één of meer geslaagde verwijderingen volgt één nieuwe scan. Bestandinhoud en credentials komen nooit in auditlogs.
+
+## Beveiligde orchestrationflows
+
+Deze application-services combineren meerdere catalogus-/SFTP-acties, maar verbreden de commandallowlist niet:
+
+| Actie | Read/write | Auth | Destructief | Parameters en backendvalidatie | Remote operatie/output | Failure handling |
+|---|---|---:|---:|---|---|---|
+| VerifyCoreChecksums | Read | Ja | Nee | UUID site; opgeslagen gevalideerde root; findingpaden opnieuw gevalideerd | WP-CLI JSON vanaf root, `--include-root`, 120 s, 512 KB | Modified/missing/unexpected/scan-error typed opgeslagen; ongeldige output faalt de check |
+| CheckCoreUpdate | Read | Ja | Nee | UUID site; live huidige versie | WP-CLI core/plugin/theme JSON, per stap 60 s en outputlimiet | Teruggestuurde doelversie wordt voor coremutatie opnieuw live gelezen en gevalideerd |
+| UpdateWordPressUser | Write | Ja | Ja | Numerieke user-id, display/emailvalidatie, optionele rol uit live allowlist; laatste admin beschermd | `wp user update`, 60 s; daarna getypeerde userslijst | Remote failure wordt zonder persoonsgegevens in audit vastgelegd; UI houdt oude lijst bij |
+| DeleteWordPressUser | Write | Ja | Ja | Numerieke user-id; exact reassign óf content delete; live target/laatste-admincontrole; nooit `--network` | `wp user delete`, 60 s; huidige site | Failure wordt geaudit; users worden alleen na succes opnieuw geladen |
+| RepairWordPressCore | Write | Ja | Ja | UUID site; live versie/locale/root/WP-CLI/database/disk; `latest` verboden | Backup, `wp core download --force --skip-content`, daarna scan/versie/database/homepage/updates | Preflight/backup/mutatiefailure stopt en skipt vervolg; post-checkproblemen geven warning; volledige run in historie |
+| UpdateWordPressCore | Write | Ja | Ja | UUID site; live gevalideerde beschikbare doelversie; dezelfde preflight | Backup, expliciete coreversie, update-db, core languages, post-checks; catalogustime-outs | Geen update of backupfailure stopt vóór mutatie; corefailure stopt DB/talen; run en backup in historie |
 
 Bij useracties wordt de actuele userlijst vóór iedere mutatie opnieuw opgehaald. De laatste Administrator kan niet worden verwijderd of gedegradeerd. Bij verwijderen is exact één keuze vereist: content toewijzen aan een andere bestaande numerieke user-id, of content expliciet mee verwijderen. Op Multisite verwijdert de officiële `wp user delete`-flow alleen van de huidige site; deze app voegt bewust nooit `--network` toe. De UI waarschuwt daarnaast dat weergavenaam en e-mail velden van het gedeelde netwerkaccount zijn.
 
