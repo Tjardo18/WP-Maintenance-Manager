@@ -226,6 +226,8 @@ mod tests {
     fn validates_checksum_paths_without_treating_them_as_shell_input() {
         assert!(validate_checksum_relative_path("wp-includes/version.php").is_ok());
         assert!(validate_checksum_relative_path("odd; but valid.txt").is_ok());
+        assert!(validate_checksum_relative_path("wp-admin/veilig-😀.php").is_ok());
+        assert!(validate_checksum_relative_path(&"a".repeat(4097)).is_err());
         assert!(validate_checksum_relative_path("../wp-config.php").is_err());
         assert!(validate_checksum_relative_path("wp-admin/../../etc/passwd").is_err());
         assert!(validate_checksum_relative_path("/etc/passwd").is_err());

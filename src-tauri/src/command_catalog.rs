@@ -477,6 +477,16 @@ mod tests {
     #[test]
     fn escapes_single_quotes_for_posix_shells() {
         assert_eq!(shell_escape("a'b"), "'a'\"'\"'b'");
+        let command = build(
+            "/srv/$(touch injected); site's root",
+            RemoteAction::GetWordPressVersion,
+        )
+        .unwrap();
+        assert!(
+            command
+                .command
+                .contains("--path='/srv/$(touch injected); site'\"'\"'s root'")
+        );
     }
 
     #[test]

@@ -252,7 +252,7 @@ impl Ssh2Executor {
                 )
             })?
             .to_string_lossy()
-            .replace('\\', "/");
+            .into_owned();
         let canonical_root = canonical_root.trim_end_matches('/');
         if canonical_root.is_empty() {
             return Err(AppError::validation(
@@ -278,7 +278,7 @@ impl Ssh2Executor {
                 )
             })?
             .to_string_lossy()
-            .replace('\\', "/");
+            .into_owned();
         ensure_contained_remote_path(canonical_root, &canonical_target)?;
         let final_stat = sftp.lstat(Path::new(&canonical_target)).map_err(|error| {
             map_ssh_error(
@@ -596,6 +596,9 @@ mod tests {
     #[test]
     fn canonical_target_must_remain_below_root() {
         assert!(ensure_contained_remote_path("/srv/site", "/srv/site/wp-admin/x.php").is_ok());
+        assert!(
+            ensure_contained_remote_path("/srv/site", "/srv/site/wp-admin/x\\literal.php").is_ok()
+        );
         assert!(ensure_contained_remote_path("/srv/site", "/srv/site").is_err());
         assert!(ensure_contained_remote_path("/srv/site", "/srv/site-backup/x.php").is_err());
         assert!(ensure_contained_remote_path("/srv/site", "/etc/passwd").is_err());

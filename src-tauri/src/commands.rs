@@ -132,6 +132,10 @@ pub fn change_password(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     require_auth(&state, &session_token)?;
+    change_password_internal(state.inner(), &input)
+}
+
+fn change_password_internal(state: &AppState, input: &PasswordChangeInput) -> Result<(), AppError> {
     let config = state
         .database
         .auth_config()?
@@ -144,10 +148,12 @@ pub fn change_password(
     }
     let new_hash = auth::hash_password(&input.new_password)?;
     state.database.update_password_hash(&new_hash)?;
-    state
-        .database
-        .save_audit_event(None, "password_change", "local_app", "success", None)?;
-    state.auth.invalidate()
+    let audit_result =
+        state
+            .database
+            .save_audit_event(None, "password_change", "local_app", "success", None);
+    state.auth.invalidate()?;
+    audit_result
 }
 
 #[tauri::command]
@@ -1439,6 +1445,96 @@ mod tests {
         }
     }
 
+    fn app_state(database: Database, temp: &Path) -> AppState {
+        AppState {
+            database,
+            credentials: CredentialVault,
+            ssh: Arc::new(CleanupMockSsh::default()),
+            backup_directory: temp.join("backups"),
+            scan_concurrency: std::sync::atomic::AtomicUsize::new(1),
+            bulk_scan_cancelled: Arc::new(AtomicBool::new(false)),
+            auth: AuthManager::default(),
+        }
+    }
+
+    #[test]
+    fn protected_tauri_commands_all_enforce_backend_authentication() {
+        let public_commands = ["get_auth_status", "setup_password", "login"];
+        let source = include_str!("commands.rs");
+        for command in source.split("#[tauri::command]").skip(1) {
+            let name = command
+                .split_once("pub fn ")
+                .and_then(|(_, rest)| rest.split_once('('))
+                .map(|(name, _)| name.trim())
+                .unwrap();
+            if public_commands.contains(&name) {
+                continue;
+            }
+            let function_prefix: String = command.chars().take(900).collect();
+            assert!(
+                function_prefix.contains("require_auth("),
+                "Tauri command {name} mist backend-authenticatie"
+            );
+        }
+    }
+
+    #[test]
+    fn locked_state_rejects_protected_operations_and_restart_resets_session() {
+        let temp = std::env::temp_dir().join(format!("wpmm-auth-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        database.create_auth_config("$argon2id$test-only").unwrap();
+        let state = app_state(database.clone(), &temp);
+
+        assert!(require_auth(&state, "no-session").is_err());
+        let token = state.auth.create_session().unwrap();
+        assert!(require_auth(&state, &token).is_ok());
+        state.auth.invalidate().unwrap();
+        assert!(require_auth(&state, &token).is_err());
+
+        let restarted = app_state(database, &temp);
+        assert!(require_auth(&restarted, &token).is_err());
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
+    }
+
+    #[test]
+    fn password_change_rehashes_and_invalidates_the_existing_session() {
+        let temp = std::env::temp_dir().join(format!("wpmm-password-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        let old_password = "oude lange wachtwoordzin";
+        let new_password = "nieuwe lange wachtwoordzin";
+        database
+            .create_auth_config(&auth::hash_password(old_password).unwrap())
+            .unwrap();
+        let state = app_state(database.clone(), &temp);
+        let token = state.auth.create_session().unwrap();
+
+        assert!(
+            change_password_internal(
+                &state,
+                &PasswordChangeInput {
+                    current_password: "verkeerde lange wachtwoordzin".into(),
+                    new_password: new_password.into(),
+                },
+            )
+            .is_err()
+        );
+        assert!(require_auth(&state, &token).is_ok());
+        change_password_internal(
+            &state,
+            &PasswordChangeInput {
+                current_password: old_password.into(),
+                new_password: new_password.into(),
+            },
+        )
+        .unwrap();
+
+        let config = database.auth_config().unwrap().unwrap();
+        assert!(!auth::verify_password(old_password, &config.password_hash));
+        assert!(auth::verify_password(new_password, &config.password_hash));
+        assert!(require_auth(&state, &token).is_err());
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
+    }
+
     #[test]
     fn bulk_cleanup_reports_partial_failure_and_rescans_once() {
         let temp = std::env::temp_dir().join(format!("wpmm-cleanup-{}", Uuid::new_v4()));
@@ -1480,15 +1576,8 @@ mod tests {
             )
             .unwrap();
         let ssh = Arc::new(CleanupMockSsh::default());
-        let state = AppState {
-            database: database.clone(),
-            credentials: CredentialVault,
-            ssh: ssh.clone(),
-            backup_directory: temp.join("backups"),
-            scan_concurrency: std::sync::atomic::AtomicUsize::new(1),
-            bulk_scan_cancelled: Arc::new(AtomicBool::new(false)),
-            auth: AuthManager::default(),
-        };
+        let mut state = app_state(database.clone(), &temp);
+        state.ssh = ssh.clone();
 
         let result =
             delete_checksum_findings_internal(&state, &site.id, vec![first_id, second_id], true)
