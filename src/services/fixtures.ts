@@ -1,4 +1,4 @@
-import type { MaintenanceRun, ScanResult, Site, UpdateItem } from "../types";
+import type { MaintenanceRun, ScanResult, Site, UpdateItem, WordPressUsersData } from "../types";
 
 const now = new Date();
 const isoAgo = (hours: number) => new Date(now.getTime() - hours * 3_600_000).toISOString();
@@ -15,6 +15,16 @@ export const demoUpdates: UpdateItem[] = [
   { kind: "plugin", slug: "woocommerce", name: "WooCommerce", currentVersion: "9.8.1", newVersion: "9.9.0", status: "available" },
   { kind: "theme", slug: "twentytwentyfive", name: "Twenty Twenty-Five", currentVersion: "1.1", newVersion: "1.2", status: "available" },
 ];
+
+export const demoUsers: WordPressUsersData = {
+  multisite: true,
+  roles: [{ role: "administrator", name: "Administrator" }, { role: "editor", name: "Editor" }, { role: "author", name: "Auteur" }, { role: "subscriber", name: "Abonnee" }, { role: "shop_manager", name: "Winkelmanager" }],
+  users: [
+    { id: 1, username: "admin", displayName: "Sitebeheerder", email: "admin@example.test", roles: ["administrator"], registeredAt: "2020-01-12 09:30:00" },
+    { id: 8, username: "redactie", displayName: "Redactie", email: "redactie@example.test", roles: ["editor", "shop_manager"], registeredAt: "2023-05-18 14:12:00" },
+    { id: 14, username: "auteur", displayName: "Webredacteur", email: "auteur@example.test", roles: ["author"], registeredAt: "2025-11-04 11:45:00" },
+  ],
+};
 
 export const demoScan: ScanResult = {
   id: "scan-demo", siteId: "demo-1", startedAt: isoAgo(3), finishedAt: isoAgo(3), status: "updates", truncated: false,

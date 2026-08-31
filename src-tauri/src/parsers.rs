@@ -1,8 +1,11 @@
 use crate::{
     command_catalog::MAX_SCAN_RESULTS,
     error::AppError,
-    models::{ChecksumStatus, Finding, FindingSeverity, UpdateItem, UpdateKind},
-    validation::{validate_checksum_relative_path, validate_slug},
+    models::{
+        ChecksumStatus, Finding, FindingSeverity, UpdateItem, UpdateKind, WordPressRole,
+        WordPressUser,
+    },
+    validation::{validate_checksum_relative_path, validate_role, validate_slug, validate_user_id},
 };
 use chrono::{Duration, NaiveDateTime, Utc};
 use serde_json::Value;
@@ -189,23 +192,11 @@ pub fn parse_checksum_output(output: &str, observed_at: &str) -> Result<Vec<Find
 }
 
 pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
-    let users: Vec<Value> = serde_json::from_str(output).map_err(|error| {
-        AppError::ssh(
-            "parse_failed",
-            "De WordPress-gebruikers konden niet worden gelezen.",
-            error,
-            false,
-        )
-    })?;
-    Ok(users
+    Ok(parse_wordpress_users(output)?
         .into_iter()
         .map(|user| {
-            let login = string_field(&user, "user_login", "Onbekende gebruiker");
-            let email = string_field(&user, "user_email", "Geen e-mailadres");
-            let registered = string_field(&user, "user_registered", "Onbekend");
-            let roles = user.get("roles").map(role_strings).unwrap_or_default();
-            let administrator = roles.iter().any(|role| role == "administrator");
-            let recent = NaiveDateTime::parse_from_str(&registered, "%Y-%m-%d %H:%M:%S")
+            let administrator = user.roles.iter().any(|role| role == "administrator");
+            let recent = NaiveDateTime::parse_from_str(&user.registered_at, "%Y-%m-%d %H:%M:%S")
                 .ok()
                 .is_some_and(|date| date > (Utc::now() - Duration::days(30)).naive_utc());
             Finding {
@@ -221,17 +212,19 @@ pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
                     FindingSeverity::Info
                 },
                 title: if administrator {
-                    format!("{login} · beheerder")
+                    format!("{} · beheerder", user.username)
                 } else {
-                    login
+                    user.username.clone()
                 },
                 detail: format!(
-                    "E-mail: {email} · Rollen: {} · Aangemaakt: {registered}",
-                    if roles.is_empty() {
+                    "E-mail: {} · Rollen: {} · Aangemaakt: {}",
+                    user.email,
+                    if user.roles.is_empty() {
                         "geen".into()
                     } else {
-                        roles.join(", ")
-                    }
+                        user.roles.join(", ")
+                    },
+                    user.registered_at
                 ),
                 path: None,
                 checksum_status: None,
@@ -239,6 +232,78 @@ pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
             }
         })
         .collect())
+}
+
+pub fn parse_wordpress_users(output: &str) -> Result<Vec<WordPressUser>, AppError> {
+    let rows: Vec<Value> = serde_json::from_str(output).map_err(|error| {
+        AppError::ssh(
+            "parse_failed",
+            "De WordPress-gebruikers konden niet worden gelezen.",
+            error,
+            false,
+        )
+    })?;
+    let mut users = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = unsigned_field(&row, "ID")?;
+        validate_user_id(id)?;
+        let username = required_string_field(&row, "user_login", "gebruikersnaam")?;
+        let email = required_string_field(&row, "user_email", "e-mailadres")?;
+        let registered_at = required_string_field(&row, "user_registered", "registratiedatum")?;
+        let display_name = row
+            .get("display_name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&username)
+            .to_owned();
+        let roles = row.get("roles").map(role_strings).unwrap_or_default();
+        for role in &roles {
+            validate_role(role)?;
+        }
+        users.push(WordPressUser {
+            id,
+            username,
+            display_name,
+            email,
+            roles,
+            registered_at,
+        });
+    }
+    Ok(users)
+}
+
+pub fn parse_wordpress_roles(output: &str) -> Result<Vec<WordPressRole>, AppError> {
+    let rows: Vec<Value> = serde_json::from_str(output).map_err(|error| {
+        AppError::ssh(
+            "parse_failed",
+            "De WordPress-rollen konden niet worden gelezen.",
+            error,
+            false,
+        )
+    })?;
+    let mut roles = Vec::with_capacity(rows.len());
+    for row in rows {
+        let role = required_string_field(&row, "role", "rol-id")?;
+        validate_role(&role)?;
+        let name = required_string_field(&row, "name", "rolnaam")?;
+        if name.chars().count() > 250 || name.chars().any(char::is_control) {
+            return Err(AppError::validation(
+                "WordPress retourneerde een ongeldige rolnaam.",
+            ));
+        }
+        roles.push(WordPressRole { role, name });
+    }
+    Ok(roles)
+}
+
+pub fn parse_multisite(output: &str) -> Result<bool, AppError> {
+    match output.trim() {
+        "1" => Ok(true),
+        "0" | "" => Ok(false),
+        _ => Err(AppError::validation(
+            "De WordPress multisite-status kon niet betrouwbaar worden vastgesteld.",
+        )),
+    }
 }
 
 pub fn parse_config(output: &str) -> Result<Vec<Finding>, AppError> {
@@ -389,6 +454,30 @@ fn string_field(value: &Value, key: &str, fallback: &str) -> String {
         .to_owned()
 }
 
+fn required_string_field(value: &Value, key: &str, label: &str) -> Result<String, AppError> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.chars().any(char::is_control))
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            AppError::validation(format!(
+                "WordPress retourneerde geen geldige {label} voor een gebruiker of rol."
+            ))
+        })
+}
+
+fn unsigned_field(value: &Value, key: &str) -> Result<u64, AppError> {
+    value
+        .get(key)
+        .and_then(|field| {
+            field
+                .as_u64()
+                .or_else(|| field.as_str().and_then(|value| value.parse().ok()))
+        })
+        .ok_or_else(|| AppError::validation("WordPress retourneerde een ongeldige user-id."))
+}
+
 fn role_strings(value: &Value) -> Vec<String> {
     match value {
         Value::Array(values) => values
@@ -445,6 +534,25 @@ mod tests {
         let users = parse_users(&json).unwrap();
         assert_eq!(users[0].severity, FindingSeverity::Attention);
         assert!(users[0].title.contains("beheerder"));
+    }
+
+    #[test]
+    fn parses_typed_users_roles_and_multisite() {
+        let users = parse_wordpress_users(
+            r#"[{"ID":"12","user_login":"editor","display_name":"Site Editor","user_email":"editor@example.test","roles":["editor","shop_manager"],"user_registered":"2020-01-02 03:04:05"}]"#,
+        )
+        .unwrap();
+        assert_eq!(users[0].id, 12);
+        assert_eq!(users[0].display_name, "Site Editor");
+        assert_eq!(users[0].roles, ["editor", "shop_manager"]);
+        let roles = parse_wordpress_roles(
+            r#"[{"role":"administrator","name":"Administrator"},{"role":"shop_manager","name":"Winkelmanager"}]"#,
+        )
+        .unwrap();
+        assert_eq!(roles[1].role, "shop_manager");
+        assert!(parse_multisite("1\n").unwrap());
+        assert!(!parse_multisite("0").unwrap());
+        assert!(parse_multisite("maybe").is_err());
     }
 
     #[test]

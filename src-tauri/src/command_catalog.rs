@@ -1,6 +1,9 @@
 use crate::{
     error::AppError,
-    validation::{validate_days, validate_slug, validate_wordpress_path},
+    validation::{
+        validate_days, validate_display_name, validate_email, validate_role, validate_slug,
+        validate_user_id, validate_wordpress_path,
+    },
 };
 use std::time::Duration;
 
@@ -18,9 +21,23 @@ pub enum RemoteAction {
     GetSiteUrl,
     VerifyCoreChecksums,
     ListUsers,
+    ListRoles,
+    DetectMultisite,
+    UpdateUser {
+        user_id: u64,
+        display_name: String,
+        email: String,
+        role: Option<String>,
+    },
+    DeleteUser {
+        user_id: u64,
+        reassign_to: Option<u64>,
+    },
     FindPhpFiles,
     FindPhpInUploads,
-    FindModifiedFiles { days: u16 },
+    FindModifiedFiles {
+        days: u16,
+    },
     CheckUnsafePermissions,
     CheckSelectedWpConfigConstants,
     CheckCoreUpdates,
@@ -29,11 +46,17 @@ pub enum RemoteAction {
     CheckDatabase,
     DatabaseSizes,
     CreateDatabaseBackup,
-    DeleteTemporaryBackup { path: String },
+    DeleteTemporaryBackup {
+        path: String,
+    },
     UpdateCore,
-    UpdatePlugin { slug: String },
+    UpdatePlugin {
+        slug: String,
+    },
     UpdateAllPlugins,
-    UpdateTheme { slug: String },
+    UpdateTheme {
+        slug: String,
+    },
     UpdateAllThemes,
     UpdateLanguages,
     UpdateDatabase,
@@ -110,12 +133,82 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         RemoteAction::ListUsers => (
             "ListUsers",
             format!(
-                "{wp} user list --fields=ID,user_login,user_email,roles,user_registered --format=json"
+                "{wp} user list --fields=ID,user_login,display_name,user_email,roles,user_registered --format=json"
             ),
             false,
             normal,
             2 * 1024 * 1024,
         ),
+        RemoteAction::ListRoles => (
+            "ListRoles",
+            format!("{wp} role list --fields=role,name --format=json"),
+            false,
+            normal,
+            256 * 1024,
+        ),
+        RemoteAction::DetectMultisite => (
+            "DetectMultisite",
+            format!(
+                "{wp} eval {}",
+                shell_escape("echo is_multisite() ? '1' : '0';")
+            ),
+            false,
+            normal,
+            16 * 1024,
+        ),
+        RemoteAction::UpdateUser {
+            user_id,
+            display_name,
+            email,
+            role,
+        } => {
+            validate_user_id(user_id)?;
+            validate_display_name(&display_name)?;
+            validate_email(&email)?;
+            if let Some(role) = role.as_deref() {
+                validate_role(role)?;
+            }
+            let role_argument = role
+                .as_deref()
+                .map(|role| format!(" --role={}", shell_escape(role)))
+                .unwrap_or_default();
+            (
+                "UpdateUser",
+                format!(
+                    "{wp} user update {user_id} --display_name={} --user_email={}{} --skip-email",
+                    shell_escape(display_name.trim()),
+                    shell_escape(email.trim()),
+                    role_argument
+                ),
+                true,
+                normal,
+                64 * 1024,
+            )
+        }
+        RemoteAction::DeleteUser {
+            user_id,
+            reassign_to,
+        } => {
+            validate_user_id(user_id)?;
+            if let Some(target) = reassign_to {
+                validate_user_id(target)?;
+                if target == user_id {
+                    return Err(AppError::validation(
+                        "Content kan niet aan dezelfde gebruiker worden toegewezen.",
+                    ));
+                }
+            }
+            let reassign = reassign_to
+                .map(|target| format!(" --reassign={target}"))
+                .unwrap_or_default();
+            (
+                "DeleteUser",
+                format!("{wp} user delete {user_id}{reassign} --yes"),
+                true,
+                normal,
+                64 * 1024,
+            )
+        }
         RemoteAction::FindPhpFiles => (
             "FindPhpFiles",
             format!(
@@ -373,5 +466,66 @@ mod tests {
         assert!(command.command.contains("--include-root"));
         assert!(command.command.contains("--format=json"));
         assert!(!command.mutating);
+    }
+
+    #[test]
+    fn user_commands_only_accept_typed_validated_values() {
+        let update = build(
+            "/srv/site",
+            RemoteAction::UpdateUser {
+                user_id: 42,
+                display_name: "O'Brien <admin>".into(),
+                email: "obrien@example.test".into(),
+                role: Some("shop_manager".into()),
+            },
+        )
+        .unwrap();
+        assert!(update.mutating);
+        assert!(update.command.contains("user update 42"));
+        assert!(update.command.contains("'O'\"'\"'Brien <admin>'"));
+        let preserve_roles = build(
+            "/srv/site",
+            RemoteAction::UpdateUser {
+                user_id: 42,
+                display_name: "Editor".into(),
+                email: "editor@example.test".into(),
+                role: None,
+            },
+        )
+        .unwrap();
+        assert!(!preserve_roles.command.contains("--role="));
+        assert!(
+            build(
+                "/srv/site",
+                RemoteAction::UpdateUser {
+                    user_id: 1,
+                    display_name: "Admin".into(),
+                    email: "bad;id".into(),
+                    role: Some("administrator".into()),
+                }
+            )
+            .is_err()
+        );
+
+        let delete = build(
+            "/srv/site",
+            RemoteAction::DeleteUser {
+                user_id: 42,
+                reassign_to: Some(7),
+            },
+        )
+        .unwrap();
+        assert_eq!(delete.command.matches("--reassign=7").count(), 1);
+        assert!(!delete.command.contains("--network"));
+        assert!(
+            build(
+                "/srv/site",
+                RemoteAction::DeleteUser {
+                    user_id: 42,
+                    reassign_to: Some(42)
+                }
+            )
+            .is_err()
+        );
     }
 }

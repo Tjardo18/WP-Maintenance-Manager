@@ -8,10 +8,12 @@ use crate::{
         AppSettings, AuditEvent, AuthStatus, BulkScanFailure, BulkScanProgress, BulkScanResult,
         ChecksumDeleteFailure, ChecksumDeleteResult, ConnectionStep, ConnectionTestResult,
         FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult,
-        Site, SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem,
+        Site, SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem, WordPressUserDeleteInput,
+        WordPressUserUpdateInput, WordPressUsersData,
     },
     state::AppState,
     validation::validate_site,
+    wordpress_users,
 };
 use serde::Serialize;
 use std::{
@@ -891,6 +893,106 @@ pub fn check_updates(
     let updates = engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref())?;
     state.database.save_updates(&site_id, &updates)?;
     Ok(updates)
+}
+
+#[tauri::command]
+pub fn list_wordpress_users(
+    session_token: String,
+    site_id: String,
+    state: State<'_, AppState>,
+) -> Result<WordPressUsersData, AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    let stored = state.database.get_site(&site_id)?;
+    let credential = stored_credential(&state, &stored)?;
+    wordpress_users::load(state.ssh.as_ref(), &stored, credential.as_deref())
+}
+
+#[tauri::command]
+pub fn update_wordpress_user(
+    session_token: String,
+    site_id: String,
+    input: WordPressUserUpdateInput,
+    state: State<'_, AppState>,
+) -> Result<WordPressUsersData, AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    let stored = state.database.get_site(&site_id)?;
+    let credential = stored_credential(&state, &stored)?;
+    let result =
+        wordpress_users::update(state.ssh.as_ref(), &stored, credential.as_deref(), &input);
+    audit_wordpress_user_action(
+        &state,
+        &site_id,
+        "wordpress_user_update",
+        input.user_id,
+        result.as_ref().err(),
+        Some(&format!(
+            "role={}",
+            input.role.as_deref().unwrap_or("unchanged")
+        )),
+    );
+    result
+}
+
+#[tauri::command]
+pub fn delete_wordpress_user(
+    session_token: String,
+    site_id: String,
+    input: WordPressUserDeleteInput,
+    state: State<'_, AppState>,
+) -> Result<WordPressUsersData, AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    let stored = state.database.get_site(&site_id)?;
+    let credential = stored_credential(&state, &stored)?;
+    let result =
+        wordpress_users::delete(state.ssh.as_ref(), &stored, credential.as_deref(), &input);
+    let details = input.reassign_to.map_or_else(
+        || "content=deleted".into(),
+        |target| format!("content_reassigned_to={target}"),
+    );
+    audit_wordpress_user_action(
+        &state,
+        &site_id,
+        "wordpress_user_delete",
+        input.user_id,
+        result.as_ref().err(),
+        Some(&details),
+    );
+    result
+}
+
+fn audit_wordpress_user_action(
+    state: &AppState,
+    site_id: &str,
+    action_type: &str,
+    user_id: u64,
+    error: Option<&AppError>,
+    success_details: Option<&str>,
+) {
+    let target = format!("user:{user_id}");
+    let status = if error.is_some() { "failed" } else { "success" };
+    let failure_details;
+    let details = if let Some(error) = error {
+        failure_details = format!("category={}", error.category);
+        Some(failure_details.as_str())
+    } else {
+        success_details
+    };
+    if let Err(audit_error) =
+        state
+            .database
+            .save_audit_event(Some(site_id), action_type, &target, status, details)
+    {
+        eprintln!(
+            "security audit write failed category={}",
+            audit_error.category
+        );
+    }
 }
 
 #[tauri::command]

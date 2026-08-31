@@ -14,6 +14,7 @@ mod parsers;
 mod ssh;
 mod state;
 mod validation;
+mod wordpress_users;
 
 use database::Database;
 use state::AppState;
@@ -65,6 +66,9 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::check_updates,
+            commands::list_wordpress_users,
+            commands::update_wordpress_user,
+            commands::delete_wordpress_user,
             commands::run_update,
             commands::run_maintenance,
             commands::list_maintenance_runs

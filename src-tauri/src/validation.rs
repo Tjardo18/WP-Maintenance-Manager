@@ -131,6 +131,46 @@ pub fn validate_slug(slug: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn validate_user_id(user_id: u64) -> Result<(), AppError> {
+    if user_id == 0 {
+        return Err(AppError::validation("De WordPress user-id is ongeldig."));
+    }
+    Ok(())
+}
+
+pub fn validate_display_name(display_name: &str) -> Result<(), AppError> {
+    if display_name.trim().is_empty()
+        || display_name.chars().count() > 250
+        || display_name.chars().any(char::is_control)
+    {
+        return Err(AppError::validation(
+            "De weergavenaam moet 1 tot 250 geldige tekens bevatten.",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_email(email: &str) -> Result<(), AppError> {
+    if email.len() > 254 || !email_address::EmailAddress::is_valid(email) {
+        return Err(AppError::validation("Vul een geldig e-mailadres in."));
+    }
+    Ok(())
+}
+
+pub fn validate_role(role: &str) -> Result<(), AppError> {
+    if role.is_empty()
+        || role.len() > 100
+        || !role
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(AppError::validation(
+            "De WordPress-rol bevat ongeldige tekens.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_days(days: u16) -> Result<(), AppError> {
     if !(1..=365).contains(&days) {
         return Err(AppError::validation(
@@ -177,6 +217,17 @@ mod tests {
         assert!(validate_slug("wordpress-seo").is_ok());
         assert!(validate_slug("seo;reboot").is_err());
         assert!(validate_slug("../plugin").is_err());
+    }
+    #[test]
+    fn validates_user_edits() {
+        assert!(validate_user_id(1).is_ok());
+        assert!(validate_user_id(0).is_err());
+        assert!(validate_display_name("Tjard de Vries").is_ok());
+        assert!(validate_display_name("\nroot").is_err());
+        assert!(validate_email("admin@example.test").is_ok());
+        assert!(validate_email("not an email").is_err());
+        assert!(validate_role("shop_manager").is_ok());
+        assert!(validate_role("administrator;id").is_err());
     }
     #[test]
     fn bounds_modified_days() {

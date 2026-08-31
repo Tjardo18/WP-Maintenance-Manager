@@ -11,6 +11,10 @@ Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandos
 | GetWpCliInfo | WP-CLI-versie ophalen | Nee | geen | tekst | 20 s | laag |
 | VerifyCoreChecksums | Officiële core checksums inclusief root | Nee | expliciet pad, `core is-installed`, `--include-root` | JSON + exitstatus | 120 s | serverbelasting |
 | ListUsers | Accounts en rollen | Nee | pad, vaste velden | JSON | 60 s | privacy; niet loggen |
+| ListRoles | Toegestane rollen van de huidige site | Nee | vaste velden `role,name` | JSON | 60 s | custom roles toegestaan na validatie |
+| DetectMultisite | Multisite-status bepalen | Nee | vaste PHP-expressie | `0` of `1` | 60 s | alleen status, geen userinput |
+| UpdateUser | Weergavenaam/e-mail en optioneel rol wijzigen | Ja | numerieke user-id, gevalideerde waarden, live role-allowlist | exitstatus | 60 s | rechtenwijziging; laatste admin beschermd |
+| DeleteUser | Gebruiker van huidige site verwijderen | Ja | numerieke user-id en optionele numerieke reassign-id | exitstatus | 60 s | destructief; nooit `--network` |
 | FindPhpFiles | PHP-inventaris in wp-content | Nee | pad, vaste limiet | NUL-records | 120 s | grote output |
 | FindPhpInUploads | PHP in uploads | Nee | pad, vaste limiet | NUL-paden | 120 s | grote output |
 | FindModifiedFiles | Recent gewijzigd | Nee | dagen 1–365 | NUL-records | 120 s | grote output |
@@ -44,3 +48,5 @@ De volgende typed backendacties zijn bewust geen shellcommando en vormen geen al
 | DeleteChecksumFindings | `site_id`, lijst finding-id's | Iedere finding wordt afzonderlijk gevalideerd en gelogd | Maximaal 5.000 reguliere bestanden, gedeeltelijk resultaat |
 
 Voor iedere SFTP-actie wordt de canonieke WordPress-root bepaald, blijft het canonieke doel daar strikt onder en worden symlinks, mappen, traversal, `wp-content` en configuratiepaden geweigerd. De metadata wordt nogmaals gecontroleerd vlak vóór openen of verwijderen. Na één of meer geslaagde verwijderingen volgt één nieuwe scan. Bestandinhoud en credentials komen nooit in auditlogs.
+
+Bij useracties wordt de actuele userlijst vóór iedere mutatie opnieuw opgehaald. De laatste Administrator kan niet worden verwijderd of gedegradeerd. Bij verwijderen is exact één keuze vereist: content toewijzen aan een andere bestaande numerieke user-id, of content expliciet mee verwijderen. Op Multisite verwijdert de officiële `wp user delete`-flow alleen van de huidige site; deze app voegt bewust nooit `--network` toe. De UI waarschuwt daarnaast dat weergavenaam en e-mail velden van het gedeelde netwerkaccount zijn.

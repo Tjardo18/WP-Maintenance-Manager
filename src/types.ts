@@ -56,6 +56,11 @@ export interface Finding { id?: string; category: string; severity: "info" | "at
 export interface FilePreview { finding: Finding; fileName: string; relativePath: string; sizeBytes: number; modifiedAt?: string; fileType: string; extension?: string; textContent?: string; binary: boolean; truncated: boolean }
 export interface ChecksumDeleteFailure { findingId: string; path?: string; error: TechnicalError }
 export interface ChecksumDeleteResult { requested: number; deleted: number; deletedPaths: string[]; failures: ChecksumDeleteFailure[]; scan?: ScanResult; rescanError?: TechnicalError }
+export interface WordPressUser { id: number; username: string; displayName: string; email: string; roles: string[]; registeredAt: string }
+export interface WordPressRole { role: string; name: string }
+export interface WordPressUsersData { users: WordPressUser[]; roles: WordPressRole[]; multisite: boolean }
+export interface WordPressUserUpdateInput { userId: number; displayName: string; email: string; role?: string }
+export interface WordPressUserDeleteInput { userId: number; reassignTo?: number; deleteContent: boolean }
 export interface ScanResult { id: string; siteId: string; startedAt: string; finishedAt: string; status: SiteStatus; checks: ScanCheck[]; truncated: boolean }
 export interface UpdateItem { kind: "core" | "plugin" | "theme" | "language"; slug: string; name: string; currentVersion: string; newVersion: string; status: string }
 export interface MaintenanceStep { key: string; label: string; status: StepStatus; detail?: string }

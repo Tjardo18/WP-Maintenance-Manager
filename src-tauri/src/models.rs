@@ -313,6 +313,49 @@ pub struct ChecksumDeleteResult {
     pub rescan_error: Option<crate::error::AppError>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WordPressUser {
+    pub id: u64,
+    pub username: String,
+    pub display_name: String,
+    pub email: String,
+    pub roles: Vec<String>,
+    pub registered_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WordPressRole {
+    pub role: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WordPressUsersData {
+    pub users: Vec<WordPressUser>,
+    pub roles: Vec<WordPressRole>,
+    pub multisite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordPressUserUpdateInput {
+    pub user_id: u64,
+    pub display_name: String,
+    pub email: String,
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordPressUserDeleteInput {
+    pub user_id: u64,
+    pub reassign_to: Option<u64>,
+    pub delete_content: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanCheck {
