@@ -20,5 +20,6 @@ export const useSitesStore = defineStore("sites", () => {
   async function save(input: SiteInput) { const site = await appApi.saveSite(input); await load(); return site; }
   async function remove(id: string) { await appApi.deleteSite(id); await load(); }
   function replace(site: Site) { sites.value = sites.value.map((item) => item.id === site.id ? site : item); }
-  return { sites, loading, error, byId, load, save, remove, replace };
+  function clear() { sites.value = []; error.value = undefined; loading.value = false; }
+  return { sites, loading, error, byId, load, save, remove, replace, clear };
 });

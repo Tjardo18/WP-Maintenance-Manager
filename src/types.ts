@@ -59,3 +59,7 @@ export interface MaintenanceRun { id: string; siteId: string; siteName?: string;
 export interface BulkScanProgress { total: number; completed: number; activeSites: string[]; failedSites: string[] }
 export interface BulkScanResult { total: number; completed: number; cancelled: boolean; failures: Array<{ siteId: string; siteName: string; error: TechnicalError }> }
 export interface AppSettings { scanConcurrency: number }
+export interface AuthStatus { configured: boolean; authenticated: boolean; idleTimeoutMinutes: number; retryAfterSeconds: number }
+export interface LoginResult { sessionToken: string; idleTimeoutMinutes: number }
+export interface PasswordChangeInput { currentPassword: string; newPassword: string }
+export interface AuditEvent { id: string; siteId?: string; actionType: string; target: string; status: "success" | "failed"; details?: string; createdAt: string }

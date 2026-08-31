@@ -1,18 +1,32 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onMounted, watch } from "vue";
 import { useRoute, RouterLink, RouterView } from "vue-router";
-import { Activity, Globe2, History, LayoutDashboard, Settings, ShieldCheck } from "@lucide/vue";
+import { Activity, Globe2, History, LayoutDashboard, LoaderCircle, LockKeyhole, Settings, ShieldCheck } from "@lucide/vue";
 import { useSitesStore } from "./stores/sites";
+import { useAuthStore } from "./stores/auth";
+import AuthView from "./views/AuthView.vue";
 
 const route = useRoute();
 const sites = useSitesStore();
+const auth = useAuthStore();
 const pageTitle = computed(() => String(route.meta.title ?? "WP Maintenance Manager"));
 
-onMounted(() => sites.load());
+onMounted(() => {
+  void auth.initialize();
+  window.addEventListener("keydown", (event) => {
+    if (event.ctrlKey && event.key.toLowerCase() === "l" && auth.authenticated) {
+      event.preventDefault();
+      void auth.lock();
+    }
+  });
+});
+watch(() => auth.authenticated, (unlocked) => { if (unlocked) void sites.load(); else sites.clear(); });
 </script>
 
 <template>
-  <div class="app-shell">
+  <div v-if="!auth.initialized" class="auth-shell"><LoaderCircle class="spin" /></div>
+  <AuthView v-else-if="!auth.authenticated" />
+  <div v-else class="app-shell">
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark"><ShieldCheck :size="23" /></span>
@@ -32,7 +46,7 @@ onMounted(() => sites.load());
     <main class="workspace">
       <header class="topbar">
         <div><p class="eyebrow">WordPress-beheer</p><h1>{{ pageTitle }}</h1></div>
-        <div class="topbar-state"><Activity :size="17" /><span>{{ sites.loading ? "Gegevens laden…" : `${sites.sites.length} websites` }}</span></div>
+        <div class="topbar-actions"><div class="topbar-state"><Activity :size="17" /><span>{{ sites.loading ? "Gegevens laden…" : `${sites.sites.length} websites` }}</span></div><button class="button secondary" title="Vergrendelen (Ctrl+L)" @click="auth.lock"><LockKeyhole :size="16" /> Vergrendelen</button></div>
       </header>
       <div class="page-container"><p v-if="sites.error" class="error-banner">{{ sites.error }}</p><RouterView /></div>
     </main>

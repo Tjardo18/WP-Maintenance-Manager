@@ -1,4 +1,6 @@
-use crate::{credentials::CredentialVault, database::Database, ssh::SshExecutor};
+use crate::{
+    auth::AuthManager, credentials::CredentialVault, database::Database, ssh::SshExecutor,
+};
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -12,4 +14,5 @@ pub struct AppState {
     pub backup_directory: PathBuf,
     pub scan_concurrency: AtomicUsize,
     pub bulk_scan_cancelled: Arc<AtomicBool>,
+    pub auth: AuthManager,
 }

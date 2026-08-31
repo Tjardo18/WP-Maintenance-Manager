@@ -1,14 +1,41 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, BulkScanProgress, BulkScanResult, ConnectionTestResult, MaintenanceRun, MaintenanceStep, ScanResult, Site, SiteInput, UpdateItem } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanProgress, BulkScanResult, ConnectionTestResult, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput, UpdateItem } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
 let browserSites = structuredClone(demoSites);
+let sessionToken: string | undefined;
+let browserConfigured = false;
+let browserPasswordHash = "";
+let browserIdleMinutes = 15;
 
 async function call<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  return invoke<T>(command, args);
+  if (!sessionToken) throw { category: "locked", userMessage: "WP Maintenance Manager is vergrendeld.", retryable: false };
+  try { return await invoke<T>(command, { ...args, sessionToken }); }
+  catch (cause) {
+    const category = typeof cause === "object" && cause !== null && "category" in cause ? String((cause as { category: unknown }).category) : "";
+    if (["locked", "session_expired", "invalid_session", "setup_required"].includes(category)) {
+      sessionToken = undefined;
+      window.dispatchEvent(new CustomEvent("wpmm:locked", { detail: cause }));
+    }
+    throw cause;
+  }
 }
+
+async function publicCall<T>(command: string, args: Record<string, unknown> = {}): Promise<T> { return invoke<T>(command, args); }
+async function demoHash(password: string): Promise<string> { const bytes = new TextEncoder().encode(password); const hash = await crypto.subtle.digest("SHA-256", bytes); return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join(""); }
+
+export const authApi = {
+  setSessionToken(token?: string) { sessionToken = token; },
+  async status(): Promise<AuthStatus> { if (isTauri()) return publicCall("get_auth_status", { sessionToken: sessionToken ?? null }); return { configured: browserConfigured, authenticated: Boolean(sessionToken), idleTimeoutMinutes: browserIdleMinutes, retryAfterSeconds: 0 }; },
+  async setup(password: string): Promise<LoginResult> { if (isTauri()) { const result = await publicCall<LoginResult>("setup_password", { password }); sessionToken = result.sessionToken; return result; } if (browserConfigured) throw new Error("De applicatiebeveiliging is al ingesteld."); browserPasswordHash = await demoHash(password); browserConfigured = true; sessionToken = crypto.randomUUID(); return { sessionToken, idleTimeoutMinutes: browserIdleMinutes }; },
+  async login(password: string): Promise<LoginResult> { if (isTauri()) { const result = await publicCall<LoginResult>("login", { password }); sessionToken = result.sessionToken; return result; } if (await demoHash(password) !== browserPasswordHash) throw { category: "invalid_password", userMessage: "Het wachtwoord is niet correct.", retryable: false }; sessionToken = crypto.randomUUID(); return { sessionToken, idleTimeoutMinutes: browserIdleMinutes }; },
+  async touch(): Promise<void> { if (isTauri()) await call("touch_session"); },
+  async lock(): Promise<void> { try { if (isTauri() && sessionToken) await call("lock_app"); } finally { sessionToken = undefined; } },
+  async changePassword(input: PasswordChangeInput): Promise<void> { if (isTauri()) await call("change_password", { input }); else { if (await demoHash(input.currentPassword) !== browserPasswordHash) throw { category: "invalid_password", userMessage: "Het huidige wachtwoord is niet correct.", retryable: false }; browserPasswordHash = await demoHash(input.newPassword); } sessionToken = undefined; },
+  async setIdleTimeout(minutes: number): Promise<AuthStatus> { if (isTauri()) return call("set_idle_timeout", { minutes }); browserIdleMinutes = minutes; return { configured: true, authenticated: true, idleTimeoutMinutes: minutes, retryAfterSeconds: 0 }; },
+};
 
 export const appApi = {
   async listSites(): Promise<Site[]> { return isTauri() ? call("list_sites") : structuredClone(browserSites); },
@@ -39,4 +66,5 @@ export const appApi = {
   async cancelBulkScan(): Promise<void> { if (isTauri()) await call("cancel_bulk_scan"); },
   async getSettings(): Promise<AppSettings> { return isTauri() ? call("get_settings") : { scanConcurrency: 4 }; },
   async saveSettings(settings: AppSettings): Promise<AppSettings> { return isTauri() ? call("save_settings", { settings }) : settings; },
+  async listAuditEvents(siteId?: string): Promise<AuditEvent[]> { return isTauri() ? call("list_audit_events", { siteId: siteId ?? null }) : []; },
 };

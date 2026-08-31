@@ -1,5 +1,46 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone)]
+pub struct AuthConfig {
+    pub password_hash: String,
+    pub idle_timeout_minutes: u16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthStatus {
+    pub configured: bool,
+    pub authenticated: bool,
+    pub idle_timeout_minutes: u16,
+    pub retry_after_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginResult {
+    pub session_token: String,
+    pub idle_timeout_minutes: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordChangeInput {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditEvent {
+    pub id: String,
+    pub site_id: Option<String>,
+    pub action_type: String,
+    pub target: String,
+    pub status: String,
+    pub details: Option<String>,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AuthMethod {

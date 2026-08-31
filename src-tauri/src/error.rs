@@ -12,6 +12,26 @@ pub struct AppError {
 }
 
 impl AppError {
+    pub fn unauthorized(category: &str, message: &str) -> Self {
+        Self {
+            category: category.into(),
+            user_message: message.into(),
+            technical_details: None,
+            retryable: category == "session_expired",
+        }
+    }
+
+    pub fn rate_limited(retry_after_seconds: u64) -> Self {
+        Self {
+            category: "rate_limited".into(),
+            user_message: format!(
+                "Te veel mislukte pogingen. Probeer het over {retry_after_seconds} seconden opnieuw."
+            ),
+            technical_details: None,
+            retryable: true,
+        }
+    }
+
     pub fn validation(message: impl Into<String>) -> Self {
         Self {
             category: "validation".into(),

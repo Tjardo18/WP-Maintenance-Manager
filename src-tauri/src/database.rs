@@ -1,8 +1,9 @@
 use crate::{
     error::AppError,
     models::{
-        AuthMethod, Finding, FindingSeverity, MaintenanceRun, MaintenanceStep, ScanCheck,
-        ScanResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem,
+        AuditEvent, AuthConfig, AuthMethod, Finding, FindingSeverity, MaintenanceRun,
+        MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus, StepStatus,
+        StoredSite, UpdateItem,
     },
 };
 use chrono::{SecondsFormat, Utc};
@@ -47,6 +48,20 @@ impl Database {
             transaction.execute_batch(include_str!("../migrations/0002_settings.sql"))?;
             transaction.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
+        let auth_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 3)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !auth_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!("../migrations/0003_auth_and_audit.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(3, ?1)",
                 [utc_now()],
             )?;
             transaction.commit()?;
@@ -381,6 +396,104 @@ impl Database {
         )?;
         Ok(())
     }
+
+    pub fn auth_config(&self) -> Result<Option<AuthConfig>, AppError> {
+        let connection = self.connect()?;
+        connection
+            .query_row(
+                "SELECT password_hash,idle_timeout_minutes FROM auth_config WHERE id=1",
+                [],
+                |row| {
+                    Ok(AuthConfig {
+                        password_hash: row.get(0)?,
+                        idle_timeout_minutes: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn create_auth_config(&self, password_hash: &str) -> Result<AuthConfig, AppError> {
+        let connection = self.connect()?;
+        let now = utc_now();
+        let changed = connection.execute(
+            "INSERT OR IGNORE INTO auth_config(id,password_hash,idle_timeout_minutes,created_at,updated_at) VALUES(1,?1,15,?2,?2)",
+            params![password_hash, now],
+        )?;
+        if changed != 1 {
+            return Err(AppError::validation(
+                "De applicatiebeveiliging is al ingesteld.",
+            ));
+        }
+        self.auth_config()?
+            .ok_or_else(|| AppError::storage("Auth config missing after insert"))
+    }
+
+    pub fn update_password_hash(&self, password_hash: &str) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        if connection.execute(
+            "UPDATE auth_config SET password_hash=?1,updated_at=?2 WHERE id=1",
+            params![password_hash, utc_now()],
+        )? != 1
+        {
+            return Err(AppError::validation(
+                "Stel eerst een applicatiewachtwoord in.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn set_idle_timeout(&self, minutes: u16) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        if connection.execute(
+            "UPDATE auth_config SET idle_timeout_minutes=?1,updated_at=?2 WHERE id=1",
+            params![minutes, utc_now()],
+        )? != 1
+        {
+            return Err(AppError::validation(
+                "Stel eerst een applicatiewachtwoord in.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn save_audit_event(
+        &self,
+        site_id: Option<&str>,
+        action_type: &str,
+        target: &str,
+        status: &str,
+        details: Option<&str>,
+    ) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT INTO audit_events(id,site_id,action_type,target,status,details,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![Uuid::new_v4().to_string(), site_id, action_type, target, status, details, utc_now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_audit_events(&self, site_id: Option<&str>) -> Result<Vec<AuditEvent>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT id,site_id,action_type,target,status,details,created_at FROM audit_events WHERE (?1 IS NULL OR site_id=?1) ORDER BY created_at DESC LIMIT 500",
+        )?;
+        statement
+            .query_map([site_id], |row| {
+                Ok(AuditEvent {
+                    id: row.get(0)?,
+                    site_id: row.get(1)?,
+                    action_type: row.get(2)?,
+                    target: row.get(3)?,
+                    status: row.get(4)?,
+                    details: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(AppError::from)
+    }
 }
 
 fn row_to_stored_site(row: &Row<'_>) -> rusqlite::Result<StoredSite> {
@@ -480,6 +593,19 @@ mod tests {
         assert_eq!(restored.checks[0].findings, scan.checks[0].findings);
         assert_eq!(database.list_scans(&site.id).unwrap().len(), 1);
 
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn auth_config_is_created_once_and_never_replaced() {
+        let path = std::env::temp_dir().join(format!("wpmm-test-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let encoded = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA";
+        let config = database.create_auth_config(encoded).unwrap();
+        assert_eq!(config.password_hash, encoded);
+        assert_eq!(config.idle_timeout_minutes, 15);
+        assert!(database.create_auth_config("plaintext").is_err());
         drop(database);
         let _ = fs::remove_file(path);
     }

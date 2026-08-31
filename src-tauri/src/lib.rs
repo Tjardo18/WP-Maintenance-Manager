@@ -1,3 +1,4 @@
+mod auth;
 mod backup;
 mod command_catalog;
 mod commands;
@@ -35,10 +36,19 @@ pub fn run() {
                 backup_directory: data_dir.join("backups"),
                 scan_concurrency: std::sync::atomic::AtomicUsize::new(scan_concurrency),
                 bulk_scan_cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                auth: auth::AuthManager::default(),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_auth_status,
+            commands::setup_password,
+            commands::login,
+            commands::touch_session,
+            commands::lock_app,
+            commands::change_password,
+            commands::set_idle_timeout,
+            commands::list_audit_events,
             commands::list_sites,
             commands::save_site,
             commands::delete_site,
