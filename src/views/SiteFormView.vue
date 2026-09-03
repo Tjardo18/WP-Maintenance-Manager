@@ -8,7 +8,7 @@ import type { ConnectionTestResult, SiteInput } from "../types";
 import { errorMessage } from "../utils/errors";
 
 const route = useRoute(); const router = useRouter(); const store = useSitesStore();
-const form = reactive<SiteInput>({ name: "", url: "https://", sshHost: "", sshPort: 22, sshUsername: "", authMethod: "keyFile", keyPath: "", wordpressPath: "/var/www/html", credentialSecret: "" });
+const form = reactive<SiteInput>({ name: "", url: "https://", sshHost: "", sshPort: 7685, sshUsername: "", authMethod: "keyFile", keyPath: "", wordpressPath: "/home/<user>/domains/<domein.nl>/public_html", credentialSecret: "" });
 const saving = ref(false); const testing = ref(false); const accepting = ref(false); const result = ref<ConnectionTestResult>(); const error = ref<string>();
 const editing = computed(() => typeof route.params.id === "string");
 watchEffect(() => { const site = store.byId.get(String(route.params.id)); if (site) Object.assign(form, { id: site.id, name: site.name, url: site.url, sshHost: site.sshHost, sshPort: site.sshPort, sshUsername: site.sshUsername, authMethod: site.authMethod, keyPath: site.keyPath ?? "", wordpressPath: site.wordpressPath, credentialSecret: "" }); });
