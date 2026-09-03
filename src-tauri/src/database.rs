@@ -80,6 +80,20 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let diagnostics_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 5)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !diagnostics_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!("../migrations/0005_scan_diagnostics.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(5, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -168,8 +182,8 @@ impl Database {
         for check in &scan.checks {
             let check_id = Uuid::new_v4().to_string();
             transaction.execute(
-                "INSERT INTO scan_checks(id,scan_run_id,check_key,label,status,summary) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![check_id, scan.id, check.key, check.label, check.status.as_db(), check.summary],
+                "INSERT INTO scan_checks(id,scan_run_id,check_key,label,status,summary,technical_details) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![check_id, scan.id, check.key, check.label, check.status.as_db(), check.summary, check.technical_details],
             )?;
             for finding in &check.findings {
                 let finding_id = finding
@@ -261,7 +275,7 @@ impl Database {
         let mut scans: Vec<ScanResult> = scan_rows.collect::<rusqlite::Result<_>>()?;
         for scan in &mut scans {
             let mut check_statement = connection.prepare(
-                "SELECT id,check_key,label,status,summary FROM scan_checks WHERE scan_run_id=?1 ORDER BY rowid",
+                "SELECT id,check_key,label,status,summary,technical_details FROM scan_checks WHERE scan_run_id=?1 ORDER BY rowid",
             )?;
             let check_rows = check_statement.query_map([&scan.id], |row| {
                 Ok((
@@ -271,6 +285,7 @@ impl Database {
                         label: row.get(2)?,
                         status: StepStatus::from_db(&row.get::<_, String>(3)?),
                         summary: row.get(4)?,
+                        technical_details: row.get(5)?,
                         findings: Vec::new(),
                     },
                 ))
@@ -643,6 +658,7 @@ mod tests {
                 label: "WordPress core".into(),
                 status: StepStatus::Warning,
                 summary: "Eén aandachtspunt".into(),
+                technical_details: Some("Actie: test; exitstatus: 1".into()),
                 findings: vec![Finding {
                     id: Some("finding-test".into()),
                     category: "wordpress-core-unexpected".into(),
@@ -661,6 +677,10 @@ mod tests {
         let restored = database.list_scans(&site.id).unwrap().remove(0);
         assert_eq!(restored.id, scan.id);
         assert_eq!(restored.checks[0].findings, scan.checks[0].findings);
+        assert_eq!(
+            restored.checks[0].technical_details.as_deref(),
+            Some("Actie: test; exitstatus: 1")
+        );
         assert_eq!(database.list_scans(&site.id).unwrap().len(), 1);
         let current = database
             .current_unexpected_checksum_finding(&site.id, "finding-test")

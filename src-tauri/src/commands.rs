@@ -712,11 +712,13 @@ fn scan_site_internal(
     match engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref()) {
         Ok(updates) => state.database.save_updates(site_id, &updates)?,
         Err(error) => {
+            let technical_details = error.safe_diagnostic();
             outcome.result.checks.push(crate::models::ScanCheck {
                 key: "updates".into(),
                 label: "Updatecontrole".into(),
                 status: StepStatus::Failed,
                 summary: error.user_message,
+                technical_details,
                 findings: Vec::new(),
             });
             if outcome.result.status == SiteStatus::Healthy {
@@ -1565,6 +1567,7 @@ mod tests {
                         label: "WordPress core".into(),
                         status: StepStatus::Warning,
                         summary: "2 onverwachte bestanden".into(),
+                        technical_details: None,
                         findings: vec![
                             finding(first_id.clone(), "wp-admin/delete.php"),
                             finding(second_id.clone(), "wp-admin/locked.php"),

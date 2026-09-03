@@ -389,6 +389,8 @@ pub struct ScanCheck {
     pub label: String,
     pub status: StepStatus,
     pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub technical_details: Option<String>,
     pub findings: Vec<Finding>,
 }
 

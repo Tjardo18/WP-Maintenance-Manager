@@ -50,7 +50,7 @@ export interface ConnectionTestResult {
   error?: TechnicalError;
 }
 
-export interface ScanCheck { key: string; label: string; status: StepStatus; summary: string; findings: Finding[] }
+export interface ScanCheck { key: string; label: string; status: StepStatus; summary: string; technicalDetails?: string; findings: Finding[] }
 export type ChecksumStatus = "modified" | "missing" | "unexpected" | "scan_error";
 export interface Finding { id?: string; category: string; severity: "info" | "attention" | "problem"; title: string; detail: string; path?: string; checksumStatus?: ChecksumStatus; observedAt?: string }
 export interface FilePreview { finding: Finding; fileName: string; relativePath: string; sizeBytes: number; modifiedAt?: string; fileType: string; extension?: string; textContent?: string; binary: boolean; truncated: boolean }

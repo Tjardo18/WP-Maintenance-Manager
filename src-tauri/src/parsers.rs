@@ -135,60 +135,112 @@ pub fn parse_checksum_output(output: &str, observed_at: &str) -> Result<Vec<Find
         let path = row.get("file").and_then(Value::as_str).ok_or_else(|| {
             AppError::validation("Een checksumresultaat bevat geen geldig bestandspad.")
         })?;
-        validate_checksum_relative_path(path)?;
         let message = row
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("Onbekende checksummelding");
-        let lower = message.to_ascii_lowercase();
-        let (status, title, severity, category) =
-            if lower.contains("should not exist") || lower.contains("shouldn't exist") {
-                (
-                    ChecksumStatus::Unexpected,
-                    "Hoort niet aanwezig te zijn",
-                    FindingSeverity::Attention,
-                    "wordpress-core-unexpected",
-                )
-            } else if lower.contains("doesn't verify against checksum")
-                || lower.contains("does not verify against checksum")
-                || lower.contains("checksum mismatch")
-            {
-                (
-                    ChecksumStatus::Modified,
-                    "Gewijzigd",
-                    FindingSeverity::Problem,
-                    "wordpress-core-modified",
-                )
-            } else if lower.contains("doesn't exist")
-                || lower.contains("does not exist")
-                || lower.contains("is missing")
-            {
-                (
-                    ChecksumStatus::Missing,
-                    "Ontbreekt",
-                    FindingSeverity::Problem,
-                    "wordpress-core-missing",
-                )
-            } else {
-                (
-                    ChecksumStatus::ScanError,
-                    "Scanmelding niet herkend",
-                    FindingSeverity::Problem,
-                    "wordpress-core-scan-error",
-                )
-            };
-        findings.push(Finding {
-            id: Some(Uuid::new_v4().to_string()),
-            category: category.into(),
-            severity,
-            title: title.into(),
-            detail: message.into(),
-            path: Some(path.into()),
-            checksum_status: Some(status),
-            observed_at: Some(observed_at.into()),
-        });
+        findings.push(checksum_finding(path, message, observed_at)?);
     }
     Ok(findings)
+}
+
+pub fn parse_checksum_plain_output(
+    output: &str,
+    observed_at: &str,
+) -> Result<Vec<Finding>, AppError> {
+    let mut findings = Vec::new();
+    let mut success = false;
+    for raw_line in output.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("Success:") {
+            success = true;
+            continue;
+        }
+        if line.starts_with("Error:") {
+            continue;
+        }
+        let message = line.strip_prefix("Warning: ").unwrap_or(line);
+        let path = [
+            "File should not exist: ",
+            "File shouldn't exist: ",
+            "File doesn't verify against checksum: ",
+            "File does not verify against checksum: ",
+            "File doesn't exist: ",
+            "File does not exist: ",
+            "File is missing: ",
+        ]
+        .iter()
+        .find_map(|prefix| message.strip_prefix(prefix));
+        if let Some(path) = path
+            && findings.len() < MAX_SCAN_RESULTS
+        {
+            findings.push(checksum_finding(path.trim(), message, observed_at)?);
+        }
+    }
+    if success || !findings.is_empty() {
+        Ok(findings)
+    } else {
+        Err(AppError::ssh(
+            "checksum_parse_failed",
+            "De checksumresultaten konden niet veilig worden gelezen.",
+            output,
+            false,
+        ))
+    }
+}
+
+fn checksum_finding(path: &str, message: &str, observed_at: &str) -> Result<Finding, AppError> {
+    validate_checksum_relative_path(path)?;
+    let lower = message.to_ascii_lowercase();
+    let (status, title, severity, category) =
+        if lower.contains("should not exist") || lower.contains("shouldn't exist") {
+            (
+                ChecksumStatus::Unexpected,
+                "Hoort niet aanwezig te zijn",
+                FindingSeverity::Attention,
+                "wordpress-core-unexpected",
+            )
+        } else if lower.contains("doesn't verify against checksum")
+            || lower.contains("does not verify against checksum")
+            || lower.contains("checksum mismatch")
+        {
+            (
+                ChecksumStatus::Modified,
+                "Gewijzigd",
+                FindingSeverity::Problem,
+                "wordpress-core-modified",
+            )
+        } else if lower.contains("doesn't exist")
+            || lower.contains("does not exist")
+            || lower.contains("is missing")
+        {
+            (
+                ChecksumStatus::Missing,
+                "Ontbreekt",
+                FindingSeverity::Problem,
+                "wordpress-core-missing",
+            )
+        } else {
+            (
+                ChecksumStatus::ScanError,
+                "Scanmelding niet herkend",
+                FindingSeverity::Problem,
+                "wordpress-core-scan-error",
+            )
+        };
+    Ok(Finding {
+        id: Some(Uuid::new_v4().to_string()),
+        category: category.into(),
+        severity,
+        title: title.into(),
+        detail: message.into(),
+        path: Some(path.into()),
+        checksum_status: Some(status),
+        observed_at: Some(observed_at.into()),
+    })
 }
 
 pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
@@ -333,13 +385,21 @@ pub fn parse_config(output: &str) -> Result<Vec<Finding>, AppError> {
     let environment = config
         .get("WP_ENVIRONMENT_TYPE")
         .and_then(Value::as_str)
-        .unwrap_or("niet ingesteld");
+        .unwrap_or("production");
+    let environment_is_explicit = config
+        .get("WP_ENVIRONMENT_TYPE_EXPLICIT")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     findings.push(Finding {
         id: None,
         category: "configuration".into(),
         severity: FindingSeverity::Info,
-        title: "WordPress-omgevingstype".into(),
-        detail: environment.into(),
+        title: "Effectief WordPress-omgevingstype".into(),
+        detail: if environment_is_explicit {
+            environment.into()
+        } else {
+            format!("{environment} (WordPress-standaard; niet expliciet ingesteld)")
+        },
         path: None,
         checksum_status: None,
         observed_at: None,
@@ -562,6 +622,26 @@ mod tests {
     }
 
     #[test]
+    fn configuration_reports_effective_default_environment() {
+        let findings = parse_config(
+            r#"{"WP_DEBUG":false,"DISALLOW_FILE_EDIT":true,"WP_ENVIRONMENT_TYPE":"production","WP_ENVIRONMENT_TYPE_EXPLICIT":false}"#,
+        )
+        .unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].title, "Effectief WordPress-omgevingstype");
+        assert_eq!(
+            findings[0].detail,
+            "production (WordPress-standaard; niet expliciet ingesteld)"
+        );
+
+        let explicit = parse_config(
+            r#"{"WP_DEBUG":false,"DISALLOW_FILE_EDIT":true,"WP_ENVIRONMENT_TYPE":"staging","WP_ENVIRONMENT_TYPE_EXPLICIT":true}"#,
+        )
+        .unwrap();
+        assert_eq!(explicit[0].detail, "staging");
+    }
+
+    #[test]
     fn parses_typed_checksum_findings() {
         let findings = parse_checksum_output(
             r#"[{"file":"index.php","message":"File doesn't verify against checksum"},{"file":"wp-admin/old.php","message":"File should not exist"},{"file":"wp-includes/version.php","message":"File doesn't exist"}]"#,
@@ -596,6 +676,37 @@ mod tests {
         assert_eq!(
             findings[0].checksum_status,
             Some(ChecksumStatus::Unexpected)
+        );
+    }
+
+    #[test]
+    fn parses_plain_checksum_fallback_output() {
+        let findings = parse_checksum_plain_output(
+            "Warning: File doesn't verify against checksum: wp-admin/admin.php\nWarning: File should not exist: wp-admin/extra.php\nWarning: File doesn't exist: wp-includes/version.php\nError: WordPress installation doesn't verify against checksums.",
+            "2026-08-31T10:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(findings.len(), 3);
+        assert_eq!(findings[0].checksum_status, Some(ChecksumStatus::Modified));
+        assert_eq!(
+            findings[1].checksum_status,
+            Some(ChecksumStatus::Unexpected)
+        );
+        assert_eq!(findings[2].checksum_status, Some(ChecksumStatus::Missing));
+    }
+
+    #[test]
+    fn plain_checksum_fallback_rejects_unsafe_paths_and_unknown_output() {
+        assert!(
+            parse_checksum_plain_output(
+                "Warning: File should not exist: ../wp-config.php",
+                "2026-08-31T10:00:00Z"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_checksum_plain_output("wp-cli produced something new", "2026-08-31T10:00:00Z")
+                .is_err()
         );
     }
 

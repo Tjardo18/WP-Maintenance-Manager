@@ -85,7 +85,7 @@ onUnmounted(() => stopProgress?.());
         <div v-else class="check-list">
           <article v-for="check in visibleChecks" :key="check.key" class="check-row">
             <span :class="['check-symbol', check.status]"><Check v-if="check.status === 'success'" /><CircleAlert v-else /></span>
-            <div><h4>{{ check.label }}</h4><p>{{ check.summary }}</p>
+            <div><h4>{{ check.label }}</h4><p>{{ check.summary }}</p><details v-if="check.status === 'failed' && check.technicalDetails" class="scan-diagnostic"><summary>Technische details</summary><pre>{{ check.technicalDetails }}</pre></details>
               <div v-for="finding in check.findings" :key="finding.id ?? finding.path ?? finding.title" :class="['finding', { 'checksum-finding': finding.checksumStatus }]">
                 <label v-if="finding.checksumStatus === 'unexpected' && finding.id" class="finding-select"><input type="checkbox" :checked="selectedFindingIds.includes(finding.id)" :disabled="!isLatestScan" :aria-label="`${finding.path} selecteren`" @change="toggleFinding(finding.id)" /></label>
                 <div class="finding-copy"><span v-if="finding.checksumStatus" :class="['checksum-status', finding.checksumStatus]">{{ checksumLabel(finding) }}</span><strong v-else>{{ finding.title }}</strong><p>{{ finding.detail }}</p><code v-if="finding.path">{{ finding.path }}</code></div>

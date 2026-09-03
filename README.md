@@ -70,7 +70,7 @@ Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.des
 - Bevestigde plugin-, thema-, taal- en database-updates; status en versies worden na afloop opnieuw uitgelezen.
 - Volledige onderhoudspipeline met preflight, voorcontrole, verplichte databasebackup, updates, nacontrole en begrensde HTTP-homepagecheck.
 - Live onderhoudsstappen en persistente rapporten met voor/na-versies, waarschuwingen, failures en backupregistratie.
-- Laatste scanresultaten en findings worden na een app-herstart uit SQLite hersteld.
+- Laatste scanresultaten en findings worden na een app-herstart uit SQLite hersteld. Mislukte deelcontroles bewaren begrensde, geredigeerde technische details die in de UI inklapbaar zijn.
 - Detailweergave met Updates, Security, Gebruikers, Bestanden, Database, Onderhoud en Historie.
 - Bevestigingsdialogen voor iedere muterende actie.
 - Backend-bulkscans met live voortgang, foutisolatie per site, veilig stoppen en persistent instelbare paralleliteit (1–5 taken).

@@ -89,8 +89,35 @@ pub struct Ssh2Executor;
 
 impl Ssh2Executor {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+    const HANDSHAKE_RETRY_DELAYS: [Duration; 3] = [
+        Duration::ZERO,
+        Duration::from_millis(250),
+        Duration::from_millis(750),
+    ];
 
     fn handshake(&self, site: &Site, timeout: Duration) -> Result<Session, AppError> {
+        let mut last_error = None;
+        for delay in Self::HANDSHAKE_RETRY_DELAYS {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+            match self.handshake_once(site, timeout) {
+                Ok(session) => return Ok(session),
+                Err(error) if error.retryable => last_error = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            AppError::ssh(
+                "ssh_protocol",
+                "De SSH-handshake is mislukt.",
+                "Geen handshakepoging uitgevoerd",
+                true,
+            )
+        }))
+    }
+
+    fn handshake_once(&self, site: &Site, timeout: Duration) -> Result<Session, AppError> {
         let addresses = (site.ssh_host.as_str(), site.ssh_port)
             .to_socket_addrs()
             .map_err(|error| {

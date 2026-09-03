@@ -12,6 +12,46 @@ pub struct AppError {
 }
 
 impl AppError {
+    pub fn safe_diagnostic(&self) -> Option<String> {
+        let details = self.technical_details.as_deref()?;
+        let sensitive_markers = [
+            "password",
+            "passwd",
+            "secret",
+            "token",
+            "authorization",
+            "cookie",
+            "db_password",
+            "database_url",
+        ];
+        let mut safe = String::new();
+        for line in details.lines() {
+            let lower = line.to_ascii_lowercase();
+            let clean = if sensitive_markers
+                .iter()
+                .any(|marker| lower.contains(marker))
+            {
+                "[gevoelige regel weggelaten]"
+            } else {
+                line
+            };
+            if !safe.is_empty() {
+                safe.push('\n');
+            }
+            safe.extend(
+                clean
+                    .chars()
+                    .filter(|character| !character.is_control() || *character == '\t'),
+            );
+            if safe.chars().count() >= 2_000 {
+                safe = safe.chars().take(2_000).collect();
+                safe.push('…');
+                break;
+            }
+        }
+        (!safe.trim().is_empty()).then_some(safe)
+    }
+
     pub fn unauthorized(category: &str, message: &str) -> Self {
         Self {
             category: category.into(),
@@ -113,5 +153,26 @@ impl From<rusqlite::Error> for AppError {
 impl From<std::io::Error> for AppError {
     fn from(value: std::io::Error) -> Self {
         Self::storage(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_diagnostics_are_bounded_and_redact_sensitive_lines() {
+        let error = AppError::command_failed(
+            "FindPhpFiles",
+            1,
+            "head: invalid option -- z\nDB_PASSWORD=do-not-store",
+        );
+        let diagnostic = error.safe_diagnostic().unwrap();
+        assert!(diagnostic.contains("head: invalid option -- z"));
+        assert!(diagnostic.contains("[gevoelige regel weggelaten]"));
+        assert!(!diagnostic.contains("do-not-store"));
+
+        let long = AppError::ssh("test", "test", "x".repeat(3_000), false);
+        assert!(long.safe_diagnostic().unwrap().chars().count() <= 2_001);
     }
 }

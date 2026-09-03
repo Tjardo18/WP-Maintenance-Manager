@@ -23,6 +23,7 @@ pub enum RemoteAction {
     GetCoreLocale,
     CheckDiskSpace,
     VerifyCoreChecksums,
+    VerifyCoreChecksumsPlain,
     ListUsers,
     ListRoles,
     DetectMultisite,
@@ -155,6 +156,13 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
             scan,
             512 * 1024,
         ),
+        RemoteAction::VerifyCoreChecksumsPlain => (
+            "VerifyCoreChecksumsPlain",
+            format!("{wp} core is-installed && {wp} core verify-checksums --include-root"),
+            false,
+            scan,
+            512 * 1024,
+        ),
         RemoteAction::ListUsers => (
             "ListUsers",
             format!(
@@ -236,9 +244,9 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         }
         RemoteAction::FindPhpFiles => (
             "FindPhpFiles",
-            format!(
-                "find {path}/wp-content -type f -name '*.php' -print0 | head -z -n {}",
-                MAX_SCAN_RESULTS + 1
+            limit_nul_records(
+                format!("find {path}/wp-content -type f -name '*.php' -print0"),
+                MAX_SCAN_RESULTS + 1,
             ),
             false,
             scan,
@@ -246,9 +254,9 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         ),
         RemoteAction::FindPhpInUploads => (
             "FindPhpInUploads",
-            format!(
-                "find {path}/wp-content/uploads -type f -name '*.php' -print0 | head -z -n {}",
-                MAX_SCAN_RESULTS + 1
+            limit_nul_records(
+                format!("find {path}/wp-content/uploads -type f -name '*.php' -print0"),
+                MAX_SCAN_RESULTS + 1,
             ),
             false,
             scan,
@@ -258,9 +266,9 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
             validate_days(days)?;
             (
                 "FindModifiedFiles",
-                format!(
-                    "find {path} -xdev -type f -mtime -{days} -printf '%p\\0%T@\\0%m\\0' | head -z -n {}",
-                    (MAX_SCAN_RESULTS + 1) * 3
+                limit_nul_records(
+                    format!("find {path} -xdev -type f -mtime -{days} -printf '%p\\0%T@\\0%m\\0'"),
+                    (MAX_SCAN_RESULTS + 1) * 3,
                 ),
                 false,
                 scan,
@@ -269,16 +277,16 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         }
         RemoteAction::CheckUnsafePermissions => (
             "CheckUnsafePermissions",
-            format!(
-                "find {path} -xdev \\( -type f -o -type d \\) -perm -0002 -print0 | head -z -n {}",
-                MAX_SCAN_RESULTS + 1
+            limit_nul_records(
+                format!("find {path} -xdev \\( -type f -o -type d \\) -perm -0002 -print0"),
+                MAX_SCAN_RESULTS + 1,
             ),
             false,
             scan,
             4 * 1024 * 1024,
         ),
         RemoteAction::CheckSelectedWpConfigConstants => {
-            let code = "echo json_encode(array('WP_DEBUG'=>defined('WP_DEBUG') ? (bool) WP_DEBUG : null,'DISALLOW_FILE_EDIT'=>defined('DISALLOW_FILE_EDIT') ? (bool) DISALLOW_FILE_EDIT : null,'WP_ENVIRONMENT_TYPE'=>defined('WP_ENVIRONMENT_TYPE') ? WP_ENVIRONMENT_TYPE : null));";
+            let code = "echo json_encode(array('WP_DEBUG'=>defined('WP_DEBUG') ? (bool) WP_DEBUG : null,'DISALLOW_FILE_EDIT'=>defined('DISALLOW_FILE_EDIT') ? (bool) DISALLOW_FILE_EDIT : null,'WP_ENVIRONMENT_TYPE'=>function_exists('wp_get_environment_type') ? wp_get_environment_type() : (defined('WP_ENVIRONMENT_TYPE') ? WP_ENVIRONMENT_TYPE : 'production'),'WP_ENVIRONMENT_TYPE_EXPLICIT'=>defined('WP_ENVIRONMENT_TYPE') || (function_exists('getenv') && getenv('WP_ENVIRONMENT_TYPE') !== false)));";
             (
                 "CheckSelectedWpConfigConstants",
                 format!("{wp} eval {}", shell_escape(code)),
@@ -451,6 +459,13 @@ pub fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn limit_nul_records(command: String, limit: usize) -> String {
+    let php = format!(
+        "$limit={limit};$seen=0;while(!feof(STDIN)){{$chunk=fread(STDIN,65536);if($chunk===false){{exit(1);}}$offset=0;while(($position=strpos($chunk,\"\\0\",$offset))!==false){{$seen++;if($seen>=$limit){{echo substr($chunk,0,$position+1);exit(0);}}$offset=$position+1;}}echo $chunk;}}"
+    );
+    format!("{command} | LC_ALL=C php -r {}", shell_escape(&php))
+}
+
 pub fn validate_remote_backup_path(path: &str) -> Result<(), AppError> {
     let Some(name) = path.strip_prefix("/tmp/wpmm-") else {
         return Err(AppError::validation(
@@ -519,6 +534,21 @@ mod tests {
     fn bounds_file_scan_days() {
         assert!(build("/var/www", RemoteAction::FindModifiedFiles { days: 0 }).is_err());
         assert!(build("/var/www", RemoteAction::FindModifiedFiles { days: 30 }).is_ok());
+    }
+
+    #[test]
+    fn file_scans_use_portable_php_nul_limiter() {
+        for action in [
+            RemoteAction::FindPhpFiles,
+            RemoteAction::FindPhpInUploads,
+            RemoteAction::FindModifiedFiles { days: 30 },
+            RemoteAction::CheckUnsafePermissions,
+        ] {
+            let command = build("/srv/site", action).unwrap().command;
+            assert!(!command.contains("head -z"));
+            assert!(command.contains("php -r"));
+            assert!(command.contains("strpos"));
+        }
     }
 
     #[test]

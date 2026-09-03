@@ -11,17 +11,18 @@ Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandos
 | GetWpCliVersion | WP-CLI-versie ophalen | Nee | geen | tekst | 20 s | laag |
 | GetCoreLocale | Actieve WordPress-locale bepalen | Nee | vaste PHP-expressie | locale | 60 s | geen userinput |
 | CheckDiskSpace | Vrije ruimte op filesystem van WordPress-root | Nee | gevalideerd rootpad | vrije KB | 60 s | platformafhankelijk `df` |
-| VerifyCoreChecksums | Officiële core checksums inclusief root | Nee | expliciet pad, `core is-installed`, `--include-root` | JSON + exitstatus | 120 s | serverbelasting |
+| VerifyCoreChecksums | Officiële core checksums inclusief root | Nee | expliciet pad, `core is-installed`, `--include-root` | JSON + exitstatus | 120 s | serverbelasting; bij incompatibele JSON-output volgt de plain fallback |
+| VerifyCoreChecksumsPlain | Compatibiliteitsfallback voor oudere WP-CLI | Nee | hetzelfde gevalideerde pad en `--include-root` | vaste Warning/Success/Error-regels + exitstatus | 120 s | alleen na mislukte/onleesbare JSON-uitvoer; paden worden opnieuw gevalideerd |
 | ListUsers | Accounts en rollen | Nee | pad, vaste velden | JSON | 60 s | privacy; niet loggen |
 | ListRoles | Toegestane rollen van de huidige site | Nee | vaste velden `role,name` | JSON | 60 s | custom roles toegestaan na validatie |
 | DetectMultisite | Multisite-status bepalen | Nee | vaste PHP-expressie | `0` of `1` | 60 s | alleen status, geen userinput |
 | UpdateUser | Weergavenaam/e-mail en optioneel rol wijzigen | Ja | numerieke user-id, gevalideerde waarden, live role-allowlist | exitstatus | 60 s | rechtenwijziging; laatste admin beschermd |
 | DeleteUser | Gebruiker van huidige site verwijderen | Ja | numerieke user-id en optionele numerieke reassign-id | exitstatus | 60 s | destructief; nooit `--network` |
-| FindPhpFiles | PHP-inventaris in wp-content | Nee | pad, vaste limiet | NUL-records | 120 s | grote output |
-| FindPhpInUploads | PHP in uploads | Nee | pad, vaste limiet | NUL-paden | 120 s | grote output |
-| FindModifiedFiles | Recent gewijzigd | Nee | dagen 1–365 | NUL-records | 120 s | grote output |
-| CheckUnsafePermissions | World-writable objecten | Nee | pad, vaste limiet | NUL-paden | 120 s | grote output |
-| CheckSelectedWpConfigConstants | Drie niet-geheime constants | Nee | vaste allowlist | JSON | 30 s | geen secrets opvragen |
+| FindPhpFiles | PHP-inventaris in wp-content | Nee | pad, vaste limiet via PHP-streamfilter | NUL-records | 120 s | grote output; geen GNU `head -z` vereist |
+| FindPhpInUploads | PHP in uploads | Nee | pad, vaste limiet via PHP-streamfilter | NUL-paden | 120 s | grote output; geen GNU `head -z` vereist |
+| FindModifiedFiles | Recent gewijzigd | Nee | dagen 1–365, vaste limiet via PHP-streamfilter | NUL-records | 120 s | grote output; geen GNU `head -z` vereist |
+| CheckUnsafePermissions | World-writable objecten | Nee | pad, vaste limiet via PHP-streamfilter | NUL-paden | 120 s | grote output; geen GNU `head -z` vereist |
+| CheckSelectedWpConfigConstants | Drie niet-geheime instellingen | Nee | vaste allowlist; effectief omgevingstype via WordPress API | JSON | 30 s | geen secrets opvragen; niet ingestelde omgeving wordt als WordPress-standaard `production` uitgelegd |
 | CheckCoreUpdates | Coreupdates | Nee | pad | JSON | 60 s | netwerk op server |
 | ListPluginUpdates | Pluginupdates | Nee | pad, vaste velden | JSON | 60 s | netwerk op server |
 | ListThemeUpdates | Themaupdates | Nee | pad, vaste velden | JSON | 60 s | netwerk op server |
@@ -60,7 +61,7 @@ Deze application-services combineren meerdere catalogus-/SFTP-acties, maar verbr
 
 | Actie | Read/write | Auth | Destructief | Parameters en backendvalidatie | Remote operatie/output | Failure handling |
 |---|---|---:|---:|---|---|---|
-| VerifyCoreChecksums | Read | Ja | Nee | UUID site; opgeslagen gevalideerde root; findingpaden opnieuw gevalideerd | WP-CLI JSON vanaf root, `--include-root`, 120 s, 512 KB | Modified/missing/unexpected/scan-error typed opgeslagen; ongeldige output faalt de check |
+| VerifyCoreChecksums | Read | Ja | Nee | UUID site; opgeslagen gevalideerde root; findingpaden opnieuw gevalideerd | WP-CLI JSON vanaf root, `--include-root`, 120 s, 512 KB; gecontroleerde plain fallback voor oudere WP-CLI | Modified/missing/unexpected/scan-error typed opgeslagen; ongeldige output faalt de check en toont alleen begrensde, geredigeerde technische details |
 | CheckCoreUpdate | Read | Ja | Nee | UUID site; live huidige versie | WP-CLI core/plugin/theme JSON, per stap 60 s en outputlimiet | Teruggestuurde doelversie wordt voor coremutatie opnieuw live gelezen en gevalideerd |
 | UpdateWordPressUser | Write | Ja | Ja | Numerieke user-id, display/emailvalidatie, optionele rol uit live allowlist; laatste admin beschermd | `wp user update`, 60 s; daarna getypeerde userslijst | Remote failure wordt zonder persoonsgegevens in audit vastgelegd; UI houdt oude lijst bij |
 | DeleteWordPressUser | Write | Ja | Ja | Numerieke user-id; exact reassign óf content delete; live target/laatste-admincontrole; nooit `--network` | `wp user delete`, 60 s; huidige site | Failure wordt geaudit; users worden alleen na succes opnieuw geladen |

@@ -165,6 +165,7 @@ pub fn scan_site(
                 label: "Database".into(),
                 status: StepStatus::Success,
                 summary: "Databasecontrole voltooid zonder gemelde fouten.".into(),
+                technical_details: None,
                 findings: Vec::new(),
             },
             Err(error) => failed_check("database", "Database", error),
@@ -333,40 +334,76 @@ fn checksum_check(
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             match parsers::parse_checksum_output(&stdout, &observed_at) {
-                Ok(findings) if output.exit_code == 0 && findings.is_empty() => ScanCheck {
-                    key: "core_checksum".into(),
-                    label: "WordPress core".into(),
-                    status: StepStatus::Success,
-                    summary: "Correct: geen checksumafwijkingen gevonden.".into(),
-                    findings,
-                },
-                Ok(findings) if !findings.is_empty() => {
-                    let modified = checksum_count(&findings, ChecksumStatus::Modified);
-                    let missing = checksum_count(&findings, ChecksumStatus::Missing);
-                    let unexpected = checksum_count(&findings, ChecksumStatus::Unexpected);
-                    let scan_errors = checksum_count(&findings, ChecksumStatus::ScanError);
-                    ScanCheck {
-                        key: "core_checksum".into(),
-                        label: "WordPress core".into(),
-                        status: StepStatus::Warning,
-                        summary: format!(
-                            "Gewijzigd: {modified} · Ontbreekt: {missing} · Hoort niet aanwezig te zijn: {unexpected} · Scanmeldingen: {scan_errors}"
-                        ),
-                        findings,
-                    }
+                Ok(findings) if output.exit_code == 0 || !findings.is_empty() => {
+                    checksum_findings_check(findings)
                 }
-                Ok(_) => failed_checksum_check(
-                    AppError::command_failed(
-                        command.action_name,
-                        output.exit_code,
-                        &String::from_utf8_lossy(&output.stderr),
-                    ),
-                    &observed_at,
-                ),
-                Err(error) => failed_checksum_check(error, &observed_at),
+                Ok(_) | Err(_) => {
+                    checksum_plain_fallback(executor, stored, credential, &observed_at)
+                }
             }
         }
         Err(error) => failed_checksum_check(error, &observed_at),
+    }
+}
+
+fn checksum_plain_fallback(
+    executor: &dyn SshExecutor,
+    stored: &StoredSite,
+    credential: Option<&str>,
+    observed_at: &str,
+) -> ScanCheck {
+    let command = match build(
+        &stored.site.wordpress_path,
+        RemoteAction::VerifyCoreChecksumsPlain,
+    ) {
+        Ok(command) => command,
+        Err(error) => return failed_checksum_check(error, observed_at),
+    };
+    let output = match executor.execute(&stored.site, credential, &command) {
+        Ok(output) => output,
+        Err(error) => return failed_checksum_check(error, observed_at),
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    match parsers::parse_checksum_plain_output(&combined, observed_at) {
+        Ok(findings) if output.exit_code == 0 || !findings.is_empty() => {
+            checksum_findings_check(findings)
+        }
+        Ok(_) => failed_checksum_check(
+            AppError::command_failed(command.action_name, output.exit_code, &combined),
+            observed_at,
+        ),
+        Err(error) => failed_checksum_check(error, observed_at),
+    }
+}
+
+fn checksum_findings_check(findings: Vec<Finding>) -> ScanCheck {
+    if findings.is_empty() {
+        return ScanCheck {
+            key: "core_checksum".into(),
+            label: "WordPress core".into(),
+            status: StepStatus::Success,
+            summary: "Correct: geen checksumafwijkingen gevonden.".into(),
+            technical_details: None,
+            findings,
+        };
+    }
+    let modified = checksum_count(&findings, ChecksumStatus::Modified);
+    let missing = checksum_count(&findings, ChecksumStatus::Missing);
+    let unexpected = checksum_count(&findings, ChecksumStatus::Unexpected);
+    let scan_errors = checksum_count(&findings, ChecksumStatus::ScanError);
+    ScanCheck {
+        key: "core_checksum".into(),
+        label: "WordPress core".into(),
+        status: StepStatus::Warning,
+        summary: format!(
+            "Gewijzigd: {modified} · Ontbreekt: {missing} · Hoort niet aanwezig te zijn: {unexpected} · Scanmeldingen: {scan_errors}"
+        ),
+        technical_details: None,
+        findings,
     }
 }
 
@@ -378,11 +415,13 @@ fn checksum_count(findings: &[Finding], status: ChecksumStatus) -> usize {
 }
 
 fn failed_checksum_check(error: AppError, observed_at: &str) -> ScanCheck {
+    let technical_details = error.safe_diagnostic();
     ScanCheck {
         key: "core_checksum".into(),
         label: "WordPress core".into(),
         status: StepStatus::Failed,
         summary: "Scan mislukt.".into(),
+        technical_details,
         findings: vec![Finding {
             id: Some(Uuid::new_v4().to_string()),
             category: "wordpress-core-scan-error".into(),
@@ -420,16 +459,19 @@ fn findings_check(
             StepStatus::Success
         },
         summary: format!("{} {noun} gevonden.{suffix}", findings.len()),
+        technical_details: None,
         findings,
     }
 }
 
 fn failed_check(key: &str, label: &str, error: AppError) -> ScanCheck {
+    let technical_details = error.safe_diagnostic();
     ScanCheck {
         key: key.into(),
         label: label.into(),
         status: StepStatus::Failed,
         summary: error.user_message,
+        technical_details,
         findings: Vec::new(),
     }
 }
@@ -555,6 +597,58 @@ mod tests {
             exit_code: 0,
         }
     }
+
+    fn failed_output(stderr: &str) -> ExecOutput {
+        ExecOutput {
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+            exit_code: 1,
+        }
+    }
+
+    #[test]
+    fn checksum_scan_falls_back_for_older_wp_cli_output() {
+        let ssh = MockSsh {
+            outputs: HashMap::from([
+                (
+                    "VerifyCoreChecksums",
+                    failed_output("Error: Parameter errors: unknown --format parameter"),
+                ),
+                (
+                    "VerifyCoreChecksumsPlain",
+                    failed_output(
+                        "Warning: File should not exist: wp-admin/extra.php\nError: WordPress installation doesn't verify against checksums.",
+                    ),
+                ),
+            ]),
+        };
+
+        let check = checksum_check(&ssh, &stored(), Some("secret"));
+        assert_eq!(check.status, StepStatus::Warning);
+        assert_eq!(check.findings.len(), 1);
+        assert_eq!(
+            check.findings[0].checksum_status,
+            Some(ChecksumStatus::Unexpected)
+        );
+    }
+
+    #[test]
+    fn failed_scan_check_keeps_safe_technical_diagnostics() {
+        let check = failed_check(
+            "php_files",
+            "PHP in wp-content",
+            AppError::command_failed("FindPhpFiles", 1, "head: invalid option -- z"),
+        );
+        assert_eq!(check.status, StepStatus::Failed);
+        assert!(
+            check
+                .technical_details
+                .as_deref()
+                .unwrap()
+                .contains("head: invalid option -- z")
+        );
+    }
+
     #[test]
     fn update_checks_use_mocked_allowlisted_commands() {
         let ssh = MockSsh {
