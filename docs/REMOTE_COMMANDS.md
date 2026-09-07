@@ -1,6 +1,6 @@
 # Remote command catalog
 
-Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandostring wordt uitsluitend in Rust opgebouwd. Iedere hieronder genoemde remote actie is alleen bereikbaar vanuit een Tauri-command dat eerst een geldige backend-sessie vereist. De frontend kan catalogusacties of vrije commandotekst niet rechtstreeks aanroepen. Algemene limieten: pad maximaal 4096 bytes, slugs maximaal 200 ASCII-tekens, dagen 1–365 en scanresultaten standaard maximaal 5000 records.
+Alle remote uitvoering loopt via Rust. De uiteindelijke commandostring wordt uitsluitend daar opgebouwd. Voorgedefinieerde acties gebruiken onderstaande catalogus; de afzonderlijke Advanced WP-CLI-executor accepteert vrije commandtekst pas na backend-authenticatie, argv-parsing, routingcontrole, risicoclassificatie en veilige heropbouw. Algemene cataloguslimieten: pad maximaal 4096 bytes, slugs maximaal 200 ASCII-tekens, dagen 1–365 en scanresultaten standaard maximaal 5000 records.
 
 | Actie | Doel | Muterend | Parameters/validatie | Output | Standaardtimeout | Risico |
 |---|---|---:|---|---|---:|---|
@@ -42,6 +42,22 @@ Alle remote uitvoering moet via deze catalogus lopen. De uiteindelijke commandos
 | UpdateDatabase | WordPress databaseschema | Ja | pad | tekst | 300 s | databasewijziging |
 
 Commands draaien met `LC_ALL=C` voor stabiele parsing. Stderr en exitstatus blijven gescheiden. Niet-nul exitcodes worden typed failures; onleesbare, ongeldige of te grote output faalt gesloten. Time-outs sluiten het kanaal en iedere SSH-sessie wordt altijd opgeruimd.
+
+## Advanced WP-CLI-executor
+
+`execute_wp_cli_command` is de enige vrije commandtekst-IPC en blijft een WP-CLI-console, geen shell. De frontend stuurt uitsluitend een geldige app-sessietoken, `site_id`, commandtekst en eventuele bevestiging. Host, SSH-configuratie, credentials en WordPress-root zijn niet overschrijfbaar vanuit deze payload.
+
+De backend:
+
+1. autoriseert de app-sessie en laadt de opgeslagen site plus credential;
+2. tokeniseert maximaal 64 KB naar maximaal 1024 argv-items van elk maximaal 32 KB;
+3. vereist exact `wp` als eerste token en weigert ongequote shelloperators, redirects, substitution en newline-chaining;
+4. weigert usergestuurde `--path`, `--ssh`, `--http` en aliassen;
+5. classificeert het volledige command conservatief als read-only, muterend of high-risk en controleert de vereiste bevestiging opnieuw;
+6. construeert uitsluitend uit backenddata `LC_ALL=C wp --no-color --path='<opgeslagen root>'` en voegt ieder gevalideerd argument afzonderlijk POSIX-gequote toe;
+7. voert via dezelfde gepinde SSH-adapter uit met 180 s (read-only), 600 s (muterend) of 900 s (high-risk) timeout en maximaal 2 MB weergegeven output.
+
+De adapter draint eventuele resterende bytes zodat grote output het proces niet onbeperkt in geheugen laat groeien; het resultaat krijgt dan `truncated=true`. ANSI- en overige controlcodes worden verwijderd, stdout/stderr blijven gescheiden en de UI rendert beide uitsluitend als tekst. Audit schrijft alleen `wp:<family>`, risico, status, exitcode, duur en truncatie — nooit commandtekst of output.
 
 ## Begrensde SFTP-acties
 

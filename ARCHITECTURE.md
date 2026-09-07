@@ -13,11 +13,11 @@ credential store ← SSH adapter → remote command catalog → WP-CLI
                                ↘ begrensde SFTP ↘ HTTP health check
 ```
 
-De frontend maakt nooit SQL- of remote commando's. IPC gebruikt expliciete DTO's. De backend accepteert uitsluitend catalogusacties en valideert ieder dynamisch argument opnieuw, ook als het oorspronkelijk uit WP-CLI kwam.
+De frontend maakt nooit SQL of een uitvoerbare remote shellstring. IPC gebruikt expliciete DTO's. Normale beheerflows accepteren uitsluitend catalogusacties en valideren ieder dynamisch argument opnieuw. De Advanced WP-CLI Console is één afgeschermde uitzondering voor vrije `wp`-argv: Rust parseert, valideert, classificeert en bouwt ook daar zelf de uiteindelijke shellstring.
 
 ## Frontend
 
-Vue 3, Vue Router, Pinia en TypeScript vormen de interface. `src/services/tauri.ts` is de enige IPC-toegang. Een gewone browser gebruikt duidelijk fictieve `.test`-fixtures; in Tauri worden die nooit gebruikt.
+Vue 3, Vue Router, Pinia en TypeScript vormen de interface. `src/services/tauri.ts` is de enige IPC-toegang. Een gewone browser gebruikt duidelijk fictieve `.test`-fixtures; in Tauri worden die nooit gebruikt. De WP-CLI autocomplete-index wordt één keer uit de recursieve resource opgebouwd en daarna volledig lokaal/cursor-aware geraadpleegd, dus typen veroorzaakt geen backendroundtrip. Console-input, command history en output leven alleen in begrensd geheugen en worden bij lock gewist.
 
 ## Backend
 
@@ -26,6 +26,20 @@ De Rust-backend wordt opgesplitst in domeinmodellen, SQLite-repositories, runtim
 ## Beslissingen
 
 - Tauri 2 zonder shell-plugin: alleen Rust mag remote acties uitvoeren.
+- De Advanced WP-CLI Console heeft gescheiden data- en uitvoerpaden:
+
+  ```text
+  wp-cli-commands.json → begrensde typed parser → recursieve command index
+                       → autocomplete engine → Vue console/help
+
+  user command → frontend tokenizer-awareness → authenticated Tauri command
+               → Rust argv-parser + risk policy → safe POSIX argv quoting
+               → SSH adapter → backend-owned WordPress root → remote WP-CLI
+  ```
+
+  De JSON helpt alleen bij ontdekken en invoeren. De Rust-parser en risk policy vertrouwen niet op descriptions of frontendclassificatie en blijven werken wanneer de JSON ontbreekt.
+- Custom WP-CLI ontvangt alleen `site_id` en commandtekst. De backend haalt site, host, credentialreferentie en WordPress-root zelf op; routingopties uit userinput worden geweigerd. Output gebruikt een begrensde drainmodus en blijft als tekst gescheiden in stdout/stderr.
+- De risk policy laat expliciet bekende controles zonder dialoog lopen, eist bevestiging voor mutaties en behandelt onbekende commands conservatief als potentieel muterend. High-risk families en `--exec`/`--require` eisen typed confirmation. Audit persistence bewaart nooit de raw commandtekst.
 - De applicatielogin gebruikt een Argon2id-hash in SQLite en één random sessie in backendgeheugen. Ieder niet-publiek Tauri-command autoriseert opnieuw; restart, idle lock, manual lock en wachtwoordwijziging wissen de sessie.
 - SQLite met normale migrations en foreign keys.
 - OS credential store voor passwords/passphrases; een keybestand blijft op zijn bestaande lokale pad.
