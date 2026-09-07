@@ -14,7 +14,7 @@ use crate::{
     },
     state::AppState,
     validation::validate_site,
-    wordpress_users,
+    wordpress_users, wp_cli_catalog,
 };
 use serde::Serialize;
 use std::{
@@ -193,6 +193,16 @@ fn require_auth(state: &AppState, session_token: &str) -> Result<(), AppError> {
     state
         .auth
         .require(session_token, config.idle_timeout_minutes)
+}
+
+#[tauri::command]
+pub fn get_wp_cli_catalog(
+    session_token: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<wp_cli_catalog::WpCliCatalog, AppError> {
+    require_auth(&state, &session_token)?;
+    Ok(wp_cli_catalog::load_from_app(&app))
 }
 
 #[tauri::command]

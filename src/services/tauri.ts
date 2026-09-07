@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanProgress, BulkScanResult, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanProgress, BulkScanResult, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -39,6 +39,7 @@ export const authApi = {
 };
 
 export const appApi = {
+  async getWpCliCatalog(): Promise<WpCliCatalog> { return isTauri() ? call("get_wp_cli_catalog") : { available: false, rootCommandCount: 0, totalCommandCount: 0, globalParameterCount: 0, globalParameters: [], commands: [], error: "WP-CLI commandodatabase niet gevonden", technicalDetails: "De browserdemo laadt geen lokale Tauri-resources." }; },
   async listSites(): Promise<Site[]> { return isTauri() ? call("list_sites") : structuredClone(browserSites); },
   async saveSite(input: SiteInput): Promise<Site> {
     if (isTauri()) return call("save_site", { input });

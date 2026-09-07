@@ -75,3 +75,18 @@ export interface AuthStatus { configured: boolean; authenticated: boolean; idleT
 export interface LoginResult { sessionToken: string; idleTimeoutMinutes: number }
 export interface PasswordChangeInput { currentPassword: string; newPassword: string }
 export interface AuditEvent { id: string; siteId?: string; actionType: string; target: string; status: "success" | "failed"; details?: string; createdAt: string }
+
+export interface WpCliParameterDoc { parameter: string; description: string }
+export interface WpCliCommandNode { command: string; fullCommand: string; description: string; url?: string; parameters: WpCliParameterDoc[]; subcommands: WpCliCommandNode[] }
+export interface WpCliCatalog {
+  available: boolean;
+  source?: string;
+  scrapedAt?: string;
+  rootCommandCount: number;
+  totalCommandCount: number;
+  globalParameterCount: number;
+  globalParameters: WpCliParameterDoc[];
+  commands: WpCliCommandNode[];
+  error?: string;
+  technicalDetails?: string;
+}

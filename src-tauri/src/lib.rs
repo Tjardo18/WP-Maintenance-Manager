@@ -16,6 +16,7 @@ mod ssh;
 mod state;
 mod validation;
 mod wordpress_users;
+mod wp_cli_catalog;
 
 use database::Database;
 use state::AppState;
@@ -52,6 +53,7 @@ pub fn run() {
             commands::change_password,
             commands::set_idle_timeout,
             commands::list_audit_events,
+            commands::get_wp_cli_catalog,
             commands::list_sites,
             commands::save_site,
             commands::delete_site,
