@@ -14,12 +14,13 @@ use crate::{
     },
     state::AppState,
     validation::validate_site,
-    wordpress_users, wp_cli_catalog,
+    wordpress_users, wp_cli, wp_cli_catalog,
 };
 use serde::Serialize;
 use std::{
     collections::{HashSet, VecDeque},
     sync::{Arc, Mutex, atomic::Ordering},
+    time::Instant,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -203,6 +204,126 @@ pub fn get_wp_cli_catalog(
 ) -> Result<wp_cli_catalog::WpCliCatalog, AppError> {
     require_auth(&state, &session_token)?;
     Ok(wp_cli_catalog::load_from_app(&app))
+}
+
+#[tauri::command]
+pub fn inspect_wp_cli_command(
+    session_token: String,
+    site_id: String,
+    command: String,
+    state: State<'_, AppState>,
+) -> Result<wp_cli::WpCliCommandInspection, AppError> {
+    require_auth(&state, &session_token)?;
+    let stored = state.database.get_site(&site_id)?;
+    wp_cli::inspect_command(&command, &stored.site.wordpress_path)
+}
+
+#[tauri::command]
+pub fn execute_wp_cli_command(
+    session_token: String,
+    site_id: String,
+    command: String,
+    confirmed: bool,
+    typed_confirmation: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<wp_cli::WpCliExecutionResult, AppError> {
+    require_auth(&state, &session_token)?;
+    execute_wp_cli_internal(
+        state.inner(),
+        &site_id,
+        &command,
+        confirmed,
+        typed_confirmation.as_deref(),
+    )
+}
+
+fn execute_wp_cli_internal(
+    state: &AppState,
+    site_id: &str,
+    command: &str,
+    confirmed: bool,
+    typed_confirmation: Option<&str>,
+) -> Result<wp_cli::WpCliExecutionResult, AppError> {
+    let stored = state.database.get_site(site_id)?;
+    let prepared = wp_cli::prepare_command(command, &stored.site.wordpress_path)?;
+    wp_cli::validate_confirmation(&prepared.inspection, confirmed, typed_confirmation)?;
+    let credential = stored_credential_from_state(state, &stored)?;
+    let started_at = crate::database::utc_now();
+    let timer = Instant::now();
+    let output = match state.ssh.execute(
+        &stored.site,
+        credential.as_deref(),
+        &prepared.remote_command,
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            let duration_ms = u64::try_from(timer.elapsed().as_millis()).unwrap_or(u64::MAX);
+            save_wp_cli_audit(
+                state,
+                site_id,
+                &prepared.inspection,
+                "failed",
+                &format!(
+                    "risk={}; category={}; duration_ms={duration_ms}",
+                    prepared.inspection.risk.as_audit(),
+                    error.category
+                ),
+            );
+            return Err(error);
+        }
+    };
+    let duration_ms = u64::try_from(timer.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let stdout = wp_cli::sanitize_output(&output.stdout);
+    let stderr = wp_cli::sanitize_output(&output.stderr);
+    let status = if output.exit_code != 0 {
+        wp_cli::WpCliExecutionStatus::Failed
+    } else if stderr.trim().is_empty() {
+        wp_cli::WpCliExecutionStatus::Success
+    } else {
+        wp_cli::WpCliExecutionStatus::Warning
+    };
+    save_wp_cli_audit(
+        state,
+        site_id,
+        &prepared.inspection,
+        status.as_audit(),
+        &format!(
+            "risk={}; exit_code={}; duration_ms={duration_ms}; truncated={}",
+            prepared.inspection.risk.as_audit(),
+            output.exit_code,
+            output.truncated
+        ),
+    );
+    Ok(wp_cli::WpCliExecutionResult {
+        status,
+        risk: prepared.inspection.risk,
+        command_family: prepared.inspection.command_family,
+        stdout,
+        stderr,
+        exit_code: output.exit_code,
+        duration_ms,
+        started_at,
+        finished_at: crate::database::utc_now(),
+        truncated: output.truncated,
+    })
+}
+
+fn save_wp_cli_audit(
+    state: &AppState,
+    site_id: &str,
+    inspection: &wp_cli::WpCliCommandInspection,
+    status: &str,
+    details: &str,
+) {
+    if let Err(error) = state.database.save_audit_event(
+        Some(site_id),
+        "wp_cli_console",
+        &format!("wp:{}", inspection.command_family),
+        status,
+        Some(details),
+    ) {
+        eprintln!("security audit write failed category={}", error.category);
+    }
 }
 
 #[tauri::command]
@@ -1383,6 +1504,40 @@ mod tests {
         deleted: Mutex<Vec<String>>,
     }
 
+    #[derive(Default)]
+    struct WpCliMockSsh {
+        commands: Mutex<Vec<String>>,
+    }
+
+    impl SshExecutor for WpCliMockSsh {
+        fn fingerprint(&self, _: &Site) -> Result<String, AppError> {
+            Ok("SHA256:test".into())
+        }
+
+        fn authenticate(&self, _: &Site, _: Option<&str>) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        fn execute(
+            &self,
+            _: &Site,
+            _: Option<&str>,
+            command: &RemoteCommand,
+        ) -> Result<ExecOutput, AppError> {
+            self.commands.lock().unwrap().push(command.command.clone());
+            Ok(ExecOutput {
+                stdout: b"<script>alert('text only')</script>\n".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+                truncated: true,
+            })
+        }
+
+        fn download(&self, _: &Site, _: Option<&str>, _: &str, _: &Path) -> Result<u64, AppError> {
+            Err(AppError::validation("Geen downloadfixture"))
+        }
+    }
+
     impl SshExecutor for CleanupMockSsh {
         fn fingerprint(&self, _: &Site) -> Result<String, AppError> {
             Ok("SHA256:test".into())
@@ -1413,6 +1568,7 @@ mod tests {
                 stdout,
                 stderr: Vec::new(),
                 exit_code: 0,
+                truncated: false,
             })
         }
 
@@ -1544,6 +1700,42 @@ mod tests {
         assert!(!auth::verify_password(old_password, &config.password_hash));
         assert!(auth::verify_password(new_password, &config.password_hash));
         assert!(require_auth(&state, &token).is_err());
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
+    }
+
+    #[test]
+    fn wp_cli_execution_is_site_scoped_and_never_audits_the_raw_command() {
+        let temp = std::env::temp_dir().join(format!("wpmm-wp-cli-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        let site = database.save_site(&site_input(), None).unwrap();
+        let ssh = Arc::new(WpCliMockSsh::default());
+        let mut state = app_state(database.clone(), &temp);
+        state.ssh = ssh.clone();
+
+        let result = execute_wp_cli_internal(
+            &state,
+            &site.id,
+            "wp option update api_token super-secret-value",
+            true,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.status, wp_cli::WpCliExecutionStatus::Success);
+        assert_eq!(result.stdout, "<script>alert('text only')</script>\n");
+        assert!(result.truncated);
+        let commands = ssh.commands.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].contains("--path='/srv/site'"));
+        assert!(!commands[0].contains("example.test"));
+
+        let events = database.list_audit_events(Some(&site.id)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].target, "wp:option");
+        let persisted = format!("{} {:?}", events[0].target, events[0].details);
+        assert!(!persisted.contains("super-secret-value"));
+        assert!(!persisted.contains("api_token"));
+
         let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
     }
 

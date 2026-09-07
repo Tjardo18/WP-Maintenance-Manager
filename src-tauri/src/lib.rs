@@ -16,6 +16,7 @@ mod ssh;
 mod state;
 mod validation;
 mod wordpress_users;
+mod wp_cli;
 mod wp_cli_catalog;
 
 use database::Database;
@@ -54,6 +55,8 @@ pub fn run() {
             commands::set_idle_timeout,
             commands::list_audit_events,
             commands::get_wp_cli_catalog,
+            commands::inspect_wp_cli_command,
+            commands::execute_wp_cli_command,
             commands::list_sites,
             commands::save_site,
             commands::delete_site,

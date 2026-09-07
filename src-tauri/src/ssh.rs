@@ -20,6 +20,7 @@ pub struct ExecOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: i32,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -375,28 +376,64 @@ impl SshExecutor for Ssh2Executor {
                         true,
                     )
                 })?;
-            if stdout.len() > command.max_output_bytes {
-                let _ = channel.close();
-                return Err(AppError::ssh(
-                    "output_limit",
-                    "De server stuurde te veel gegevens terug; de actie is veilig afgebroken.",
-                    format!("limiet {} bytes", command.max_output_bytes),
-                    false,
-                ));
-            }
-            let mut stderr = Vec::new();
-            channel
-                .stderr()
-                .take(256 * 1024)
-                .read_to_end(&mut stderr)
-                .map_err(|error| {
+            let mut truncated = stdout.len() > command.max_output_bytes;
+            if truncated {
+                if !command.truncate_output {
+                    let _ = channel.close();
+                    return Err(AppError::ssh(
+                        "output_limit",
+                        "De server stuurde te veel gegevens terug; de actie is veilig afgebroken.",
+                        format!("limiet {} bytes", command.max_output_bytes),
+                        false,
+                    ));
+                }
+                stdout.truncate(command.max_output_bytes);
+                std::io::copy(&mut channel, &mut std::io::sink()).map_err(|error| {
                     AppError::ssh(
                         "ssh_channel",
-                        "De technische servermelding kon niet worden gelezen.",
+                        "Het resterende serverantwoord kon niet worden verwerkt.",
                         error,
                         true,
                     )
                 })?;
+            }
+            let mut stderr = Vec::new();
+            {
+                let mut stderr_stream = channel.stderr();
+                stderr_stream
+                    .by_ref()
+                    .take(256 * 1024 + 1)
+                    .read_to_end(&mut stderr)
+                    .map_err(|error| {
+                        AppError::ssh(
+                            "ssh_channel",
+                            "De technische servermelding kon niet worden gelezen.",
+                            error,
+                            true,
+                        )
+                    })?;
+                if stderr.len() > 256 * 1024 {
+                    if !command.truncate_output {
+                        let _ = channel.close();
+                        return Err(AppError::ssh(
+                            "output_limit",
+                            "De server stuurde te veel technische uitvoer terug; de actie is veilig afgebroken.",
+                            "stderr-limiet 262144 bytes",
+                            false,
+                        ));
+                    }
+                    stderr.truncate(256 * 1024);
+                    truncated = true;
+                    std::io::copy(&mut stderr_stream, &mut std::io::sink()).map_err(|error| {
+                        AppError::ssh(
+                            "ssh_channel",
+                            "De resterende technische uitvoer kon niet worden verwerkt.",
+                            error,
+                            true,
+                        )
+                    })?;
+                }
+            }
             channel.wait_close().map_err(|error| {
                 map_ssh_error(
                     "ssh_channel",
@@ -411,6 +448,7 @@ impl SshExecutor for Ssh2Executor {
                 stdout,
                 stderr,
                 exit_code,
+                truncated,
             })
         })();
         match &result {

@@ -559,6 +559,7 @@ mod tests {
             stdout: text.as_bytes().to_vec(),
             stderr: Vec::new(),
             exit_code: 0,
+            truncated: false,
         }
     }
 
@@ -618,6 +619,7 @@ mod tests {
                 stdout: Vec::new(),
                 stderr: b"export failed".to_vec(),
                 exit_code: 1,
+                truncated: false,
             },
         );
         let ssh = BackupFailingSsh {

@@ -207,6 +207,7 @@ mod tests {
                 stdout,
                 stderr: Vec::new(),
                 exit_code: 0,
+                truncated: false,
             })
         }
 

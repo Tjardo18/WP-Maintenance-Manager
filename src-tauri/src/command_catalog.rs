@@ -81,6 +81,7 @@ pub struct RemoteCommand {
     pub mutating: bool,
     pub timeout: Duration,
     pub max_output_bytes: usize,
+    pub truncate_output: bool,
 }
 
 pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand, AppError> {
@@ -452,6 +453,7 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         mutating,
         timeout,
         max_output_bytes: max,
+        truncate_output: false,
     })
 }
 

@@ -115,3 +115,25 @@ export interface WpCliSuggestion {
   command?: WpCliCommandNode;
   parameter?: ParsedWpCliParameter;
 }
+export type WpCliRisk = "readOnly" | "mutating" | "highRisk";
+export interface WpCliCommandInspection {
+  risk: WpCliRisk;
+  commandFamily: string;
+  summary: string;
+  requiresConfirmation: boolean;
+  requiresTypedConfirmation: boolean;
+  confirmationPhrase?: string;
+}
+export type WpCliExecutionStatus = "success" | "warning" | "failed";
+export interface WpCliExecutionResult {
+  status: WpCliExecutionStatus;
+  risk: WpCliRisk;
+  commandFamily: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  durationMs: number;
+  startedAt: string;
+  finishedAt: string;
+  truncated: boolean;
+}
