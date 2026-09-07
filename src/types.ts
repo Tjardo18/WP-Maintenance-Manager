@@ -90,3 +90,28 @@ export interface WpCliCatalog {
   error?: string;
   technicalDetails?: string;
 }
+export interface ParsedWpCliParameter {
+  rawSyntax: string;
+  displayText: string;
+  insertText: string;
+  required: boolean;
+  optional: boolean;
+  repeatable: boolean;
+  takesValue: boolean;
+  valueOptional: boolean;
+  placeholder?: string;
+  positional: boolean;
+  description: string;
+}
+export type WpCliSuggestionType = "command" | "subcommand" | "parameter" | "globalParameter" | "positional";
+export interface WpCliSuggestion {
+  id: string;
+  type: WpCliSuggestionType;
+  label: string;
+  description: string;
+  insertText: string;
+  replaceStart: number;
+  replaceEnd: number;
+  command?: WpCliCommandNode;
+  parameter?: ParsedWpCliParameter;
+}
