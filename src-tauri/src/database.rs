@@ -1,9 +1,10 @@
 use crate::{
     error::AppError,
     models::{
-        AuditEvent, AuthConfig, AuthMethod, ChecksumFindingRecord, ChecksumStatus, Finding,
-        FindingSeverity, MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput,
-        SiteStatus, StepStatus, StoredSite, UpdateItem,
+        AuditEvent, AuthConfig, AuthMethod, ChecksumFindingRecord, ChecksumStatus, ErrorCategory,
+        ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity, Finding, FindingSeverity,
+        MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus,
+        StepStatus, StoredSite, UpdateItem,
     },
 };
 use chrono::{SecondsFormat, Utc};
@@ -90,6 +91,20 @@ impl Database {
             transaction.execute_batch(include_str!("../migrations/0005_scan_diagnostics.sql"))?;
             transaction.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(5, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
+        let error_log_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 6)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !error_log_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!("../migrations/0006_error_log.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(6, ?1)",
                 [utc_now()],
             )?;
             transaction.commit()?;
@@ -576,6 +591,108 @@ impl Database {
             .collect::<rusqlite::Result<_>>()
             .map_err(AppError::from)
     }
+
+    pub fn save_error_log(&self, record: &ErrorLogRecord) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        let cause_chain = if record.cause_chain.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&record.cause_chain).map_err(AppError::storage)?)
+        };
+        transaction.execute(
+            "INSERT INTO error_logs(id,created_at,severity,category,site_id,site_name,action,summary,technical_details,exit_code,cause_chain,duration_ms,retryable) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![record.id, record.created_at, record.severity.as_db(), record.category.as_db(), record.site_id, record.site_name, record.action, record.summary, record.technical_details, record.exit_code, cause_chain, record.duration_ms.and_then(|value| i64::try_from(value).ok()), record.retryable],
+        )?;
+        transaction.execute(
+            "DELETE FROM error_logs WHERE datetime(created_at) < datetime('now', '-30 days')",
+            [],
+        )?;
+        transaction.execute(
+            "DELETE FROM error_logs WHERE id IN (SELECT id FROM error_logs ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET 10000)",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn list_error_logs(&self, filter: &ErrorLogFilter) -> Result<ErrorLogPage, AppError> {
+        let connection = self.connect()?;
+        let category = filter.category.map(ErrorCategory::as_db);
+        let severity = filter.severity.map(ErrorSeverity::as_db);
+        let query = filter
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                let bounded: String = value.chars().take(200).collect();
+                format!("%{}%", bounded.to_lowercase())
+            });
+        let limit = filter.limit.unwrap_or(50).clamp(1, 100);
+        let offset = filter.offset.unwrap_or(0).min(100_000);
+        let where_sql = "(?1 IS NULL OR e.site_id=?1) AND (?2 IS NULL OR e.category=?2) AND (?3 IS NULL OR e.severity=?3) AND (?4 IS NULL OR e.created_at>=?4) AND (?5 IS NULL OR e.created_at<=?5) AND (?6 IS NULL OR lower(e.summary || ' ' || COALESCE(e.technical_details,'') || ' ' || e.action || ' ' || COALESCE(e.site_name,'')) LIKE ?6)";
+        let total: i64 = connection.query_row(
+            &format!("SELECT COUNT(*) FROM error_logs e WHERE {where_sql}"),
+            params![
+                filter.site_id,
+                category,
+                severity,
+                filter.from,
+                filter.to,
+                query
+            ],
+            |row| row.get(0),
+        )?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT e.id,e.created_at,e.severity,e.category,e.site_id,e.site_name,e.action,e.summary,e.technical_details,e.exit_code,e.cause_chain,e.duration_ms,e.retryable FROM error_logs e WHERE {where_sql} ORDER BY e.created_at DESC,e.rowid DESC LIMIT ?7 OFFSET ?8"
+        ))?;
+        let records = statement
+            .query_map(
+                params![
+                    filter.site_id,
+                    category,
+                    severity,
+                    filter.from,
+                    filter.to,
+                    query,
+                    limit,
+                    offset
+                ],
+                row_to_error_log,
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ErrorLogPage {
+            records,
+            total: u64::try_from(total).unwrap_or(0),
+            limit,
+            offset,
+        })
+    }
+}
+
+fn row_to_error_log(row: &Row<'_>) -> rusqlite::Result<ErrorLogRecord> {
+    let cause_chain_json: Option<String> = row.get(10)?;
+    Ok(ErrorLogRecord {
+        id: row.get(0)?,
+        created_at: row.get(1)?,
+        severity: ErrorSeverity::from_db(&row.get::<_, String>(2)?),
+        category: ErrorCategory::from_db(&row.get::<_, String>(3)?),
+        site_id: row.get(4)?,
+        site_name: row.get(5)?,
+        action: row.get(6)?,
+        summary: row.get(7)?,
+        technical_details: row.get(8)?,
+        exit_code: row.get(9)?,
+        cause_chain: cause_chain_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok())
+            .unwrap_or_default(),
+        duration_ms: row
+            .get::<_, Option<i64>>(11)?
+            .and_then(|value| u64::try_from(value).ok()),
+        retryable: row.get(12)?,
+    })
 }
 
 fn row_to_stored_site(row: &Row<'_>) -> rusqlite::Result<StoredSite> {
@@ -626,6 +743,49 @@ mod tests {
             wordpress_path: "/var/www/public".into(),
             credential_secret: None,
         }
+    }
+
+    fn error_record(id: &str, created_at: &str) -> ErrorLogRecord {
+        ErrorLogRecord {
+            id: id.into(),
+            created_at: created_at.into(),
+            severity: ErrorSeverity::Error,
+            category: ErrorCategory::SshChannel,
+            site_id: None,
+            site_name: Some("Voorbeeld".into()),
+            action: "SSH verbinden".into(),
+            summary: "Verbinding mislukt".into(),
+            technical_details: Some("connection reset".into()),
+            exit_code: None,
+            cause_chain: Vec::new(),
+            duration_ms: Some(20),
+            retryable: true,
+        }
+    }
+
+    #[test]
+    fn error_log_persists_filters_and_removes_expired_records() {
+        let path = std::env::temp_dir().join(format!("wpmm-errors-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        database
+            .save_error_log(&error_record("ERR-OLD", "2020-01-01T00:00:00.000Z"))
+            .unwrap();
+        database
+            .save_error_log(&error_record("ERR-NEW", &utc_now()))
+            .unwrap();
+
+        let page = database
+            .list_error_logs(&ErrorLogFilter {
+                category: Some(ErrorCategory::SshChannel),
+                query: Some("reset".into()),
+                ..ErrorLogFilter::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.records[0].id, "ERR-NEW");
+        assert!(!page.records.iter().any(|record| record.id == "ERR-OLD"));
+        drop(database);
+        let _ = fs::remove_file(path);
     }
     #[test]
     fn migrates_and_roundtrips_sites() {

@@ -8,6 +8,7 @@ mod credentials;
 mod database;
 mod engine;
 mod error;
+mod error_log;
 mod health;
 mod maintenance;
 mod models;
@@ -54,6 +55,7 @@ pub fn run() {
             commands::change_password,
             commands::set_idle_timeout,
             commands::list_audit_events,
+            commands::list_error_logs,
             commands::get_wp_cli_catalog,
             commands::inspect_wp_cli_command,
             commands::execute_wp_cli_command,

@@ -3,13 +3,13 @@ use crate::{
     command_catalog::{RemoteAction, RemoteCommand, build},
     core_operations, engine,
     error::AppError,
-    maintenance,
+    error_log, maintenance,
     models::{
         AppSettings, AuditEvent, AuthStatus, BulkScanFailure, BulkScanProgress, BulkScanResult,
         ChecksumDeleteFailure, ChecksumDeleteResult, ConnectionStep, ConnectionTestResult,
-        CoreOperationInfo, CoreOperationKind, CoreOperationResult, FilePreview, LoginResult,
-        MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput,
-        SiteStatus, StepStatus, StoredSite, UpdateItem, WordPressUserDeleteInput,
+        CoreOperationInfo, CoreOperationKind, CoreOperationResult, ErrorLogFilter, ErrorLogPage,
+        FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult,
+        Site, SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem, WordPressUserDeleteInput,
         WordPressUserUpdateInput, WordPressUsersData,
     },
     state::AppState,
@@ -184,6 +184,39 @@ pub fn list_audit_events(
     state.database.list_audit_events(site_id.as_deref())
 }
 
+#[tauri::command]
+pub fn list_error_logs(
+    session_token: String,
+    filter: ErrorLogFilter,
+    state: State<'_, AppState>,
+) -> Result<ErrorLogPage, AppError> {
+    require_auth(&state, &session_token)?;
+    state.database.list_error_logs(&filter)
+}
+
+fn log_operation_error<T>(
+    state: &AppState,
+    site_id: Option<&str>,
+    action: &str,
+    started: Instant,
+    result: Result<T, AppError>,
+) -> Result<T, AppError> {
+    result.map_err(|error| {
+        let site_name = site_id
+            .and_then(|id| state.database.get_site(id).ok())
+            .map(|stored| stored.site.name);
+        error_log::persist_error(
+            &state.database,
+            site_id,
+            site_name.as_deref(),
+            action,
+            Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+            None,
+            error,
+        )
+    })
+}
+
 fn require_auth(state: &AppState, session_token: &str) -> Result<(), AppError> {
     let config = state.database.auth_config()?.ok_or_else(|| {
         AppError::unauthorized(
@@ -228,12 +261,20 @@ pub fn execute_wp_cli_command(
     state: State<'_, AppState>,
 ) -> Result<wp_cli::WpCliExecutionResult, AppError> {
     require_auth(&state, &session_token)?;
-    execute_wp_cli_internal(
+    let started = Instant::now();
+    let result = execute_wp_cli_internal(
         state.inner(),
         &site_id,
         &command,
         confirmed,
         typed_confirmation.as_deref(),
+    );
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "WP-CLI command uitvoeren",
+        started,
+        result,
     )
 }
 
@@ -282,6 +323,19 @@ fn execute_wp_cli_internal(
     } else {
         wp_cli::WpCliExecutionStatus::Warning
     };
+    if output.exit_code != 0 {
+        let error = AppError::command_failed("WP-CLI command", output.exit_code, &stderr);
+        let site_name = stored.site.name.as_str();
+        let _ = error_log::persist_error(
+            &state.database,
+            Some(site_id),
+            Some(site_name),
+            "WP-CLI command uitvoeren",
+            Some(duration_ms),
+            Some(output.exit_code),
+            error,
+        );
+    }
     save_wp_cli_audit(
         state,
         site_id,
@@ -436,6 +490,7 @@ pub fn test_connection(
     state: State<'_, AppState>,
 ) -> Result<ConnectionTestResult, AppError> {
     require_auth(&state, &session_token)?;
+    let started = Instant::now();
     validate_site(&input)?;
     let existing = match input.id.as_deref() {
         Some(id) => Some(state.database.get_site(id)?),
@@ -469,7 +524,9 @@ pub fn test_connection(
         }
         Err(error) => {
             steps[0].status = StepStatus::Failed;
-            return Ok(failed_connection(steps, None, error));
+            return Ok(failed_connection_with_log(
+                &state, &site, started, steps, None, error,
+            ));
         }
     };
     match site.pinned_host_key.as_deref() {
@@ -490,7 +547,10 @@ pub fn test_connection(
         }
         Some(expected) if expected != fingerprint => {
             steps[1].status = StepStatus::Failed;
-            return Ok(failed_connection(
+            return Ok(failed_connection_with_log(
+                &state,
+                &site,
+                started,
                 steps,
                 Some(fingerprint.clone()),
                 AppError::ssh(
@@ -505,7 +565,14 @@ pub fn test_connection(
     }
     if let Err(error) = state.ssh.authenticate(&site, credential.as_deref()) {
         steps[2].status = StepStatus::Failed;
-        return Ok(failed_connection(steps, Some(fingerprint), error));
+        return Ok(failed_connection_with_log(
+            &state,
+            &site,
+            started,
+            steps,
+            Some(fingerprint),
+            error,
+        ));
     }
     steps[2].status = StepStatus::Success;
 
@@ -516,7 +583,14 @@ pub fn test_connection(
         build(&site.wordpress_path, RemoteAction::TestWordPressPath)?,
     ) {
         steps[3].status = StepStatus::Failed;
-        return Ok(failed_connection(steps, Some(fingerprint), error));
+        return Ok(failed_connection_with_log(
+            &state,
+            &site,
+            started,
+            steps,
+            Some(fingerprint),
+            error,
+        ));
     }
     steps[3].status = StepStatus::Success;
 
@@ -531,7 +605,14 @@ pub fn test_connection(
             error.category = "wp_cli_missing".into();
             error.user_message = "WP-CLI is niet beschikbaar op deze server.".into();
             steps[4].status = StepStatus::Failed;
-            return Ok(failed_connection(steps, Some(fingerprint), error));
+            return Ok(failed_connection_with_log(
+                &state,
+                &site,
+                started,
+                steps,
+                Some(fingerprint),
+                error,
+            ));
         }
     };
     steps[4].status = StepStatus::Success;
@@ -545,7 +626,14 @@ pub fn test_connection(
         error.category = "invalid_wordpress_path".into();
         error.user_message = "Op dit pad is geen werkende WordPress-installatie gevonden.".into();
         steps[5].status = StepStatus::Failed;
-        return Ok(failed_connection(steps, Some(fingerprint), error));
+        return Ok(failed_connection_with_log(
+            &state,
+            &site,
+            started,
+            steps,
+            Some(fingerprint),
+            error,
+        ));
     }
     steps[5].status = StepStatus::Success;
 
@@ -556,7 +644,14 @@ pub fn test_connection(
         build(&site.wordpress_path, RemoteAction::CheckDatabase)?,
     ) {
         steps[6].status = StepStatus::Failed;
-        return Ok(failed_connection(steps, Some(fingerprint), error));
+        return Ok(failed_connection_with_log(
+            &state,
+            &site,
+            started,
+            steps,
+            Some(fingerprint),
+            error,
+        ));
     }
     steps[6].status = StepStatus::Success;
 
@@ -605,7 +700,15 @@ pub fn scan_site(
     state: State<'_, AppState>,
 ) -> Result<ScanResult, AppError> {
     require_auth(&state, &session_token)?;
-    scan_site_internal(&state, &site_id, modified_days)
+    let started = Instant::now();
+    let result = scan_site_internal(&state, &site_id, modified_days);
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "Securityscan uitvoeren",
+        started,
+        result,
+    )
 }
 
 #[tauri::command]
@@ -628,13 +731,23 @@ pub fn preview_checksum_finding(
     state: State<'_, AppState>,
 ) -> Result<FilePreview, AppError> {
     require_auth(&state, &session_token)?;
-    validate_checksum_ids(&site_id, std::slice::from_ref(&finding_id))?;
-    let stored = state.database.get_site(&site_id)?;
-    let record = state
-        .database
-        .current_unexpected_checksum_finding(&site_id, &finding_id)?;
-    let credential = stored_credential(&state, &stored)?;
-    checksum_files::preview(state.ssh.as_ref(), &stored, credential.as_deref(), &record)
+    let started = Instant::now();
+    let result = (|| {
+        validate_checksum_ids(&site_id, std::slice::from_ref(&finding_id))?;
+        let stored = state.database.get_site(&site_id)?;
+        let record = state
+            .database
+            .current_unexpected_checksum_finding(&site_id, &finding_id)?;
+        let credential = stored_credential(&state, &stored)?;
+        checksum_files::preview(state.ssh.as_ref(), &stored, credential.as_deref(), &record)
+    })();
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "Checksum-bestand bekijken",
+        started,
+        result,
+    )
 }
 
 #[tauri::command]
@@ -645,7 +758,15 @@ pub fn delete_checksum_finding(
     state: State<'_, AppState>,
 ) -> Result<ChecksumDeleteResult, AppError> {
     require_auth(&state, &session_token)?;
-    delete_checksum_findings_internal(&state, &site_id, vec![finding_id], false)
+    let started = Instant::now();
+    let result = delete_checksum_findings_internal(&state, &site_id, vec![finding_id], false);
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "Checksum-bestand verwijderen",
+        started,
+        result,
+    )
 }
 
 #[tauri::command]
@@ -656,7 +777,15 @@ pub fn delete_checksum_findings(
     state: State<'_, AppState>,
 ) -> Result<ChecksumDeleteResult, AppError> {
     require_auth(&state, &session_token)?;
-    delete_checksum_findings_internal(&state, &site_id, finding_ids, true)
+    let started = Instant::now();
+    let result = delete_checksum_findings_internal(&state, &site_id, finding_ids, true);
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "Checksum-bestanden verwijderen",
+        started,
+        result,
+    )
 }
 
 fn delete_checksum_findings_internal(
@@ -1028,11 +1157,21 @@ pub fn check_updates(
     state: State<'_, AppState>,
 ) -> Result<Vec<UpdateItem>, AppError> {
     require_auth(&state, &session_token)?;
-    let stored = state.database.get_site(&site_id)?;
-    let credential = stored_credential(&state, &stored)?;
-    let updates = engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref())?;
-    state.database.save_updates(&site_id, &updates)?;
-    Ok(updates)
+    let started = Instant::now();
+    let result = (|| {
+        let stored = state.database.get_site(&site_id)?;
+        let credential = stored_credential(&state, &stored)?;
+        let updates = engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref())?;
+        state.database.save_updates(&site_id, &updates)?;
+        Ok(updates)
+    })();
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "Updates controleren",
+        started,
+        result,
+    )
 }
 
 #[tauri::command]
@@ -1042,11 +1181,21 @@ pub fn list_wordpress_users(
     state: State<'_, AppState>,
 ) -> Result<WordPressUsersData, AppError> {
     require_auth(&state, &session_token)?;
-    uuid::Uuid::parse_str(&site_id)
-        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
-    let stored = state.database.get_site(&site_id)?;
-    let credential = stored_credential(&state, &stored)?;
-    wordpress_users::load(state.ssh.as_ref(), &stored, credential.as_deref())
+    let started = Instant::now();
+    let result = (|| {
+        uuid::Uuid::parse_str(&site_id)
+            .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+        let stored = state.database.get_site(&site_id)?;
+        let credential = stored_credential(&state, &stored)?;
+        wordpress_users::load(state.ssh.as_ref(), &stored, credential.as_deref())
+    })();
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "WordPress-gebruikers laden",
+        started,
+        result,
+    )
 }
 
 #[tauri::command]
@@ -1057,6 +1206,7 @@ pub fn update_wordpress_user(
     state: State<'_, AppState>,
 ) -> Result<WordPressUsersData, AppError> {
     require_auth(&state, &session_token)?;
+    let started = Instant::now();
     uuid::Uuid::parse_str(&site_id)
         .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
     let stored = state.database.get_site(&site_id)?;
@@ -1074,7 +1224,13 @@ pub fn update_wordpress_user(
             input.role.as_deref().unwrap_or("unchanged")
         )),
     );
-    result
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "WordPress-gebruiker bijwerken",
+        started,
+        result,
+    )
 }
 
 #[tauri::command]
@@ -1085,6 +1241,7 @@ pub fn delete_wordpress_user(
     state: State<'_, AppState>,
 ) -> Result<WordPressUsersData, AppError> {
     require_auth(&state, &session_token)?;
+    let started = Instant::now();
     uuid::Uuid::parse_str(&site_id)
         .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
     let stored = state.database.get_site(&site_id)?;
@@ -1103,7 +1260,13 @@ pub fn delete_wordpress_user(
         result.as_ref().err(),
         Some(&details),
     );
-    result
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "WordPress-gebruiker verwijderen",
+        started,
+        result,
+    )
 }
 
 fn audit_wordpress_user_action(
@@ -1144,22 +1307,39 @@ pub fn run_update(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     require_auth(&state, &session_token)?;
-    if matches!(kind.as_str(), "core" | "all") {
+    let started = Instant::now();
+    let result = run_update_internal(&state, &site_id, &kind, slug.as_deref());
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "WordPress-update uitvoeren",
+        started,
+        result,
+    )
+}
+
+fn run_update_internal(
+    state: &AppState,
+    site_id: &str,
+    kind: &str,
+    slug: Option<&str>,
+) -> Result<(), AppError> {
+    if matches!(kind, "core" | "all") {
         return Err(AppError::validation(
             "Gebruik voor WordPress core de beveiligde core-updateflow met preflight, backup en nacontrole.",
         ));
     }
-    let stored = state.database.get_site(&site_id)?;
-    let credential = stored_credential(&state, &stored)?;
+    let stored = state.database.get_site(site_id)?;
+    let credential = stored_credential_from_state(state, &stored)?;
     engine::run_update(
         state.ssh.as_ref(),
         &stored,
         credential.as_deref(),
-        &kind,
-        slug.as_deref(),
+        kind,
+        slug,
     )?;
     let updates = engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref())?;
-    state.database.save_updates(&site_id, &updates)?;
+    state.database.save_updates(site_id, &updates)?;
     let wordpress = engine::text_action(
         state.ssh.as_ref(),
         &stored,
@@ -1174,7 +1354,7 @@ pub fn run_update(
     )?;
     state
         .database
-        .update_versions(&site_id, wordpress.trim(), php.trim())?;
+        .update_versions(site_id, wordpress.trim(), php.trim())?;
     Ok(())
 }
 
@@ -1193,11 +1373,21 @@ pub fn inspect_core_operation(
     state: State<'_, AppState>,
 ) -> Result<CoreOperationInfo, AppError> {
     require_auth(&state, &session_token)?;
-    uuid::Uuid::parse_str(&site_id)
-        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
-    let stored = state.database.get_site(&site_id)?;
-    let credential = stored_credential(&state, &stored)?;
-    core_operations::inspect(state.ssh.as_ref(), &stored, credential.as_deref())
+    let started = Instant::now();
+    let result = (|| {
+        uuid::Uuid::parse_str(&site_id)
+            .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+        let stored = state.database.get_site(&site_id)?;
+        let credential = stored_credential(&state, &stored)?;
+        core_operations::inspect(state.ssh.as_ref(), &stored, credential.as_deref())
+    })();
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "WordPress core inspecteren",
+        started,
+        result,
+    )
 }
 
 #[tauri::command]
@@ -1208,7 +1398,15 @@ pub fn repair_wordpress_core(
     state: State<'_, AppState>,
 ) -> Result<CoreOperationResult, AppError> {
     require_auth(&state, &session_token)?;
-    run_core_operation(&app, &state, &site_id, CoreOperationKind::Repair)
+    let started = Instant::now();
+    let result = run_core_operation(&app, &state, &site_id, CoreOperationKind::Repair);
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "WordPress core herstellen",
+        started,
+        result,
+    )
 }
 
 #[tauri::command]
@@ -1219,7 +1417,15 @@ pub fn update_wordpress_core(
     state: State<'_, AppState>,
 ) -> Result<CoreOperationResult, AppError> {
     require_auth(&state, &session_token)?;
-    run_core_operation(&app, &state, &site_id, CoreOperationKind::Update)
+    let started = Instant::now();
+    let result = run_core_operation(&app, &state, &site_id, CoreOperationKind::Update);
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "WordPress core bijwerken",
+        started,
+        result,
+    )
 }
 
 fn run_core_operation(
@@ -1320,12 +1526,28 @@ pub fn run_maintenance(
     state: State<'_, AppState>,
 ) -> Result<MaintenanceRun, AppError> {
     require_auth(&state, &session_token)?;
-    let stored = state.database.get_site(&site_id)?;
-    let credential = stored_credential(&state, &stored)?;
+    let started = Instant::now();
+    let result = run_maintenance_internal(&app, &state, &site_id);
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "Onderhoud uitvoeren",
+        started,
+        result,
+    )
+}
+
+fn run_maintenance_internal(
+    app: &AppHandle,
+    state: &AppState,
+    site_id: &str,
+) -> Result<MaintenanceRun, AppError> {
+    let stored = state.database.get_site(site_id)?;
+    let credential = stored_credential_from_state(state, &stored)?;
     let run = maintenance::new_run(&stored);
     state.database.start_maintenance(&run)?;
     let run_id = run.id.clone();
-    let event_site_id = site_id.clone();
+    let event_site_id = site_id.to_owned();
     let outcome = maintenance::execute(
         state.ssh.as_ref(),
         &stored,
@@ -1351,12 +1573,12 @@ pub fn run_maintenance(
             .save_scan(&scan.result, &scan.security_status)?;
         state
             .database
-            .update_versions(&site_id, &scan.wordpress_version, &scan.php_version)?;
+            .update_versions(site_id, &scan.wordpress_version, &scan.php_version)?;
     }
     if outcome.run.before_versions.is_some() {
         state
             .database
-            .save_updates(&site_id, &outcome.updates_after)?;
+            .save_updates(site_id, &outcome.updates_after)?;
     }
     let backup_values = outcome.backup.as_ref().map(|backup| {
         (
@@ -1464,6 +1686,26 @@ fn failed_connection(
         detected_url: None,
         error: Some(error),
     }
+}
+
+fn failed_connection_with_log(
+    state: &AppState,
+    site: &Site,
+    started: Instant,
+    steps: Vec<ConnectionStep>,
+    fingerprint: Option<String>,
+    error: AppError,
+) -> ConnectionTestResult {
+    let error = error_log::persist_error(
+        &state.database,
+        (!site.id.is_empty()).then_some(site.id.as_str()),
+        Some(&site.name),
+        "SSH verbinding testen",
+        Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+        None,
+        error,
+    );
+    failed_connection(steps, fingerprint, error)
 }
 
 fn stored_credential(

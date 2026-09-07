@@ -4,6 +4,8 @@ use std::fmt::{Display, Formatter};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppError {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_id: Option<String>,
     pub category: String,
     pub user_message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -54,6 +56,7 @@ impl AppError {
 
     pub fn unauthorized(category: &str, message: &str) -> Self {
         Self {
+            error_id: None,
             category: category.into(),
             user_message: message.into(),
             technical_details: None,
@@ -63,6 +66,7 @@ impl AppError {
 
     pub fn rate_limited(retry_after_seconds: u64) -> Self {
         Self {
+            error_id: None,
             category: "rate_limited".into(),
             user_message: format!(
                 "Te veel mislukte pogingen. Probeer het over {retry_after_seconds} seconden opnieuw."
@@ -74,6 +78,7 @@ impl AppError {
 
     pub fn validation(message: impl Into<String>) -> Self {
         Self {
+            error_id: None,
             category: "validation".into(),
             user_message: message.into(),
             technical_details: None,
@@ -83,6 +88,7 @@ impl AppError {
 
     pub fn storage(error: impl Display) -> Self {
         Self {
+            error_id: None,
             category: "storage".into(),
             user_message: "Lokale gegevens konden niet worden verwerkt.".into(),
             technical_details: Some(error.to_string()),
@@ -92,6 +98,7 @@ impl AppError {
 
     pub fn credential(error: impl Display) -> Self {
         Self {
+            error_id: None,
             category: "credential_store".into(),
             user_message: "De beveiligde credentialopslag is niet beschikbaar.".into(),
             technical_details: Some(error.to_string()),
@@ -101,6 +108,7 @@ impl AppError {
 
     pub fn not_found(entity: &str) -> Self {
         Self {
+            error_id: None,
             category: "not_found".into(),
             user_message: format!("{entity} is niet gevonden."),
             technical_details: None,
@@ -115,6 +123,7 @@ impl AppError {
         retryable: bool,
     ) -> Self {
         Self {
+            error_id: None,
             category: category.into(),
             user_message: message.into(),
             technical_details: Some(detail.to_string()),
@@ -129,6 +138,7 @@ impl AppError {
             stderr.to_owned()
         };
         Self {
+            error_id: None,
             category: "command_failed".into(),
             user_message: "De servercontrole kon niet worden voltooid.".into(),
             technical_details: Some(format!(
@@ -136,6 +146,11 @@ impl AppError {
             )),
             retryable: true,
         }
+    }
+
+    pub fn with_error_id(mut self, error_id: String) -> Self {
+        self.error_id = Some(error_id);
+        self
     }
 }
 

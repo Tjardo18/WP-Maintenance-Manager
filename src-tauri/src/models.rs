@@ -42,6 +42,140 @@ pub struct AuditEvent {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorSeverity {
+    Warning,
+    Error,
+    Critical,
+}
+
+impl ErrorSeverity {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Critical => "critical",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "warning" => Self::Warning,
+            "critical" => Self::Critical,
+            _ => Self::Error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCategory {
+    Network,
+    Dns,
+    ConnectionTimeout,
+    SshAuthentication,
+    SshHostKey,
+    SshChannel,
+    SshCommand,
+    WpCli,
+    Database,
+    Http,
+    Filesystem,
+    Backup,
+    Update,
+    Parse,
+    Authentication,
+    Application,
+    Unknown,
+}
+
+impl ErrorCategory {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Dns => "dns",
+            Self::ConnectionTimeout => "connection_timeout",
+            Self::SshAuthentication => "ssh_authentication",
+            Self::SshHostKey => "ssh_host_key",
+            Self::SshChannel => "ssh_channel",
+            Self::SshCommand => "ssh_command",
+            Self::WpCli => "wp_cli",
+            Self::Database => "database",
+            Self::Http => "http",
+            Self::Filesystem => "filesystem",
+            Self::Backup => "backup",
+            Self::Update => "update",
+            Self::Parse => "parse",
+            Self::Authentication => "authentication",
+            Self::Application => "application",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "network" => Self::Network,
+            "dns" => Self::Dns,
+            "connection_timeout" => Self::ConnectionTimeout,
+            "ssh_authentication" => Self::SshAuthentication,
+            "ssh_host_key" => Self::SshHostKey,
+            "ssh_channel" => Self::SshChannel,
+            "ssh_command" => Self::SshCommand,
+            "wp_cli" => Self::WpCli,
+            "database" => Self::Database,
+            "http" => Self::Http,
+            "filesystem" => Self::Filesystem,
+            "backup" => Self::Backup,
+            "update" => Self::Update,
+            "parse" => Self::Parse,
+            "authentication" => Self::Authentication,
+            "application" => Self::Application,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorLogRecord {
+    pub id: String,
+    pub created_at: String,
+    pub severity: ErrorSeverity,
+    pub category: ErrorCategory,
+    pub site_id: Option<String>,
+    pub site_name: Option<String>,
+    pub action: String,
+    pub summary: String,
+    pub technical_details: Option<String>,
+    pub exit_code: Option<i32>,
+    pub cause_chain: Vec<String>,
+    pub duration_ms: Option<u64>,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorLogFilter {
+    pub site_id: Option<String>,
+    pub category: Option<ErrorCategory>,
+    pub severity: Option<ErrorSeverity>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub query: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorLogPage {
+    pub records: Vec<ErrorLogRecord>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AuthMethod {
     KeyFile,
