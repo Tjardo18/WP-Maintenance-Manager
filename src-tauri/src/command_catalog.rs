@@ -245,13 +245,16 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         }
         RemoteAction::FindPhpFiles => (
             "FindPhpFiles",
-            limit_nul_records(
-                format!("find {path}/wp-content -type f -name '*.php' -print0"),
-                MAX_SCAN_RESULTS + 1,
+            format!(
+                "LC_ALL=C php -r {} -- {}/wp-content",
+                shell_escape(
+                    r#"$root=$argv[1];$limit=5001;$count=0;$it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::LEAVES_ONLY,RecursiveIteratorIterator::CATCH_GET_CHILD);foreach($it as $file){if($count>=$limit)break;if(!$file->isFile()||strtolower($file->getExtension())!=='php')continue;$path=$file->getPathname();$sample=@file_get_contents($path,false,null,0,131072);$sample=$sample===false?'':$sample;$flags=[];$patterns=['eval'=>'~\\beval\\s*\\(~i','base64_decode'=>'~\\bbase64_decode\\s*\\(~i','gzinflate'=>'~\\bgzinflate\\s*\\(~i','gzuncompress'=>'~\\bgzuncompress\\s*\\(~i','str_rot13'=>'~\\bstr_rot13\\s*\\(~i','shell_exec'=>'~\\bshell_exec\\s*\\(~i','exec'=>'~(?<![_a-z])exec\\s*\\(~i','system'=>'~\\bsystem\\s*\\(~i','passthru'=>'~\\bpassthru\\s*\\(~i','proc_open'=>'~\\bproc_open\\s*\\(~i','popen'=>'~\\bpopen\\s*\\(~i','dynamic_call'=>'~\\$\\{?[A-Za-z_][A-Za-z0-9_]*\\}?\\s*\\(~'];foreach($patterns as $name=>$pattern){if(preg_match($pattern,$sample))$flags[]=$name;}if(preg_match('~[A-Za-z0-9+/]{800,}={0,2}~',$sample))$flags[]='long_encoded';if(preg_match('~[^\\r\\n]{4000,}~',$sample))$flags[]='long_line';if(strpos($sample,"\\0")!==false)$flags[]='non_text';if($file->getSize()>5242880)$flags[]='huge';printf("%s\\0%d\\0%d\\0%s\\0",$path,$file->getMTime(),$file->getSize(),implode(',',$flags));$count++;}"#,
+                ),
+                path,
             ),
             false,
             scan,
-            4 * 1024 * 1024,
+            8 * 1024 * 1024,
         ),
         RemoteAction::FindPhpInUploads => (
             "FindPhpInUploads",

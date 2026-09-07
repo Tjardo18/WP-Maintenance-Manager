@@ -9,6 +9,7 @@ use crate::{
 };
 use chrono::{Duration, NaiveDateTime, Utc};
 use serde_json::Value;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 pub fn parse_nul_paths(
@@ -55,6 +56,205 @@ pub fn parse_nul_paths(
         })
         .collect();
     (findings, truncated)
+}
+
+pub fn parse_php_inventory(output: &[u8], wordpress_path: &str) -> (Vec<Finding>, bool) {
+    let mut fields: Vec<&[u8]> = output.split(|byte| *byte == 0).collect();
+    if fields.last().is_some_and(|field| field.is_empty()) {
+        fields.pop();
+    }
+    let count = fields.len() / 4;
+    let truncated = count > MAX_SCAN_RESULTS;
+    let mut findings = Vec::with_capacity(count.min(MAX_SCAN_RESULTS));
+    for record in fields.chunks(4).take(MAX_SCAN_RESULTS) {
+        if record.len() != 4 {
+            continue;
+        }
+        let path = String::from_utf8_lossy(record[0]).into_owned();
+        let modified_at = String::from_utf8_lossy(record[1]).parse::<i64>().ok();
+        let size = String::from_utf8_lossy(record[2])
+            .parse::<u64>()
+            .unwrap_or(0);
+        let indicators: HashSet<String> = String::from_utf8_lossy(record[3])
+            .split(',')
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect();
+        findings.push(classify_php_file(
+            &path,
+            wordpress_path,
+            modified_at,
+            size,
+            &indicators,
+        ));
+    }
+    (findings, truncated)
+}
+
+fn classify_php_file(
+    path: &str,
+    wordpress_path: &str,
+    modified_at: Option<i64>,
+    _size: u64,
+    indicators: &HashSet<String>,
+) -> Finding {
+    let display = display_path(path, wordpress_path).replace('\\', "/");
+    let category = categorize_path(&display, "");
+    let lower = display.to_ascii_lowercase();
+    let file_name = lower.rsplit('/').next().unwrap_or(&lower);
+    let stem = file_name.strip_suffix(".php").unwrap_or(file_name);
+    let mut score = 0_u8;
+    let mut reasons = Vec::new();
+
+    match category.as_str() {
+        "uploads" => {
+            score += 5;
+            reasons.push("PHP-bestand bevindt zich in uploads");
+        }
+        "wp-content-root" if file_name != "index.php" => {
+            score += 2;
+            reasons.push("PHP-bestand staat direct onder wp-content");
+        }
+        "cache" | "backup" | "temp" | "upgrade" => {
+            score += 2;
+            reasons.push("PHP-bestand staat in een locatie die controle verdient");
+        }
+        "overige" => {
+            score += 2;
+            reasons.push("PHP-bestand staat buiten plugins, themes en mu-plugins");
+        }
+        _ => {}
+    }
+
+    if display
+        .split('/')
+        .any(|component| component.starts_with('.') && component.len() > 1)
+        || file_name == ".php"
+    {
+        score += 3;
+        reasons.push("Verborgen PHP-bestandsnaam of directory");
+    }
+    if has_suspicious_double_extension(file_name) {
+        score += 3;
+        reasons.push("Bestandsnaam heeft een opvallende dubbele extensie");
+    }
+    if looks_random(stem) {
+        score += 2;
+        reasons.push("Bestandsnaam oogt willekeurig of sterk gegenereerd");
+    }
+    if ["shell", "backdoor", "b374k", "wso", "r57", "cmd"]
+        .iter()
+        .any(|candidate| stem == *candidate || stem.starts_with(&format!("{candidate}-")))
+    {
+        score += 2;
+        reasons.push("Bestandsnaam lijkt op een tijdelijk beheer- of shellbestand");
+    }
+
+    let encoded = indicators.contains("base64_decode")
+        || indicators.contains("gzinflate")
+        || indicators.contains("gzuncompress")
+        || indicators.contains("str_rot13");
+    let compression_combo = indicators.contains("base64_decode")
+        && (indicators.contains("gzinflate") || indicators.contains("gzuncompress"));
+    if indicators.contains("eval") && encoded || compression_combo {
+        score += 3;
+        reasons.push("Combinatie van code-evaluatie en decoding/obfuscatie");
+    }
+    let execution_count = [
+        "shell_exec",
+        "exec",
+        "system",
+        "passthru",
+        "proc_open",
+        "popen",
+    ]
+    .iter()
+    .filter(|indicator| indicators.contains(**indicator))
+    .count();
+    if execution_count >= 2 {
+        score += 3;
+        reasons.push("Meerdere functies voor proces- of shelluitvoering aangetroffen");
+    }
+    if indicators.contains("dynamic_call") && encoded {
+        score += 2;
+        reasons.push("Dynamische functieaanroep gecombineerd met decoding");
+    }
+    if indicators.contains("long_encoded") || indicators.contains("long_line") {
+        score += 2;
+        reasons.push("Sterk geobfusceerde of gecodeerde lange payload aangetroffen");
+    }
+    if score >= 2
+        && modified_at.is_some_and(|timestamp| Utc::now().timestamp() - timestamp <= 7 * 86_400)
+    {
+        reasons.push("Bestand is in de afgelopen 7 dagen gewijzigd");
+    }
+
+    let attention = score >= 2;
+    Finding {
+        id: None,
+        category,
+        severity: if attention {
+            FindingSeverity::Attention
+        } else {
+            FindingSeverity::Info
+        },
+        title: if attention {
+            if lower.starts_with("wp-content/uploads/") {
+                "PHP-bestand in uploads".into()
+            } else {
+                "Controle aanbevolen".into()
+            }
+        } else {
+            "Normaal PHP-bestand".into()
+        },
+        detail: if attention {
+            format!(
+                "Redenen: {}. Dit is een heuristische melding en geen bewijs van malware.",
+                reasons.join("; ")
+            )
+        } else {
+            "Geen combinatie van opvallende locatie-, naam- of inhoudsindicatoren gevonden.".into()
+        },
+        path: Some(display),
+        checksum_status: None,
+        observed_at: modified_at.and_then(|timestamp| {
+            chrono::DateTime::from_timestamp(timestamp, 0).map(|value| value.to_rfc3339())
+        }),
+    }
+}
+
+fn has_suspicious_double_extension(file_name: &str) -> bool {
+    let Some(stem) = file_name.strip_suffix(".php") else {
+        return false;
+    };
+    [
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".ico", ".svg", ".txt", ".pdf", ".zip",
+    ]
+    .iter()
+    .any(|extension| stem.ends_with(extension))
+}
+
+fn looks_random(stem: &str) -> bool {
+    if stem.len() < 14
+        || !stem
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    let letters = stem
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .count();
+    let digits = stem
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .count();
+    let vowels = stem
+        .chars()
+        .filter(|character| matches!(character.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u'))
+        .count();
+    letters > 0 && digits > 0 && vowels * 5 <= stem.len()
 }
 
 pub fn parse_modified_files(output: &[u8], wordpress_path: &str) -> (Vec<Finding>, bool) {
@@ -489,6 +689,20 @@ pub fn categorize_path(path: &str, wordpress_path: &str) -> String {
         "themes"
     } else if relative.starts_with("wp-content/uploads/") {
         "uploads"
+    } else if relative == "wp-content"
+        || relative.starts_with("wp-content/") && !relative[11..].contains('/')
+    {
+        "wp-content-root"
+    } else if relative.starts_with("wp-content/cache/") {
+        "cache"
+    } else if relative.starts_with("wp-content/backup/")
+        || relative.starts_with("wp-content/backups/")
+    {
+        "backup"
+    } else if relative.starts_with("wp-content/tmp/") || relative.starts_with("wp-content/temp/") {
+        "temp"
+    } else if relative.starts_with("wp-content/upgrade/") {
+        "upgrade"
     } else if relative.starts_with("wp-admin/") || relative.starts_with("wp-includes/") {
         "wordpress-core"
     } else if !relative.contains('/') {
@@ -583,6 +797,112 @@ mod tests {
         assert_eq!(findings[0].category, "plugins");
         assert_eq!(findings[0].severity, FindingSeverity::Info);
         assert_eq!(findings[1].severity, FindingSeverity::Attention);
+    }
+
+    fn php_record(path: &str, modified: i64, size: u64, indicators: &str) -> Vec<u8> {
+        format!("{path}\0{modified}\0{size}\0{indicators}\0").into_bytes()
+    }
+
+    #[test]
+    fn php_classifier_hides_normal_plugin_theme_and_mu_plugin_files() {
+        for path in [
+            "/var/www/wp-content/plugins/example/plugin.php",
+            "/var/www/wp-content/themes/theme/functions.php",
+            "/var/www/wp-content/mu-plugins/custom.php",
+        ] {
+            let (findings, truncated) =
+                parse_php_inventory(&php_record(path, 0, 120, ""), "/var/www");
+            assert!(!truncated);
+            assert_eq!(findings[0].severity, FindingSeverity::Info, "{path}");
+        }
+    }
+
+    #[test]
+    fn php_classifier_explains_upload_double_extension_hidden_and_unusual_locations() {
+        let mut output = Vec::new();
+        output.extend(php_record(
+            "/var/www/wp-content/uploads/2026/image.jpg.php",
+            Utc::now().timestamp(),
+            10,
+            "",
+        ));
+        output.extend(php_record(
+            "/var/www/wp-content/plugins/example/.hidden.php",
+            0,
+            10,
+            "",
+        ));
+        output.extend(php_record("/var/www/wp-content/cache/cache.php", 0, 10, ""));
+        output.extend(php_record("/var/www/wp-content/random123.php", 0, 10, ""));
+        let (findings, _) = parse_php_inventory(&output, "/var/www");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.severity == FindingSeverity::Attention)
+        );
+        assert!(findings[0].detail.contains("uploads"));
+        assert!(findings[0].detail.contains("dubbele extensie"));
+        assert!(findings[0].detail.contains("afgelopen 7 dagen"));
+        assert!(findings[1].detail.contains("Verborgen"));
+        assert_eq!(findings[2].category, "cache");
+        assert_eq!(findings[3].category, "wp-content-root");
+    }
+
+    #[test]
+    fn php_classifier_requires_indicator_combinations_for_normal_locations() {
+        let cases = [
+            ("base64_decode", FindingSeverity::Info),
+            ("eval,base64_decode", FindingSeverity::Attention),
+            ("gzinflate,base64_decode", FindingSeverity::Attention),
+            ("system", FindingSeverity::Info),
+            ("system,shell_exec", FindingSeverity::Attention),
+            ("dynamic_call,base64_decode", FindingSeverity::Attention),
+            ("long_encoded", FindingSeverity::Attention),
+            ("non_text,huge", FindingSeverity::Info),
+        ];
+        for (indicators, expected) in cases {
+            let (findings, _) = parse_php_inventory(
+                &php_record(
+                    "/var/www/wp-content/plugins/example/normal.php",
+                    0,
+                    8_000_000,
+                    indicators,
+                ),
+                "/var/www",
+            );
+            assert_eq!(findings[0].severity, expected, "{indicators}");
+        }
+        let (empty, _) = parse_php_inventory(
+            &php_record("/var/www/wp-content/plugins/example/empty.php", 0, 0, ""),
+            "/var/www",
+        );
+        assert_eq!(empty[0].severity, FindingSeverity::Info);
+    }
+
+    #[test]
+    fn php_classifier_detects_random_names_and_bounds_large_inventories() {
+        let (random, _) = parse_php_inventory(
+            &php_record(
+                "/var/www/wp-content/plugins/example/x9k2m7q4z8p1n6.php",
+                0,
+                10,
+                "",
+            ),
+            "/var/www",
+        );
+        assert_eq!(random[0].severity, FindingSeverity::Attention);
+        let mut many = Vec::new();
+        for index in 0..=MAX_SCAN_RESULTS {
+            many.extend(php_record(
+                &format!("/var/www/wp-content/plugins/example/{index}.php"),
+                0,
+                10,
+                "",
+            ));
+        }
+        let (findings, truncated) = parse_php_inventory(&many, "/var/www");
+        assert_eq!(findings.len(), MAX_SCAN_RESULTS);
+        assert!(truncated);
     }
 
     #[test]

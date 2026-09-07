@@ -57,15 +57,9 @@ pub fn scan_site(
         match binary_action(executor, stored, credential, RemoteAction::FindPhpFiles) {
             Ok(output) => {
                 let (findings, cut) =
-                    parsers::parse_nul_paths(&output, &stored.site.wordpress_path, false);
+                    parsers::parse_php_inventory(&output, &stored.site.wordpress_path);
                 truncated |= cut;
-                findings_check(
-                    "php_files",
-                    "PHP in wp-content",
-                    findings,
-                    "PHP-bestanden",
-                    cut,
-                )
+                php_inventory_check(findings, cut)
             }
             Err(error) => failed_check("php_files", "PHP in wp-content", error),
         },
@@ -459,6 +453,33 @@ fn findings_check(
             StepStatus::Success
         },
         summary: format!("{} {noun} gevonden.{suffix}", findings.len()),
+        technical_details: None,
+        findings,
+    }
+}
+
+fn php_inventory_check(findings: Vec<Finding>, truncated: bool) -> ScanCheck {
+    let noteworthy = findings
+        .iter()
+        .filter(|finding| finding.severity != FindingSeverity::Info)
+        .count();
+    let suffix = if truncated {
+        " Er zijn meer resultaten dan weergegeven; verfijn de filters."
+    } else {
+        ""
+    };
+    ScanCheck {
+        key: "php_files".into(),
+        label: "PHP in wp-content".into(),
+        status: if noteworthy > 0 {
+            StepStatus::Warning
+        } else {
+            StepStatus::Success
+        },
+        summary: format!(
+            "{noteworthy} opvallende bestanden van {} geïnventariseerd.{suffix}",
+            findings.len()
+        ),
         technical_details: None,
         findings,
     }
