@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useRoute, RouterLink } from "vue-router";
-import { Check, ChevronRight, CircleAlert, Database, Edit3, Eye, FileCode2, HardDriveDownload, LoaderCircle, Play, RefreshCw, ShieldCheck, Trash2 } from "@lucide/vue";
+import { Check, ChevronRight, Database, Edit3, FileCode2, HardDriveDownload, LoaderCircle, Play, RefreshCw, ShieldCheck, Trash2 } from "@lucide/vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import ChecksumFilePreview from "../components/ChecksumFilePreview.vue";
+import SecurityChecks from "../components/SecurityChecks.vue";
 import WpCliConsole from "../components/WpCliConsole.vue";
 import { useSitesStore } from "../stores/sites";
 import { appApi } from "../services/tauri";
@@ -27,7 +28,6 @@ const administratorCount = computed(() => usersData.value?.users.filter((user) =
 const promotingAdministrator = computed(() => Boolean(editUser.value && editUserInput.value?.role === "administrator" && !editUser.value.roles.includes("administrator")));
 async function load() { if (!site.value) return; const results = await Promise.allSettled([appApi.checkUpdates(site.value.id), appApi.listHistory(site.value.id), appApi.listScans(site.value.id), appApi.listWordPressUsers(site.value.id)]); const [updateResult, historyResult, scansResult, usersResult] = results; if (updateResult.status === "fulfilled") updates.value = updateResult.value; if (historyResult.status === "fulfilled") history.value = historyResult.value; if (scansResult.status === "fulfilled") { scanHistory.value = scansResult.value; scan.value = scansResult.value[0]; } if (usersResult.status === "fulfilled") usersData.value = usersResult.value; const failed = results.find((result) => result.status === "rejected"); if (failed?.status === "rejected") error.value = errorMessage(failed.reason); }
 async function runScan() { if (!site.value) return; busy.value = "scan"; error.value = undefined; try { const result = await appApi.scanSite(site.value.id); scan.value = result; scanHistory.value = [result, ...scanHistory.value.filter((item) => item.id !== result.id)]; selectedFindingIds.value = []; deleteResult.value = undefined; activeTab.value = "Security"; await store.load(); } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
-function checksumLabel(finding: Finding) { return finding.checksumStatus === "modified" ? "Gewijzigd" : finding.checksumStatus === "missing" ? "Ontbreekt" : finding.checksumStatus === "unexpected" ? "Hoort niet aanwezig te zijn" : finding.checksumStatus === "scan_error" ? "Scan mislukt" : finding.title; }
 function toggleFinding(id: string) { selectedFindingIds.value = selectedFindingIds.value.includes(id) ? selectedFindingIds.value.filter((item) => item !== id) : [...selectedFindingIds.value, id]; }
 function selectAllUnexpected() { selectedFindingIds.value = unexpectedFindings.value.flatMap((finding) => finding.id ? [finding.id] : []); }
 async function openPreview(finding: Finding) { if (!site.value || !finding.id) return; busy.value = `preview-${finding.id}`; error.value = undefined; try { preview.value = await appApi.previewChecksumFinding(site.value.id, finding.id); } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
@@ -83,19 +83,7 @@ onUnmounted(() => stopProgress?.());
           <button class="button small danger" :disabled="!isLatestScan || !selectedFindingIds.length" @click="pendingDelete = unexpectedFindings.filter((finding) => finding.id && selectedFindingIds.includes(finding.id))"><Trash2 :size="14" /> {{ selectedFindingIds.length }} bestanden verwijderen</button>
         </div>
         <div v-if="!scan" class="empty-state compact"><component :is="activeTab === 'Bestanden' ? FileCode2 : activeTab === 'Database' ? Database : ShieldCheck" :size="38" /><h3>Nog geen scanresultaten</h3><p>Voer een scan uit om de resultaten op te slaan en hier te tonen.</p></div>
-        <div v-else class="check-list">
-          <article v-for="check in visibleChecks" :key="check.key" class="check-row">
-            <span :class="['check-symbol', check.status]"><Check v-if="check.status === 'success'" /><CircleAlert v-else /></span>
-            <div><h4>{{ check.label }}</h4><p>{{ check.summary }}</p><details v-if="check.status === 'failed' && check.technicalDetails" class="scan-diagnostic"><summary>Technische details</summary><pre>{{ check.technicalDetails }}</pre></details>
-              <div v-for="finding in check.findings" :key="finding.id ?? finding.path ?? finding.title" :class="['finding', { 'checksum-finding': finding.checksumStatus }]">
-                <label v-if="finding.checksumStatus === 'unexpected' && finding.id" class="finding-select"><input type="checkbox" :checked="selectedFindingIds.includes(finding.id)" :disabled="!isLatestScan" :aria-label="`${finding.path} selecteren`" @change="toggleFinding(finding.id)" /></label>
-                <div class="finding-copy"><span v-if="finding.checksumStatus" :class="['checksum-status', finding.checksumStatus]">{{ checksumLabel(finding) }}</span><strong v-else>{{ finding.title }}</strong><p>{{ finding.detail }}</p><code v-if="finding.path">{{ finding.path }}</code></div>
-                <div v-if="finding.checksumStatus === 'unexpected' && finding.id" class="finding-actions"><button class="button small secondary" :disabled="!!busy || !isLatestScan" @click="openPreview(finding)"><LoaderCircle v-if="busy === `preview-${finding.id}`" class="spin" :size="14" /><Eye v-else :size="14" /> Bekijk bestand</button><button class="button small danger-text" :disabled="!!busy || !isLatestScan" @click="pendingDelete = [finding]"><Trash2 :size="14" /> Verwijderen</button></div>
-              </div>
-            </div>
-            <StatusBadge :status="check.status" />
-          </article>
-        </div>
+        <SecurityChecks v-else :checks="visibleChecks" :finished-at="scan.finishedAt" :truncated="scan.truncated" :is-latest-scan="isLatestScan" :selected-finding-ids="selectedFindingIds" :busy="busy" :show-summary="activeTab === 'Security'" @toggle-finding="toggleFinding" @preview="openPreview" @delete="pendingDelete = [$event]" />
       </section>
     </template>
 
