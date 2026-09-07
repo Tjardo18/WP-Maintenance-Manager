@@ -43,6 +43,9 @@ export type ErrorCategory = "network" | "dns" | "connection_timeout" | "ssh_auth
 export interface ErrorLogRecord { id: string; createdAt: string; severity: ErrorSeverity; category: ErrorCategory; siteId?: string; siteName?: string; action: string; summary: string; technicalDetails?: string; exitCode?: number; causeChain: string[]; durationMs?: number; retryable: boolean }
 export interface ErrorLogFilter { siteId?: string; category?: ErrorCategory; severity?: ErrorSeverity; from?: string; to?: string; query?: string; limit?: number; offset?: number }
 export interface ErrorLogPage { records: ErrorLogRecord[]; total: number; limit: number; offset: number }
+export interface TerminalConnectionInfo { sessionId: string; siteId: string; startPath: string; columns: number; rows: number }
+export interface TerminalOutputEvent { sessionId: string; dataBase64: string }
+export interface TerminalStatusEvent { sessionId: string; status: "connected" | "disconnected" | "failed"; message?: string; error?: TechnicalError }
 export interface ConnectionTestResult {
   success: boolean;
   steps: Array<{ key: string; label: string; status: StepStatus; detail?: string }>;

@@ -13,6 +13,7 @@ use crate::{
         WordPressUserUpdateInput, WordPressUsersData,
     },
     state::AppState,
+    terminal::TerminalConnectionInfo,
     validation::validate_site,
     wordpress_users, wp_cli, wp_cli_catalog,
 };
@@ -116,6 +117,7 @@ pub fn touch_session(session_token: String, state: State<'_, AppState>) -> Resul
 #[tauri::command]
 pub fn lock_app(session_token: String, state: State<'_, AppState>) -> Result<(), AppError> {
     require_auth(&state, &session_token)?;
+    state.terminals.close_all();
     state.auth.invalidate()?;
     state.database.save_audit_event(
         None,
@@ -153,6 +155,7 @@ fn change_password_internal(state: &AppState, input: &PasswordChangeInput) -> Re
         state
             .database
             .save_audit_event(None, "password_change", "local_app", "success", None);
+    state.terminals.close_all();
     state.auth.invalidate()?;
     audit_result
 }
@@ -276,6 +279,77 @@ pub fn execute_wp_cli_command(
         started,
         result,
     )
+}
+
+#[tauri::command]
+pub fn open_terminal(
+    session_token: String,
+    site_id: String,
+    columns: u32,
+    rows: u32,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TerminalConnectionInfo, AppError> {
+    require_auth(&state, &session_token)?;
+    let started = Instant::now();
+    let result = (|| {
+        let stored = state.database.get_site(&site_id)?;
+        let credential = stored_credential(&state, &stored)?;
+        state.terminals.connect(
+            app,
+            state.database.clone(),
+            stored.site,
+            credential,
+            columns,
+            rows,
+        )
+    })();
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "SSH-terminal verbinden",
+        started,
+        result,
+    )
+}
+
+#[tauri::command]
+pub fn write_terminal(
+    session_token: String,
+    terminal_session_id: String,
+    data: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    if let Err(error) = require_auth(&state, &session_token) {
+        let _ = state.terminals.close(&terminal_session_id);
+        return Err(error);
+    }
+    state.terminals.write(&terminal_session_id, data)
+}
+
+#[tauri::command]
+pub fn resize_terminal(
+    session_token: String,
+    terminal_session_id: String,
+    columns: u32,
+    rows: u32,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    if let Err(error) = require_auth(&state, &session_token) {
+        let _ = state.terminals.close(&terminal_session_id);
+        return Err(error);
+    }
+    state.terminals.resize(&terminal_session_id, columns, rows)
+}
+
+#[tauri::command]
+pub fn close_terminal(
+    session_token: String,
+    terminal_session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    require_auth(&state, &session_token)?;
+    state.terminals.close(&terminal_session_id)
 }
 
 fn execute_wp_cli_internal(
@@ -1864,6 +1938,7 @@ mod tests {
             scan_concurrency: std::sync::atomic::AtomicUsize::new(1),
             bulk_scan_cancelled: Arc::new(AtomicBool::new(false)),
             auth: AuthManager::default(),
+            terminals: crate::terminal::TerminalManager::default(),
         }
     }
 

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanProgress, BulkScanResult, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanProgress, BulkScanResult, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -47,6 +47,12 @@ export const authApi = {
 };
 
 export const appApi = {
+  async openTerminal(siteId: string, columns: number, rows: number): Promise<TerminalConnectionInfo> { return isTauri() ? call("open_terminal", { siteId, columns, rows }) : { sessionId: crypto.randomUUID(), siteId, startPath: browserSites.find((site) => site.id === siteId)?.wordpressPath ?? "/var/www/html", columns, rows }; },
+  async writeTerminal(terminalSessionId: string, data: string): Promise<void> { if (isTauri()) await call("write_terminal", { terminalSessionId, data }); },
+  async resizeTerminal(terminalSessionId: string, columns: number, rows: number): Promise<void> { if (isTauri()) await call("resize_terminal", { terminalSessionId, columns, rows }); },
+  async closeTerminal(terminalSessionId: string): Promise<void> { if (isTauri()) await call("close_terminal", { terminalSessionId }); },
+  async onTerminalOutput(handler: (payload: TerminalOutputEvent) => void): Promise<UnlistenFn> { if (!isTauri()) return () => undefined; return listen("terminal-output", (event) => handler(event.payload as TerminalOutputEvent)); },
+  async onTerminalStatus(handler: (payload: TerminalStatusEvent) => void): Promise<UnlistenFn> { if (!isTauri()) return () => undefined; return listen("terminal-status", (event) => handler(event.payload as TerminalStatusEvent)); },
   async getWpCliCatalog(): Promise<WpCliCatalog> { return isTauri() ? call("get_wp_cli_catalog") : { available: false, rootCommandCount: 0, totalCommandCount: 0, globalParameterCount: 0, globalParameters: [], commands: [], error: "WP-CLI commandodatabase niet gevonden", technicalDetails: "De browserdemo laadt geen lokale Tauri-resources." }; },
   async inspectWpCliCommand(siteId: string, command: string): Promise<WpCliCommandInspection> { return isTauri() ? call("inspect_wp_cli_command", { siteId, command }) : demoWpCliInspection(command); },
   async executeWpCliCommand(siteId: string, command: string, confirmed = false, typedConfirmation?: string): Promise<WpCliExecutionResult> { if (isTauri()) return call("execute_wp_cli_command", { siteId, command, confirmed, typedConfirmation }); const inspection = demoWpCliInspection(command); if (inspection.risk === "mutating" && !confirmed) throw new Error("Bevestig dit muterende WP-CLI-commando."); if (inspection.risk === "highRisk" && (!confirmed || typedConfirmation !== "UITVOEREN")) throw new Error("Typ UITVOEREN om dit commando te bevestigen."); const now = new Date().toISOString(); return { status: "success", risk: inspection.risk, commandFamily: inspection.commandFamily, stdout: command.includes("core version") ? "6.8.2\n" : "Success: browserdemo — er is niets op afstand uitgevoerd.\n", stderr: "", exitCode: 0, durationMs: 42, startedAt: now, finishedAt: now, truncated: false }; },

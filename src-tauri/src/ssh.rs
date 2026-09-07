@@ -328,6 +328,14 @@ impl Ssh2Executor {
     }
 }
 
+pub(crate) fn verified_terminal_session(
+    site: &Site,
+    credential: Option<&str>,
+    timeout: Duration,
+) -> Result<Session, AppError> {
+    Ssh2Executor.verified_session(site, credential, timeout)
+}
+
 impl SshExecutor for Ssh2Executor {
     fn fingerprint(&self, site: &Site) -> Result<String, AppError> {
         let session = self.handshake(site, Self::CONNECT_TIMEOUT)?;

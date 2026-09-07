@@ -15,6 +15,7 @@ mod models;
 mod parsers;
 mod ssh;
 mod state;
+mod terminal;
 mod validation;
 mod wordpress_users;
 mod wp_cli;
@@ -43,6 +44,7 @@ pub fn run() {
                 scan_concurrency: std::sync::atomic::AtomicUsize::new(scan_concurrency),
                 bulk_scan_cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 auth: auth::AuthManager::default(),
+                terminals: terminal::TerminalManager::default(),
             });
             Ok(())
         })
@@ -59,6 +61,10 @@ pub fn run() {
             commands::get_wp_cli_catalog,
             commands::inspect_wp_cli_command,
             commands::execute_wp_cli_command,
+            commands::open_terminal,
+            commands::write_terminal,
+            commands::resize_terminal,
+            commands::close_terminal,
             commands::list_sites,
             commands::save_site,
             commands::delete_site,

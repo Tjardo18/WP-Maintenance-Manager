@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from "vue";
 import { useRoute, RouterLink } from "vue-router";
 import { Check, ChevronRight, Database, Edit3, FileCode2, HardDriveDownload, LoaderCircle, Play, RefreshCw, ShieldCheck, Trash2 } from "@lucide/vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import ChecksumFilePreview from "../components/ChecksumFilePreview.vue";
 import SecurityChecks from "../components/SecurityChecks.vue";
-import WpCliConsole from "../components/WpCliConsole.vue";
 import { useSitesStore } from "../stores/sites";
 import { appApi } from "../services/tauri";
 import type { ChecksumDeleteResult, CoreOperationInfo, CoreOperationKind, FilePreview, Finding, MaintenanceRun, MaintenanceStep, ScanResult, UpdateItem, WordPressUser, WordPressUsersData, WordPressUserUpdateInput } from "../types";
@@ -14,8 +13,9 @@ import { errorMessage } from "../utils/errors";
 import { formatDate } from "../utils/format";
 
 const route = useRoute(); const store = useSitesStore();
+const SshTerminal = defineAsyncComponent(() => import("../components/SshTerminal.vue"));
 const site = computed(() => store.byId.get(String(route.params.id)));
-const tabs = ["Overzicht", "Updates", "Security", "Gebruikers", "Bestanden", "Database", "Onderhoud", "Historie", "WP-CLI"];
+const tabs = ["Overzicht", "Updates", "Security", "Gebruikers", "Bestanden", "Database", "Onderhoud", "Historie", "Terminal"];
 const activeTab = ref("Overzicht"); const scan = ref<ScanResult>(); const scanHistory = ref<ScanResult[]>([]); const updates = ref<UpdateItem[]>([]); const history = ref<MaintenanceRun[]>([]); const liveSteps = ref<MaintenanceStep[]>([]); const busy = ref<string>(); const confirmUpdate = ref<UpdateItem | "all" | "maintenance">(); const error = ref<string>(); let stopProgress: (() => void) | undefined;
 const selectedFindingIds = ref<string[]>([]); const preview = ref<FilePreview>(); const pendingDelete = ref<Finding[]>([]); const deleteResult = ref<ChecksumDeleteResult>();
 const usersData = ref<WordPressUsersData>(); const editUser = ref<WordPressUser>(); const editUserInput = ref<WordPressUserUpdateInput>(); const deleteUser = ref<WordPressUser>(); const deleteMode = ref<"reassign" | "delete">("reassign"); const reassignUserId = ref<number>(); const adminPromotionConfirmed = ref(false);
@@ -48,7 +48,7 @@ onUnmounted(() => stopProgress?.());
 <template>
   <div v-if="site" class="site-detail">
     <section class="site-hero card"><div class="site-avatar xlarge">{{ site.name.slice(0, 2).toUpperCase() }}</div><div class="site-hero-copy"><div><h2>{{ site.name }}</h2><StatusBadge :status="site.status" /></div><span class="site-url">{{ site.url }}</span><p>{{ site.sshUsername }}@{{ site.sshHost }} · {{ site.wordpressPath }}</p></div><div class="hero-actions"><RouterLink class="button secondary" :to="`/websites/${site.id}/bewerken`"><Edit3 :size="16" /> Bewerken</RouterLink><button class="button secondary" :disabled="!!busy" @click="runScan"><LoaderCircle v-if="busy === 'scan'" class="spin" :size="17" /><RefreshCw v-else :size="17" /> Website controleren</button><button class="button primary" :disabled="!!busy" @click="confirmUpdate = 'maintenance'"><Play :size="17" /> Onderhoud uitvoeren</button></div></section>
-    <nav class="tabs" aria-label="Websiteonderdelen"><button v-for="tab in tabs" :key="tab" :class="{ active: activeTab === tab }" @click="activeTab = tab">{{ tab }}<span v-if="tab === 'Updates' && updates.length">{{ updates.length }}</span><span v-else-if="tab === 'WP-CLI'" class="advanced-tab-badge">Geavanceerd</span></button></nav>
+    <nav class="tabs" aria-label="Websiteonderdelen"><button v-for="tab in tabs" :key="tab" :class="{ active: activeTab === tab }" @click="activeTab = tab">{{ tab }}<span v-if="tab === 'Updates' && updates.length">{{ updates.length }}</span><span v-else-if="tab === 'Terminal'" class="advanced-tab-badge">SSH + WP-CLI</span></button></nav>
     <p v-if="error" class="error-banner">{{ error }}</p>
     <section v-if="liveSteps.length" class="card live-progress"><div class="card-header"><div><h3>Onderhoud wordt uitgevoerd</h3><p>Sluit de app niet zolang muterende stappen bezig zijn.</p></div><LoaderCircle class="spin" :size="20" /></div><ol class="step-list"><li v-for="step in liveSteps" :key="step.key" :class="step.status"><span><Check v-if="step.status === 'success'" :size="15" /><LoaderCircle v-else-if="step.status === 'running'" class="spin" :size="15" /></span><strong>{{ step.label }}</strong><small>{{ step.detail }}</small></li></ol></section>
 
@@ -88,7 +88,7 @@ onUnmounted(() => stopProgress?.());
     </template>
 
     <section v-else-if="activeTab === 'Onderhoud'" class="maintenance-layout"><div class="card maintenance-intro"><span class="section-icon"><Play /></span><div><h3>Volledige onderhoudsrun</h3><p>We voeren voorcontroles uit, maken eerst een lokale databasebackup, werken gecontroleerd bij en controleren de website daarna opnieuw.</p></div><button class="button primary" @click="confirmUpdate = 'maintenance'">Onderhoud uitvoeren</button></div><article v-if="history[0]" class="card run-detail"><div class="card-header"><div><h3>Laatste onderhoud</h3><p>{{ formatDate(history[0].startedAt) }}</p></div><StatusBadge :status="history[0].status" /></div><ol class="step-list"><li v-for="step in history[0].steps" :key="step.key" :class="step.status"><span><Check v-if="step.status === 'success'" :size="15" /><LoaderCircle v-else-if="step.status === 'running'" class="spin" :size="15" /></span><strong>{{ step.label }}</strong><small>{{ step.detail }}</small></li></ol></article></section>
-    <WpCliConsole v-else-if="activeTab === 'WP-CLI'" :key="site.id" :site="site" />
+    <SshTerminal v-else-if="activeTab === 'Terminal'" :key="site.id" :site="site" />
     <template v-else-if="activeTab === 'Historie'"><section class="card table-card"><div class="card-header"><div><h3>Scanhistorie</h3><p>Open een eerdere scan met alle afzonderlijke controles en findings.</p></div></div><div v-if="!scanHistory.length" class="empty-state compact"><h3>Nog geen scans opgeslagen</h3></div><table v-else><thead><tr><th>Datum</th><th>Resultaat</th><th>Controles</th><th></th></tr></thead><tbody><tr v-for="item in scanHistory" :key="item.id"><td>{{ formatDate(item.finishedAt) }}</td><td><StatusBadge :status="item.status" /></td><td>{{ item.checks.length }} controles</td><td><button class="button small secondary" @click="scan = item; activeTab = 'Security'">Bekijken</button></td></tr></tbody></table></section><section class="card table-card"><div class="card-header"><div><h3>Onderhoudshistorie</h3><p>Vergelijk eerdere onderhoudsbeurten.</p></div></div><div v-if="!history.length" class="empty-state compact"><h3>Nog geen onderhoud uitgevoerd</h3></div><table v-else><thead><tr><th>Datum</th><th>Resultaat</th><th>Voor</th><th>Na</th><th></th></tr></thead><tbody><tr v-for="run in history" :key="run.id"><td>{{ formatDate(run.startedAt) }}</td><td><StatusBadge :status="run.status" /></td><td>{{ run.beforeVersions }}</td><td>{{ run.afterVersions }}</td><td><ChevronRight :size="17" /></td></tr></tbody></table></section></template>
   </div>
   <div v-else class="empty-state card"><h3>Website niet gevonden</h3><RouterLink class="button secondary" to="/websites">Terug naar websites</RouterLink></div>
