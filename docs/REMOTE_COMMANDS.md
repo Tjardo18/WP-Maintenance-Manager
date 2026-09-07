@@ -1,6 +1,6 @@
 # Remote command catalog
 
-Alle remote uitvoering loopt via Rust. De uiteindelijke commandostring wordt uitsluitend daar opgebouwd. Voorgedefinieerde acties gebruiken onderstaande catalogus; de afzonderlijke Advanced WP-CLI-executor accepteert vrije commandtekst pas na backend-authenticatie, argv-parsing, routingcontrole, risicoclassificatie en veilige heropbouw. Algemene cataloguslimieten: pad maximaal 4096 bytes, slugs maximaal 200 ASCII-tekens, dagen 1–365 en scanresultaten standaard maximaal 5000 records.
+Alle remote uitvoering loopt via Rust. Voorgedefinieerde beheeracties gebruiken onderstaande catalogus; de afzonderlijke interactieve Terminal gebruikt bewust een vrije SSH-PTY/shell. Algemene cataloguslimieten voor managed acties: pad maximaal 4096 bytes, slugs maximaal 200 ASCII-tekens, dagen 1–365 en scanresultaten standaard maximaal 5000 records.
 
 | Actie | Doel | Muterend | Parameters/validatie | Output | Standaardtimeout | Risico |
 |---|---|---:|---|---|---:|---|
@@ -43,9 +43,9 @@ Alle remote uitvoering loopt via Rust. De uiteindelijke commandostring wordt uit
 
 Commands draaien met `LC_ALL=C` voor stabiele parsing. Stderr en exitstatus blijven gescheiden. Niet-nul exitcodes worden typed failures; onleesbare, ongeldige of te grote output faalt gesloten. Time-outs sluiten het kanaal en iedere SSH-sessie wordt altijd opgeruimd.
 
-## Advanced WP-CLI-executor
+## Gecontroleerde WP-CLI-executor
 
-`execute_wp_cli_command` is de enige vrije commandtekst-IPC en blijft een WP-CLI-console, geen shell. De frontend stuurt uitsluitend een geldige app-sessietoken, `site_id`, commandtekst en eventuele bevestiging. Host, SSH-configuratie, credentials en WordPress-root zijn niet overschrijfbaar vanuit deze payload.
+`execute_wp_cli_command` blijft een afzonderlijk gecontroleerd WP-CLI-endpoint en is geen shell. De frontend stuurt uitsluitend een geldige app-sessietoken, `site_id`, commandtekst en eventuele bevestiging. Host, SSH-configuratie, credentials en WordPress-root zijn niet overschrijfbaar vanuit deze payload. Dit endpoint is architectonisch gescheiden van de interactieve Terminal.
 
 De backend:
 
@@ -58,6 +58,14 @@ De backend:
 7. voert via dezelfde gepinde SSH-adapter uit met 180 s (read-only), 600 s (muterend) of 900 s (high-risk) timeout en maximaal 2 MB weergegeven output.
 
 De adapter draint eventuele resterende bytes zodat grote output het proces niet onbeperkt in geheugen laat groeien; het resultaat krijgt dan `truncated=true`. ANSI- en overige controlcodes worden verwijderd, stdout/stderr blijven gescheiden en de UI rendert beide uitsluitend als tekst. Audit schrijft alleen `wp:<family>`, risico, status, exitcode, duur en truncatie — nooit commandtekst of output.
+
+## Interactieve SSH-terminal
+
+De commands `open_terminal`, `write_terminal`, `resize_terminal` en `close_terminal` beheren een sitegebonden SSH-session met `xterm-256color` PTY. Elk endpoint controleert de applicatiesessie. `open_terminal` haalt host, credential en WordPress-root uitsluitend uit backendopslag, verifieert de host key, controleert de startdirectory en start één persistent shellkanaal.
+
+`write_terminal` accepteert daarna bewust raw terminalinvoer tot 256 KiB per IPC-bericht. Er is geen commandparser of allowlist: shellsyntax, normale Linux-programma's en WP-CLI zijn toegestaan met de rechten van de remote SSH-user. Invoer gaat steeds naar hetzelfde kanaal, waardoor `cd` en environment behouden blijven. `resize_terminal` begrenst kolommen/regels en stuurt de nieuwe PTY-grootte door; Ctrl+C is gewone inputbyte `0x03`.
+
+Uitvoer streamt als base64-bytes naar xterm.js. De backend interpreteert of logt die output niet. Bij connection-/channel-fouten wordt alleen de sitespecifieke terminalactie, categorie, tijd, duur en veilig geredigeerde technische oorzaak in het foutenlog opgeslagen; nooit de terminalcommandtekst of output.
 
 ## Begrensde SFTP-acties
 

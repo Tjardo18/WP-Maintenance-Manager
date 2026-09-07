@@ -11,16 +11,16 @@ De app beheert gevoelige SSH-toegang tot meerdere websites. Belangrijkste risico
 - Alle Tauri-commands voor sitegegevens, instellingen, scans en mutaties roepen eerst dezelfde backend-authorisatie aan. Alleen status, first-run setup en login zijn publiek; status retourneert geen gevoelige data.
 - Handmatig vergrendelen, idle timeout en wachtwoordwijziging maken de sessie ongeldig. De standaard idle timeout is 15 minuten en de backend controleert hem onafhankelijk van de UI.
 - Herhaalde mislukte logins krijgen een oplopende vertraging. Login-, lock- en wachtwoordwijzigingen worden zonder wachtwoord of sessietoken geaudit.
-- Een reeds geautoriseerde backendactie mag na vergrendeling veilig afronden. De lock autoriseert geen nieuwe actie en probeert geen half uitgevoerde remote mutatie terug te draaien.
+- Een reeds geautoriseerde managed backendactie mag na vergrendeling veilig afronden. De lock autoriseert geen nieuwe actie en probeert geen half uitgevoerde managed mutatie terug te draaien. Interactieve terminalkanalen worden bij lock wel actief gesloten.
 
 ## Bescherming van remote beheer
 
 - **Credentials:** SSH-secrets staan niet in SQLite, logs, fixtures of IPC-responses. Alleen een opaque credentialreferentie wordt als metadata bewaard. Private keys worden niet geïmporteerd; standaard bewaart de app alleen het lokale bestandspad.
 - **Hostidentiteit:** de SHA-256-fingerprint wordt uit de SSH-handshake berekend vóór authenticatie. De eerste fingerprint moet zichtbaar worden geaccepteerd en wordt daarna gepind. Tijdens acceptatie haalt de backend de fingerprint opnieuw op en vergelijkt die met de getoonde waarde. Een mismatch is een blokkerende fout, nooit een stille heracceptatie.
-- **Command injection:** normale beheeracties blijven een vaste Rust-commandcatalogus gebruiken. De enige vrije command-IPC is de afzonderlijke Advanced WP-CLI Console; die parseert invoer backendmatig als argv, accepteert alleen exact `wp`, weigert shelloperators buiten quotes en quote ieder argument opnieuw. Het sitepad komt nooit uit deze vrije invoer.
+- **Twee execution modes:** normale beheeracties blijven een vaste Rust-commandcatalogus gebruiken en valideren alle dynamische waarden. De afzonderlijke Advanced Terminal is bewust een vrije, interactieve SSH-shell. Daar is arbitrary shell execution het productdoel; de securitygrens bestaat uit app-login, backend-sessiecontrole, host-key-pinning, de geselecteerde siteconfiguratie en uiteindelijk de rechten van het remote SSH-account.
 - **Remote output:** output heeft per actie een byte-limiet en wordt naar getypeerde resultaten geparsed. Door WP-CLI teruggestuurde slugs en checksum-paden worden opnieuw gevalideerd. De Vue-interface gebruikt tekstinterpolatie en voert remote HTML niet uit.
 - **Tauri-grens:** de webview krijgt alleen core-permissies en toegang tot de native bestanddialoog. Er is geen shell- of generieke filesystempermissie. De CSP staat geen remote scripts, fonts of pagina-inhoud toe.
-- **Logging en scanmeldingen:** SSH-logging bevat alleen site-id, catalogusactie, tijden, status en foutcategorie. Sessietokens, credentials, commandostrings, previews en volledige remote output worden niet gelogd. Technische details van mislukte scanchecks worden vóór opslag begrensd, control-charactervrij gemaakt en regels met herkenbare secretmarkers worden weggelaten.
+- **Logging en scanmeldingen:** het persistente SQLite-foutenlog bevat alleen een error-ID, tijden, categorie, site, bekende applicatieactie, veilige technische details, cause-chain, duur/exitcode en retry-indicatie. Sessietokens, credentials, terminalcommandostrings, previews en volledige remote output worden niet gelogd. Details worden begrensd, control-charactervrij gemaakt en regels met herkenbare secretmarkers worden vóór opslag weggelaten. Records ouder dan 30 dagen en records boven de nieuwste 10.000 worden verwijderd.
 - **Backups:** een backend-gegenereerde remote tijdelijke naam onder `/tmp` blijft buiten de documentroot. Alleen het strikte patroon `/tmp/wpmm-XXXXXXXX.sql` mag via de cleanupactie worden verwijderd. De export wordt via SFTP gestreamd, lokaal gecomprimeerd, begrensd op 20 GB en gehasht. Download én remote cleanup moeten slagen voordat onderhoud doorgaat.
 
 ## Checksum-bestandsacties
@@ -35,22 +35,20 @@ Usermutaties laden de actuele users, rollen en Multisite-status vlak vóór uitv
 
 Core repair en core update zijn aparte, geauthenticeerde flows. Repair gebruikt exact de gedetecteerde huidige versie en locale met `--force --skip-content`; `latest` is verboden en onbekende bestanden worden niet verwijderd. Een update gebruikt een gevalideerde, live gedetecteerde doelversie. Beide herhalen preflight, stoppen bij een mislukte verplichte databasebackup en voeren checksum-, versie-, database-, homepage- en updatecontroles uit. Een repair beschermt `wp-content`, maar is geen volledige bestandsrollback.
 
-## Advanced WP-CLI Console
+## Advanced SSH Terminal
 
-De console is bewust krachtiger dan de voorgedefinieerde beheerknoppen en is alleen voor beheerders. WP-CLI zelf kan grote of onomkeerbare wijzigingen uitvoeren. Onder meer `wp eval`, `wp db query`, `wp config set` en andere muterende commands kunnen code uitvoeren, configuratie wijzigen of data beschadigen.
+De Terminal is bewust krachtiger dan de voorgedefinieerde beheerknoppen en is alleen bedoeld voor beheerders. Een gebruiker met toegang tot een ontgrendelde Terminal heeft effectief dezelfde serverrechten als het gekoppelde SSH-account. `rm`, `chmod`, `mv`, `bash`, `php`, `mysql`, `curl`, `wp` en shelloperators zijn bewust toegestaan; er is geen app-allowlist en geen confirmation per terminalcommando.
 
-- Het eerste geparseerde token moet exact `wp` zijn. De console is geen algemene SSH-shell en accepteert geen los `bash`, `php`, `mysql`, `curl` of ander executable.
-- De Rust-tokenizer ondersteunt legitieme quotes en escapes, maar weigert buiten quotes `;`, `&&`, `||`, pipelines, redirects, backticks, `$()` en nieuwe-regel-chaining. Daardoor blijft bijvoorbeeld een gequote SQL-puntkomma geldig zonder shell escape mogelijk te maken.
-- De backend bouwt het remote command opnieuw op vanuit een vaste `wp`-literal, `LC_ALL=C`, `--no-color`, het geregistreerde WordPress-rootpad en afzonderlijk POSIX-gequote argv-waarden. Ruwe userinput gaat nooit rechtstreeks naar de remote shell.
-- `--path`, `--ssh`, `--http` en WP-CLI-aliassen worden bij uitvoering geweigerd: host, credentials en root worden uitsluitend op basis van de geselecteerde `site_id` uit backendopslag gehaald. De helpdatabase mag deze officiële globale opties wel tonen.
-- Catalogus laden, risico inspecteren en uitvoeren vereisen elk een geldige backend-appsessie. Een handmatige of idle lock wist command input, history en output uit de gevoelige UI en weigert nieuwe backendcalls. Een reeds geautoriseerd remote command mag veilig afronden; abrupt afbreken zou een gedeeltelijke mutatie kunnen veroorzaken.
-- Rust classificeert commands als alleen-lezen, muterend of hoog risico. Onbekende/custom commands zijn conservatief muterend. Muterende commands vereisen bevestiging; high-risk commands zoals `eval`, database reset/drop/query/import, configuratiemutaties en krachtige globale opties vereisen bovendien exact `UITVOEREN`.
-- Stdout en stderr zijn niet-vertrouwd, worden begrensd tot 2 MB, ontdaan van ANSI/controlcodes en uitsluitend met Vue-tekstinterpolatie weergegeven. Remote HTML of JavaScript wordt nooit uitgevoerd. Afkapping wordt expliciet gemeld.
-- Ruwe commands, command history en output blijven uitsluitend in procesgeheugen en worden niet standaard in SQLite opgeslagen. Command history is per site begrensd en verdwijnt bij lock/restart.
-- Auditregels bevatten alleen site-id, veilige command family, risicoklasse, status, duur, exitcode en afkappingsstatus. Ze bevatten geen raw command of output. Bestaande foutdiagnostiek past daarnaast begrenzing en secret-marker-redactie toe; er is geen claim dat willekeurige commandtekst betrouwbaar kan worden geredigeerd, daarom wordt die helemaal niet persistent opgeslagen.
-- `wp-cli-commands.json` is uitsluitend niet-uitvoerbare helpdata. De recursieve loader valideert vorm en limieten, maar alle daadwerkelijke securitybeslissingen worden onafhankelijk in Rust genomen.
+- Openen, schrijven, resizen en sluiten vereisen ieder een geldige backend-appsessie. Een manual/idle lock en wachtwoordwijziging sluiten alle terminalkanalen en blokkeren verdere invoer.
+- De backend haalt host, poort, gebruiker, credential en startpad uit de gekozen site. SSH-authenticatie en de reeds gepinde host key worden opnieuw gecontroleerd voordat een PTY wordt geopend.
+- De ingestelde WordPress-root wordt met een backend-opgebouwde, POSIX-gequote check gevalideerd. Een ontbrekende directory is een duidelijke fout; de terminal valt niet stil terug naar de home-directory.
+- Eén worker bezit gedurende de sessie één SSH-connection en één `xterm-256color` PTY/shellkanaal. Bytes worden live in beide richtingen gestreamd; daardoor blijven `cd`, environment en foreground-processen behouden. Ctrl+C gaat als byte `0x03` naar de PTY en vensterwijzigingen sturen een PTY-resize.
+- xterm.js verwerkt ANSI- en terminal-controlsequenties als terminaldata en gebruikt geen `v-html`. Serveroutput blijft niet-vertrouwd en kan geen frontend-HTML uitvoeren. De scrollback is lokaal begrensd.
+- De waarschuwing “Geavanceerde terminal” toont de concrete site en moet eenmaal lokaal worden bevestigd. Boven de terminal blijven website, SSH-user, host, poort, startpad en verbindingsstatus zichtbaar.
+- Terminalcommandtekst, lokale history en output worden niet persistent opgeslagen en komen ook bij een terminalfout niet in het SQLite-foutenlog. De server kan volgens zijn eigen shellconfiguratie remote history bijhouden; de app verandert dat beleid niet.
+- `wp-cli-commands.json` is uitsluitend niet-uitvoerbare helpdata. Autocomplete wordt lokaal geactiveerd wanneer de eenvoudige actuele nieuwe regel met `wp` begint. Zij verandert de vrije shellrechten niet en parseert in versie 1 geen complexe chained shell-AST.
 
-De commandlengte, het aantal argv-items en de lengte per argument zijn begrensd. Read-only, muterende en high-risk uitvoeringen hebben respectievelijk een redelijke oplopende timeout. Er is nog geen live streaming of cancellation; output wordt na completion getoond zodat de eerste versie geen onveilige half-afgebroken mutaties introduceert.
+De oude gecontroleerde WP-CLI argv-executor blijft architectonisch gescheiden en kan voor afgebakende applicatieflows zijn eigen validatie/risicobeleid gebruiken. Hij vormt geen beperking op de interactieve Terminal.
 
 ## Dreigingsscenario's
 
