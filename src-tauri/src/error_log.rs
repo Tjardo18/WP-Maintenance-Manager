@@ -8,16 +8,7 @@ use uuid::Uuid;
 pub fn classify_error(error: &AppError, action: &str) -> ErrorCategory {
     let category = error.category.to_ascii_lowercase();
     let action = action.to_ascii_lowercase();
-    if action.contains("backup") {
-        return ErrorCategory::Backup;
-    }
-    if action.contains("update") || action.contains("bijwerk") {
-        return ErrorCategory::Update;
-    }
-    if action.contains("wp-cli") {
-        return ErrorCategory::WpCli;
-    }
-    match category.as_str() {
+    let classified = match category.as_str() {
         "dns" | "dns_host_error" => ErrorCategory::Dns,
         "timeout" | "connection_timeout" => ErrorCategory::ConnectionTimeout,
         "authentication_failed" | "ssh_authentication" => ErrorCategory::SshAuthentication,
@@ -38,6 +29,18 @@ pub fn classify_error(error: &AppError, action: &str) -> ErrorCategory {
         }
         value if value.starts_with("ssh_") => ErrorCategory::Network,
         _ => ErrorCategory::Unknown,
+    };
+    if classified != ErrorCategory::Unknown && classified != ErrorCategory::SshCommand {
+        return classified;
+    }
+    if action.contains("backup") {
+        ErrorCategory::Backup
+    } else if action.contains("update") || action.contains("bijwerk") {
+        ErrorCategory::Update
+    } else if action.contains("wp-cli") {
+        ErrorCategory::WpCli
+    } else {
+        classified
     }
 }
 

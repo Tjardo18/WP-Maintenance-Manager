@@ -1033,7 +1033,11 @@ fn scan_site_internal(
         Err(error) => {
             if matches!(
                 error.category.as_str(),
-                "dns_host_error" | "timeout" | "authentication_failed" | "host_key_mismatch"
+                "dns_host_error"
+                    | "timeout"
+                    | "connection_timeout"
+                    | "authentication_failed"
+                    | "host_key_mismatch"
             ) {
                 state.database.mark_unreachable(site_id)?;
             }

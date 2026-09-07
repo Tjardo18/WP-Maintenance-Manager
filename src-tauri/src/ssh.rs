@@ -145,12 +145,21 @@ impl Ssh2Executor {
                 || "Geen netwerkadres gevonden".into(),
                 |value| value.to_string(),
             );
-            let category = if error.to_ascii_lowercase().contains("timed out") {
-                "timeout"
+            let lower = error.to_ascii_lowercase();
+            let (category, message) = if lower.contains("timed out") {
+                (
+                    "connection_timeout",
+                    "De SSH-server reageerde niet binnen de toegestane tijd.",
+                )
+            } else if lower.contains("connection refused") || lower.contains("10061") {
+                (
+                    "network",
+                    "De server is bereikbaar, maar weigert de SSH-verbinding.",
+                )
             } else {
-                "dns_host_error"
+                ("network", "Kan geen SSH-verbinding maken.")
             };
-            AppError::ssh(category, "Kan geen SSH-verbinding maken.", error, true)
+            AppError::ssh(category, message, error, true)
         })?;
         tcp.set_read_timeout(Some(timeout))
             .map_err(AppError::storage)?;
@@ -655,7 +664,7 @@ fn same_file_snapshot(left: &ssh2::FileStat, right: &ssh2::FileStat) -> bool {
 fn map_ssh_error(category: &str, message: &str, error: ssh2::Error) -> AppError {
     let detail = error.to_string();
     let effective_category = if detail.to_ascii_lowercase().contains("timed out") {
-        "timeout"
+        "connection_timeout"
     } else {
         category
     };

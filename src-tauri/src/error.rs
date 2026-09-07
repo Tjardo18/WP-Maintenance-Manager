@@ -19,12 +19,17 @@ impl AppError {
         let sensitive_markers = [
             "password",
             "passwd",
+            "passphrase",
             "secret",
             "token",
             "authorization",
+            "bearer ",
             "cookie",
             "db_password",
             "database_url",
+            "private key",
+            "api_key",
+            "apikey",
         ];
         let mut safe = String::new();
         for line in details.lines() {
