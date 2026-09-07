@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { authApi } from "../services/tauri";
+import { clearWpCliConsoleSessions } from "../services/wpCliConsoleSession";
 import { errorMessage } from "../utils/errors";
 import { useSitesStore } from "./sites";
 
@@ -60,6 +61,7 @@ export const useAuthStore = defineStore("auth", () => {
     authApi.setSessionToken();
     authenticated.value = false;
     error.value = message;
+    clearWpCliConsoleSessions();
     useSitesStore().clear();
   }
 
