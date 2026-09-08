@@ -4,8 +4,9 @@
 
 ```text
 Vue UI → typed TypeScript service → authenticated Tauri commands
-                                      ├─ Managed Commands → Rust commandcatalogus → SSH exec/WP-CLI
-                                      ├─ Interactive Terminal → session worker → SSH PTY/shell
+                                      ├─ Managed Commands → stored credential → SSH exec/WP-CLI
+                                      ├─ Terminal gate → app reauth → single-use challenge
+                                      │                  → password-only SSH → authorized PTY/shell
                                       └─ Error reporting → redactie/retentie → SQLite error_logs
 
 SQLite repositories ← application services → scans / users / core / maintenance
@@ -25,7 +26,7 @@ Vue 3, Vue Router, Pinia en TypeScript vormen de interface. `src/services/tauri.
 
 De Security-interface toont een compacte samenvatting en een accordion per check. De volledige PHP-inventaris blijft in het scanresultaat beschikbaar, maar `php_files` filtert standaard op `attention`/`problem`. Grote lijsten krijgen zoek-/categoriefilters en frontendpaginering van maximaal 100 DOM-items per geopende sectie. Remote inventarisatie zelf is backendmatig op 5.000 records plus een truncatiesignaal begrensd.
 
-De Terminal gebruikt xterm.js en FitAddon. Remote bytes gaan als base64-event over IPC en daarna als `Uint8Array` naar xterm, zodat spaces, tabs, newlines, Unicode, ANSI, carriage returns en progressoutput niet door HTML-layout worden gewijzigd. Invoer wordt in volgorde naar de backend verstuurd. De frontend houdt alleen de eenvoudige actuele regel bij om WP-CLI-autocomplete te tonen; er wordt geen lokale terminalhistory persistent gemaakt.
+De Terminal toont vóór iedere shell een lokale tweestaps-gate. Passwordvelden staan alleen in het component, gaan nooit door Pinia, URL-state of localStorage en worden direct na submit/cancel geleegd. xterm.js en FitAddon worden pas na succesvolle dubbele backendverificatie opgebouwd; verlaten disposeert de terminal en scrollback. Remote bytes gaan als base64-event over IPC en daarna als `Uint8Array` naar xterm, zodat spaces, tabs, newlines, Unicode, ANSI, carriage returns en progressoutput niet door HTML-layout worden gewijzigd. Invoer wordt in volgorde naar de backend verstuurd. De frontend houdt alleen de eenvoudige actuele regel bij om WP-CLI-autocomplete te tonen; er wordt geen lokale terminalhistory persistent gemaakt.
 
 De WP-CLI autocomplete-index wordt één keer uit de recursieve resource opgebouwd en vervolgens lokaal geraadpleegd. Alleen een eenvoudige nieuwe regel die met `wp` begint activeert suggesties en help. De JSON is nooit een uitvoerautorisatiebron.
 
@@ -43,7 +44,9 @@ De Rust-backend is opgesplitst in domeinmodellen, SQLite-repositories, runtime-a
 
 ### Interactive SSH Terminal
 
-`open_terminal` autoriseert de appsessie, laadt de site en credential backend-side, verifieert de gepinde host key en controleert het ingestelde WordPress-startpad. Daarna bezit één named workerthread gedurende de sessie:
+`begin_terminal_reauthentication` autoriseert eerst de normale appsessie en verifieert het opnieuw ingevoerde app-wachtwoord tegen de bestaande Argon2id-hash. Een fout wachtwoord sluit alle terminals, wist challenges en trekt de appsessie in. Bij succes geeft `TerminalAccessManager` een random, alleen-in-memory challenge met een TTL van 60 seconden uit. De opgeslagen record bevat alleen token- en sessiehash, site-id en vervaltijd.
+
+`open_terminal` vereist daarna dezelfde appsessie, dezelfde site, de single-use challenge en een handmatig SSH-wachtwoord. De challenge wordt bij de poging geconsumeerd. De SSH-adapter voert eerst de bestaande gepinde host-keycontrole uit, eist dat de server de gewone `password`-methode aanbiedt en roept uitsluitend `userauth_password` aan. De interactieve flow haalt geen opgeslagen credential op en valt nooit terug naar key-, agent- of managed authenticatie. Na succes bezit één named workerthread gedurende de sessie:
 
 ```text
 één TCP/SSH-session → één channel_session → request xterm-256color PTY → shell()
@@ -53,7 +56,9 @@ De Rust-backend is opgesplitst in domeinmodellen, SQLite-repositories, runtime-a
 
 De shell ontvangt direct een veilig gequote `cd -- <wordpress-root>`. De directory is vooraf met dezelfde SSH-session gecontroleerd; een ontbrekend pad resulteert in een fout, niet in een stille fallback. Alle volgende bytes — inclusief arbitrary Linux commands en shelloperators — gaan naar hetzelfde channel. Daarom blijft de working directory behouden.
 
-De manager houdt maximaal één actieve terminal per site in deze app-instantie. Een reconnect sluit het eerdere kanaal. Manual lock, idle lock, wachtwoordwijziging, component-unmount en procesafsluiting sluiten de terminal. Openen, input, resize en close hebben allemaal een backend-auth gate; verlopen authenticatie sluit het geraakte kanaal voordat invoer wordt geweigerd.
+De manager genereert per verbinding een apart random TerminalAuthorization-token en bewaart daarvan alleen de hash, samen met de hash van de app-sessie en de site-id. Iedere input-, resize- en close-call moet terminal-id, app-sessie en TerminalAuthorization combineren. De manager houdt maximaal één actieve terminal per site in deze app-instantie. Sluiten, remote disconnect-cleanup, tab/site verlaten, site verwijderen, manual/idle lock, wachtwoordwijziging en procesafsluiting sluiten het kanaal en verwijderen het record. Oude terminal-id's of authorizations zijn niet herbruikbaar; opnieuw openen begint weer bij app-reauthenticatie.
+
+Het app-wachtwoord en SSH-wachtwoord komen in Rust direct in `zeroize::Zeroizing<String>`. Het SSH-wachtwoord wordt meteen na de authenticatiepoging overschreven. Geen van beide komt in database-, audit- of errorlogvelden. Door eigenschappen van IPC, JavaScript en het OS is dit best-effort memory hygiene en geen garantie tegen een debugger of volledig gecompromitteerd systeem.
 
 ### Error reporting
 
@@ -66,7 +71,7 @@ Operationele fouten lopen door een centrale classifier naar vaste categorieën z
 - Tauri 2 zonder lokale shell-plugin: alleen Rust beheert remote verbindingen.
 - De applicatielogin gebruikt een Argon2id-hash in SQLite en één random sessie in backendgeheugen. Ieder niet-publiek Tauri-command autoriseert opnieuw; restart, idle lock, manual lock en wachtwoordwijziging wissen de sessie.
 - SQLite gebruikt oplopende migrations, foreign keys, WAL en een busy timeout. UTC/RFC 3339 wordt lokaal in Vue geformatteerd.
-- SSH-passwords/passphrases staan in de OS credential store; een keybestand blijft op zijn bestaande lokale pad.
+- SSH-passwords/passphrases voor managed functies staan in de OS credential store; een keybestand blijft op zijn bestaande lokale pad. Het handmatig ingevoerde Terminalwachtwoord wordt uitsluitend voor de huidige password-authenticatiepoging gebruikt en niet opgeslagen.
 - Host-key-pinning is verplicht vóór authenticatie. Een gewijzigde fingerprint blokkeert verbinding en terminal.
 - PHP-bestanden worden alleen statisch gelezen, nooit uitgevoerd. Locatie-, naam- en gecombineerde inhoudsindicatoren bepalen een conservatieve score met concrete redenen; één los risicokeyword in normale plugin-/themecode is onvoldoende.
 - Scanruns blijven in SQLite bewaard; de detailweergave kan de 50 recentste scans met checks en findings heropenen.

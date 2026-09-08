@@ -47,7 +47,7 @@ Een productie-installatiepakket maken:
 npm run tauri build
 ```
 
-Op Windows verschijnen daarna een MSI en NSIS-installer onder `src-tauri/target/release/bundle/`. Lokale builds zijn niet digitaal ondertekend; voor publieke distributie hoort daar een vertrouwd code-signingcertificaat bij.
+Op Windows verschijnen daarna een MSI en NSIS-installer onder `src-tauri/target/release/bundle/`. De app- en pakketversie is `0.9.0-beta.1`; omdat Windows Installer geen tekstuele prerelease-identifiers accepteert, gebruikt uitsluitend de interne WiX/MSI-productversie de equivalente numerieke waarde `0.9.0.1`. Lokale builds zijn niet digitaal ondertekend; voor publieke distributie hoort daar een vertrouwd code-signingcertificaat bij.
 
 ## WP-CLI autocomplete database
 
@@ -64,21 +64,36 @@ Installeren of vervangen:
 
 1. Verkrijg of genereer `wp-cli-commands.json` met de beschreven WP-CLI-structuur (`source`, `scraped_at`, `global_parameters` en een recursieve `commands`-boom).
 2. Plaats het bestand als `src-tauri/resources/wp-cli-commands.json` vóór `npm run tauri dev` of `npm run tauri build`.
-3. Open na het inloggen een website en kies de tab **Terminal**. Typ aan een nieuwe prompt `wp`; het zijpaneel toont de bijbehorende command help en suggesties.
+3. Open na het inloggen een website en kies de tab **Terminal**. Doorloop de extra app- en SSH-wachtwoordcontrole. Typ daarna aan een nieuwe prompt `wp`; het zijpaneel toont de bijbehorende command help en suggesties.
 
 Tauri bundelt de volledige `resources`-map mee. In development zoekt de backend ook in dezelfde projectlocatie. Ontbreekt het bestand of is de JSON corrupt of ongeldig, dan crasht de app niet: de terminal blijft werken, alleen WP-CLI autocomplete/help ontbreekt. De database is alleen helpdata en vormt geen securitygrens.
 
-## Terminal
+## Terminal beveiliging
+
+Iedere keer dat de interactieve Terminal wordt geopend, vraagt de app opnieuw om twee afzonderlijke wachtwoorden:
+
+1. het WP Maintenance Manager-wachtwoord, opnieuw gecontroleerd tegen dezelfde Argon2id-hash als de normale login;
+2. het SSH-wachtwoord van de aan de geselecteerde website gekoppelde SSH-gebruiker.
+
+Na de eerste controle geeft de backend een cryptografisch willekeurige, site- en appsessiegebonden challenge uit. Deze is 60 seconden geldig en kan maar één keer worden gebruikt. Pas na expliciete SSH-passwordauthenticatie en de bestaande host-keycontrole wordt een nieuwe PTY geopend. De Terminal gebruikt hierbij nooit stil een opgeslagen SSH-key, agent of credential als fallback.
+
+Een fout Maintenance Manager-wachtwoord tijdens deze extra controle wordt behandeld als mogelijke ongeautoriseerde toegang: de volledige backend-appsessie wordt ingetrokken, alle terminalkanalen worden gesloten, gevoelige frontendstate wordt gewist en het algemene loginscherm verschijnt. Een fout SSH-wachtwoord houdt alleen de Terminal gesloten; de gewone app blijft beschikbaar. SSH-pogingen worden bij herhaalde failures kort vertraagd.
+
+Het ingevoerde SSH-wachtwoord geldt uitsluitend voor deze ene verbindingspoging en wordt niet opgeslagen in SQLite, localStorage, de OS-credentialstore, logs of terminalhistory. De tijdelijke challenge, aparte Terminal-autorisatie, shell en lokale scrollback verdwijnen bij annuleren, sluiten, tabwissel, sitewissel, app-lock, idle lock, wachtwoordwijziging of procesafsluiting. Opnieuw openen vereist altijd opnieuw beide wachtwoorden.
+
+Een server met `PasswordAuthentication no`, of een server die alleen public-key/keyboard-interactive authenticatie aanbiedt, kan volgens deze policy geen interactieve Terminal openen. Managed scans, updates en onderhoud blijven wel hun afzonderlijk opgeslagen key of credential gebruiken.
+
+## Terminalfuncties
 
 De tab **Terminal** bevat een geavanceerde SSH-terminal met een echte persistente PTY/shell. De sessie start in de ingestelde WordPress-root. Een `cd wp-content` beïnvloedt daardoor een volgende `pwd`, zoals bij een normale SSH-login. Vrije Linux-commando's zoals `ls`, `grep`, `chmod`, `mkdir`, `find`, `git`, `composer` en `wp` worden rechtstreeks uitgevoerd met de rechten van het gekoppelde SSH-account.
 
 De renderer is xterm.js met `xterm-256color`. Whitespace, tabs, ANSI-sequenties, carriage returns en lange WP-CLI-tabellen blijven terminalgetrouw; de terminal schaalt de remote PTY mee en stuurt Ctrl+C als interrupt. Wanneer een nieuwe commandoregel met `wp` begint, blijft autocomplete uit `wp-cli-commands.json` actief. Complexe shell-chaining zoals `cd wp-content && wp ...` wordt wel door de shell uitgevoerd, maar activeert in deze versie geen WP-autocomplete voor het tweede commando.
 
-Dit is bewust een advanced functie. Na app-lock wordt de shell gesloten. Terminalcommando's en output worden niet in de lokale database opgeslagen; de remote shell bepaalt zelf of zij server-side history bijhoudt.
+Dit is bewust een advanced functie. Terminalcommando's en output worden niet in de lokale database opgeslagen; de remote shell bepaalt zelf of zij server-side history bijhoudt.
 
 ## Lokale gegevens
 
-Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.desktop` levert. SQLite bevat voor de applicatielogin alleen een gezouten Argon2id-hash, nooit het leesbare wachtwoord. SSH-wachtwoorden en key-passphrases worden via de credential store van het besturingssysteem opgeslagen. Het SQLite-foutenlog bewaart maximaal 30 dagen en 10.000 geredigeerde records. Databasebackups komen in een aparte `backups`-submap, buiten een website-documentroot. Databases, backups, keys en lokale logs zijn door `.gitignore` uitgesloten.
+Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.desktop` levert. SQLite bevat voor de applicatielogin alleen een gezouten Argon2id-hash, nooit het leesbare wachtwoord. SSH-wachtwoorden en key-passphrases voor managed functies worden via de credential store van het besturingssysteem opgeslagen. Het handmatig ingevoerde Terminal-SSH-wachtwoord wordt daar niet aan toegevoegd. Het SQLite-foutenlog bewaart maximaal 30 dagen en 10.000 geredigeerde records. Databasebackups komen in een aparte `backups`-submap, buiten een website-documentroot. Databases, backups, keys en lokale logs zijn door `.gitignore` uitgesloten.
 
 ## Huidige functies
 
@@ -100,7 +115,7 @@ Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.des
 - Laatste scanresultaten en findings worden na een app-herstart uit SQLite hersteld. Mislukte deelcontroles bewaren begrensde, geredigeerde technische details die in de UI inklapbaar zijn.
 - Compacte Security-detailweergave met samenvatting, accordions, standaard alleen opvallende PHP, zoeken, categoriefilters en paginering van 25/50/100 resultaten.
 - Persistent, filterbaar SQLite-foutenlog met `ERR-…`-correlatie-ID, categorie, site, actie, veilige technische details, cause-chain, duur, exitcode en retry-indicatie. Retentie voorkomt onbeperkte groei.
-- Interactieve Terminal-tab met één sitegebonden SSH-verbinding, persistente PTY/shell, live streaming, Ctrl+C, resize, vrije shellcommands en automatisch sluiten bij lock.
+- Interactieve Terminal-tab met verplichte app-reauthenticatie, expliciete SSH-passwordauthenticatie, single-use challenge, aparte sitegebonden Terminal-autorisatie, persistente PTY/shell, live streaming, Ctrl+C, resize, vrije shellcommands en automatisch sluiten bij verlaten of lock.
 - WP-CLI-autocomplete en command help binnen de terminal voor eenvoudige nieuwe regels die met `wp` beginnen.
 - Bevestigingsdialogen voor iedere muterende actie.
 - Backend-bulkscans met live voortgang, foutisolatie per site, veilig stoppen en persistent instelbare paralleliteit (1–5 taken).
@@ -111,6 +126,6 @@ Zie [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md) en [docs/REMO
 
 ## Bekende beperkingen
 
-Versie 1 ondersteunt alleen WordPress op Linux/POSIX-hosting via SSH. Backups vóór onderhoud en coreacties zijn databasebackups; er is nog geen volledige bestandsbackup of automatische rollback. De bestandsflow is bewust geen filemanager en kan alleen actuele `unexpected` checksumfindings openen/verwijderen. Een core-reparatie verwijdert onbekende bestanden niet. Userverwijdering op Multisite is alleen voor de huidige site, nooit netwerkbreed. Full-screen interactieve programma's zijn afhankelijk van de remote shell/hosting; de primaire dekking is normale shellinvoer, `cd`, WP-CLI, streaming en interrupts. WP-autocomplete parseert nog geen complexe shell-AST of chained `wp`-commando's.
+Versie 1 ondersteunt alleen WordPress op Linux/POSIX-hosting via SSH. Interactieve Terminaltoegang vereist dat de server gewone SSH-passwordauthenticatie aanbiedt; `PasswordAuthentication no` blokkeert deze specifieke functie zonder fallback naar de opgeslagen key. Backups vóór onderhoud en coreacties zijn databasebackups; er is nog geen volledige bestandsbackup of automatische rollback. De bestandsflow is bewust geen filemanager en kan alleen actuele `unexpected` checksumfindings openen/verwijderen. Een core-reparatie verwijdert onbekende bestanden niet. Userverwijdering op Multisite is alleen voor de huidige site, nooit netwerkbreed. Full-screen interactieve programma's zijn afhankelijk van de remote shell/hosting; de primaire dekking is normale shellinvoer, `cd`, WP-CLI, streaming en interrupts. WP-autocomplete parseert nog geen complexe shell-AST of chained `wp`-commando's.
 
 Een geslaagde homepagecheck of securityscan is geen garantie dat een complete website foutloos of volledig veilig is. Een reeds geautoriseerde backendactie mag na een lock veilig afronden; de lock start geen rollback. De applicatielogin beperkt ongewenst gebruik via de app, maar beschermt niet tegen volledige controle over het Windows-account, procesgeheugen of bestandssysteem. Automatische malwareverwijdering, quarantaine, database-optimalisatie en digitaal ondertekende publieke installers vallen buiten versie 1.
