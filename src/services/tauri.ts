@@ -67,7 +67,7 @@ export const appApi = {
     else if (browserTerminalChallenges.get(challengeToken)?.siteId === siteId) browserTerminalChallenges.delete(challengeToken);
   },
   async openTerminal(siteId: string, challengeToken: string, sshPassword: string, columns: number, rows: number): Promise<TerminalConnectionInfo> {
-    if (isTauri()) return call("open_terminal", { siteId, challengeToken, sshPassword, columns, rows });
+    if (isTauri()) return call("open_terminal", { input: { siteId, challengeToken, sshPassword, columns, rows } });
     const challenge = browserTerminalChallenges.get(challengeToken);
     browserTerminalChallenges.delete(challengeToken);
     if (!challenge || challenge.siteId !== siteId || challenge.expiresAt <= Date.now()) throw { category: "terminal_challenge_invalid", userMessage: "De Terminal-verificatie is ongeldig. Bevestig beide wachtwoorden opnieuw.", retryable: false };

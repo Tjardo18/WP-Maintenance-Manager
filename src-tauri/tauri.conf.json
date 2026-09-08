@@ -27,6 +27,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "windows": {
+      "wix": {
+        "version": "0.9.0.1"
+      }
+    },
     "resources": [
       "resources/"
     ],

@@ -6,7 +6,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ssh2::Session;
 use std::{
     collections::{HashMap, VecDeque},
@@ -34,6 +34,24 @@ pub struct TerminalConnectionInfo {
     pub rows: u32,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOpenInput {
+    pub site_id: String,
+    pub challenge_token: String,
+    pub ssh_password: String,
+    pub columns: u32,
+    pub rows: u32,
+}
+
+pub struct TerminalConnectRequest<'a> {
+    pub site: Site,
+    pub app_session_token: &'a str,
+    pub ssh_password: Zeroizing<String>,
+    pub columns: u32,
+    pub rows: u32,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TerminalOutputEvent {
@@ -50,7 +68,7 @@ struct TerminalStatusEvent {
     error: Option<AppError>,
 }
 
-enum TerminalControl {
+pub(crate) enum TerminalControl {
     Input(Vec<u8>),
     Resize { columns: u32, rows: u32 },
     Close,
@@ -73,12 +91,15 @@ impl TerminalManager {
         &self,
         app: AppHandle,
         database: Database,
-        site: Site,
-        app_session_token: &str,
-        ssh_password: Zeroizing<String>,
-        columns: u32,
-        rows: u32,
+        request: TerminalConnectRequest<'_>,
     ) -> Result<TerminalConnectionInfo, AppError> {
+        let TerminalConnectRequest {
+            site,
+            app_session_token,
+            ssh_password,
+            columns,
+            rows,
+        } = request;
         let columns = columns.clamp(20, 500);
         let rows = rows.clamp(5, 300);
         self.close_site(&site.id);
@@ -233,6 +254,30 @@ impl TerminalManager {
                 let _ = handle.sender.send(TerminalControl::Close);
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_test_session(
+        &self,
+        session_id: &str,
+        site_id: &str,
+    ) -> mpsc::Receiver<TerminalControl> {
+        let (sender, receiver) = mpsc::channel();
+        self.sessions.lock().unwrap().insert(
+            session_id.to_owned(),
+            TerminalHandle {
+                site_id: site_id.to_owned(),
+                app_session_hash: hash_secret("test-app-session"),
+                authorization_hash: hash_secret("test-terminal-authorization"),
+                sender,
+            },
+        );
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_count(&self) -> usize {
+        self.sessions.lock().unwrap().len()
     }
 
     pub fn close_site(&self, site_id: &str) {

@@ -15,6 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const MAX_TERMINAL_PASSWORD_BYTES: usize = 4 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct ExecOutput {
     pub stdout: Vec<u8>,
@@ -347,6 +349,7 @@ pub(crate) fn verified_terminal_password_session(
     password: &str,
     timeout: Duration,
 ) -> Result<Session, AppError> {
+    validate_terminal_password(password)?;
     let session = Ssh2Executor.verified_host_session(site, timeout)?;
     let methods = match session.auth_methods(&site.ssh_username) {
         Ok(methods) => methods,
@@ -397,6 +400,15 @@ pub(crate) fn verified_terminal_password_session(
 
 fn password_auth_supported(methods: &str) -> bool {
     methods.split(',').any(|method| method.trim() == "password")
+}
+
+fn validate_terminal_password(password: &str) -> Result<(), AppError> {
+    if password.is_empty() || password.len() > MAX_TERMINAL_PASSWORD_BYTES {
+        return Err(AppError::validation(
+            "Voer een geldig SSH-wachtwoord in voor deze Terminalverbinding.",
+        ));
+    }
+    Ok(())
 }
 
 fn password_auth_unsupported(detail: &str) -> AppError {
@@ -785,5 +797,8 @@ mod tests {
                 .user_message
                 .contains("geen SSH-wachtwoordauthenticatie")
         );
+        assert!(validate_terminal_password("").is_err());
+        assert!(validate_terminal_password(&"x".repeat(MAX_TERMINAL_PASSWORD_BYTES + 1)).is_err());
+        assert!(validate_terminal_password("normal password").is_ok());
     }
 }

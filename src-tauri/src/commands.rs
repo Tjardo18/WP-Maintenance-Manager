@@ -13,7 +13,7 @@ use crate::{
         WordPressUserUpdateInput, WordPressUsersData,
     },
     state::AppState,
-    terminal::TerminalConnectionInfo,
+    terminal::{TerminalConnectRequest, TerminalConnectionInfo, TerminalOpenInput},
     terminal_auth::TerminalChallengeInfo,
     validation::validate_site,
     wordpress_users, wp_cli, wp_cli_catalog,
@@ -382,15 +382,18 @@ pub fn cancel_terminal_reauthentication(
 #[tauri::command]
 pub fn open_terminal(
     session_token: String,
-    site_id: String,
-    challenge_token: String,
-    ssh_password: String,
-    columns: u32,
-    rows: u32,
+    input: TerminalOpenInput,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TerminalConnectionInfo, AppError> {
     require_auth(&state, &session_token)?;
+    let TerminalOpenInput {
+        site_id,
+        challenge_token,
+        ssh_password,
+        columns,
+        rows,
+    } = input;
     let started = Instant::now();
     let result = (|| {
         state
@@ -400,11 +403,13 @@ pub fn open_terminal(
         state.terminals.connect(
             app,
             state.database.clone(),
-            stored.site,
-            &session_token,
-            Zeroizing::new(ssh_password),
-            columns,
-            rows,
+            TerminalConnectRequest {
+                site: stored.site,
+                app_session_token: &session_token,
+                ssh_password: Zeroizing::new(ssh_password),
+                columns,
+                rows,
+            },
         )
     })();
     match &result {
@@ -2206,6 +2211,13 @@ mod tests {
         let site = database.save_site(&site_input(), None).unwrap();
         let state = app_state(database.clone(), &temp);
         let token = state.auth.create_session().unwrap();
+        let terminal_receiver = state
+            .terminals
+            .install_test_session("existing-terminal", &site.id);
+        let old_challenge = state
+            .terminal_access
+            .create_challenge(&token, &site.id)
+            .unwrap();
 
         let error = begin_terminal_reauthentication_internal(
             &state,
@@ -2216,6 +2228,17 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.category, "app_session_revoked_reauth_failed");
         assert!(require_auth(&state, &token).is_err());
+        assert_eq!(state.terminals.active_count(), 0);
+        assert!(matches!(
+            terminal_receiver.recv().unwrap(),
+            crate::terminal::TerminalControl::Close
+        ));
+        assert!(
+            state
+                .terminal_access
+                .consume_challenge(&token, &site.id, &old_challenge.challenge_token)
+                .is_err()
+        );
         assert!(state.database.list_sites().is_ok());
         let events = database.list_audit_events(Some(&site.id)).unwrap();
         assert!(events.iter().any(|event| {
