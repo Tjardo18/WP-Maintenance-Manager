@@ -7,7 +7,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use serde::{Deserialize, Serialize};
-use ssh2::Session;
+use ssh2::{Channel, Session};
 use std::{
     collections::{HashMap, VecDeque},
     io::{ErrorKind, Read, Write},
@@ -433,6 +433,7 @@ fn run_terminal_worker(
             return;
         }
     };
+    let shell_command = interactive_shell_command(&site.wordpress_path);
     if let Err(error) = channel
         .request_pty("xterm-256color", None, Some((columns, rows, 0, 0)))
         .map_err(|error| {
@@ -444,7 +445,7 @@ fn run_terminal_worker(
             )
         })
         .and_then(|_| {
-            channel.shell().map_err(|error| {
+            channel.exec(&shell_command).map_err(|error| {
                 AppError::ssh(
                     "ssh_channel",
                     "De interactieve SSH-shell kon niet worden gestart.",
@@ -455,22 +456,6 @@ fn run_terminal_worker(
         })
     {
         let _ = ready.send(Err(error));
-        return;
-    }
-    let startup = format!(
-        "cd -- {} || {{ printf '\\r\\nWP Maintenance Manager: startdirectory bestaat niet.\\r\\n' >&2; exit 126; }}\n",
-        shell_escape(&site.wordpress_path)
-    );
-    if let Err(error) = channel
-        .write_all(startup.as_bytes())
-        .and_then(|_| channel.flush())
-    {
-        let _ = ready.send(Err(AppError::ssh(
-            "ssh_channel",
-            "De terminal kon niet naar de WordPress-root gaan.",
-            error,
-            true,
-        )));
         return;
     }
     if ready.send(Ok(())).is_err() {
@@ -598,6 +583,13 @@ fn run_terminal_worker(
     }
 }
 
+fn interactive_shell_command(path: &str) -> String {
+    format!(
+        "cd {} || {{ printf 'WP Maintenance Manager: startdirectory bestaat niet.\\n' >&2; exit 126; }}; exec \"${{SHELL:-/bin/sh}}\" -l",
+        shell_escape(path)
+    )
+}
+
 fn verify_start_directory(session: &Session, path: &str) -> Result<(), AppError> {
     let mut channel = session.channel_session().map_err(|error| {
         AppError::ssh(
@@ -608,7 +600,7 @@ fn verify_start_directory(session: &Session, path: &str) -> Result<(), AppError>
         )
     })?;
     channel
-        .exec(&format!("test -d -- {}", shell_escape(path)))
+        .exec(&format!("test -d {}", shell_escape(path)))
         .map_err(|error| {
             AppError::ssh(
                 "ssh_command",
@@ -617,15 +609,7 @@ fn verify_start_directory(session: &Session, path: &str) -> Result<(), AppError>
                 true,
             )
         })?;
-    channel.wait_close().map_err(|error| {
-        AppError::ssh(
-            "ssh_channel",
-            "De controle van de WordPress-root werd onderbroken.",
-            error,
-            true,
-        )
-    })?;
-    let status = channel.exit_status().unwrap_or(1);
+    let status = complete_directory_check(&mut channel)?;
     if status != 0 {
         return Err(AppError::ssh(
             "filesystem",
@@ -635,6 +619,79 @@ fn verify_start_directory(session: &Session, path: &str) -> Result<(), AppError>
         ));
     }
     Ok(())
+}
+
+trait DirectoryCheckChannel {
+    fn discard_stdout(&mut self) -> Result<(), AppError>;
+    fn discard_stderr(&mut self) -> Result<(), AppError>;
+    fn wait_remote_eof(&mut self) -> Result<(), AppError>;
+    fn close_channel(&mut self) -> Result<(), AppError>;
+    fn wait_remote_close(&mut self) -> Result<(), AppError>;
+    fn read_exit_status(&mut self) -> Result<i32, AppError>;
+}
+
+impl DirectoryCheckChannel for Channel {
+    fn discard_stdout(&mut self) -> Result<(), AppError> {
+        std::io::copy(self, &mut std::io::sink())
+            .map(|_| ())
+            .map_err(|error| {
+                AppError::ssh(
+                    "ssh_channel",
+                    "De uitvoer van de WordPress-rootcontrole kon niet worden verwerkt.",
+                    error,
+                    true,
+                )
+            })
+    }
+
+    fn discard_stderr(&mut self) -> Result<(), AppError> {
+        std::io::copy(&mut self.stderr(), &mut std::io::sink())
+            .map(|_| ())
+            .map_err(|error| {
+                AppError::ssh(
+                    "ssh_channel",
+                    "De technische uitvoer van de WordPress-rootcontrole kon niet worden verwerkt.",
+                    error,
+                    true,
+                )
+            })
+    }
+
+    fn wait_remote_eof(&mut self) -> Result<(), AppError> {
+        self.wait_eof().map_err(directory_check_interrupted)
+    }
+
+    fn close_channel(&mut self) -> Result<(), AppError> {
+        self.close().map_err(directory_check_interrupted)
+    }
+
+    fn wait_remote_close(&mut self) -> Result<(), AppError> {
+        self.wait_close().map_err(directory_check_interrupted)
+    }
+
+    fn read_exit_status(&mut self) -> Result<i32, AppError> {
+        self.exit_status().map_err(directory_check_interrupted)
+    }
+}
+
+fn directory_check_interrupted(error: ssh2::Error) -> AppError {
+    AppError::ssh(
+        "ssh_channel",
+        "De controle van de WordPress-root werd onderbroken.",
+        error,
+        true,
+    )
+}
+
+fn complete_directory_check(channel: &mut impl DirectoryCheckChannel) -> Result<i32, AppError> {
+    // libssh2 requires EOF before wait_close. Draining both streams first is
+    // important because buffered stderr also keeps the channel out of EOF state.
+    channel.discard_stdout()?;
+    channel.discard_stderr()?;
+    channel.wait_remote_eof()?;
+    channel.close_channel()?;
+    channel.wait_remote_close()?;
+    channel.read_exit_status()
 }
 
 fn read_available(reader: &mut impl Read) -> std::io::Result<Vec<u8>> {
@@ -664,6 +721,65 @@ fn emit_output(app: &AppHandle, session_id: &str, data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct TestDirectoryCheckChannel {
+        calls: Vec<&'static str>,
+        exit_status: i32,
+    }
+
+    impl DirectoryCheckChannel for TestDirectoryCheckChannel {
+        fn discard_stdout(&mut self) -> Result<(), AppError> {
+            self.calls.push("discard_stdout");
+            Ok(())
+        }
+
+        fn discard_stderr(&mut self) -> Result<(), AppError> {
+            self.calls.push("discard_stderr");
+            Ok(())
+        }
+
+        fn wait_remote_eof(&mut self) -> Result<(), AppError> {
+            self.calls.push("wait_eof");
+            Ok(())
+        }
+
+        fn close_channel(&mut self) -> Result<(), AppError> {
+            self.calls.push("close");
+            Ok(())
+        }
+
+        fn wait_remote_close(&mut self) -> Result<(), AppError> {
+            self.calls.push("wait_close");
+            Ok(())
+        }
+
+        fn read_exit_status(&mut self) -> Result<i32, AppError> {
+            self.calls.push("exit_status");
+            Ok(self.exit_status)
+        }
+    }
+
+    #[test]
+    fn directory_check_reaches_eof_before_waiting_for_channel_close() {
+        let mut channel = TestDirectoryCheckChannel {
+            exit_status: 7,
+            ..Default::default()
+        };
+
+        assert_eq!(complete_directory_check(&mut channel).unwrap(), 7);
+        assert_eq!(
+            channel.calls,
+            [
+                "discard_stdout",
+                "discard_stderr",
+                "wait_eof",
+                "close",
+                "wait_close",
+                "exit_status"
+            ]
+        );
+    }
 
     #[test]
     fn terminal_input_is_bounded_and_resize_is_validated() {
@@ -797,10 +913,21 @@ mod tests {
     #[test]
     fn start_directory_command_is_shell_escaped() {
         let path = "/home/customer/site root/it's-here";
-        let command = format!("test -d -- {}", shell_escape(path));
+        let command = format!("test -d {}", shell_escape(path));
         assert_eq!(
             command,
-            r#"test -d -- '/home/customer/site root/it'"'"'s-here'"#
+            r#"test -d '/home/customer/site root/it'"'"'s-here'"#
         );
+    }
+
+    #[test]
+    fn interactive_shell_starts_in_root_without_visible_bootstrap_input() {
+        let command = interactive_shell_command("/home/customer/site root/it's-here");
+
+        assert_eq!(
+            command,
+            r#"cd '/home/customer/site root/it'"'"'s-here' || { printf 'WP Maintenance Manager: startdirectory bestaat niet.\n' >&2; exit 126; }; exec "${SHELL:-/bin/sh}" -l"#
+        );
+        assert!(!command.contains("cd --"));
     }
 }
