@@ -197,27 +197,7 @@ impl Ssh2Executor {
         credential: Option<&str>,
         timeout: Duration,
     ) -> Result<Session, AppError> {
-        let session = self.handshake(site, timeout)?;
-        let actual = Self::fingerprint_from_session(&session)?;
-        match site.pinned_host_key.as_deref() {
-            None => {
-                return Err(AppError::ssh(
-                    "host_key_unknown",
-                    "De identiteit van deze SSH-server is nog niet geaccepteerd.",
-                    actual,
-                    false,
-                ));
-            }
-            Some(expected) if expected != actual => {
-                return Err(AppError::ssh(
-                    "host_key_mismatch",
-                    "Waarschuwing: de identiteit van de SSH-server is gewijzigd. De verbinding is geblokkeerd.",
-                    format!("Verwacht {expected}; ontvangen {actual}"),
-                    false,
-                ));
-            }
-            Some(_) => {}
-        }
+        let session = self.verified_host_session(site, timeout)?;
         match site.auth_method {
             AuthMethod::Password => {
                 let password = credential.ok_or_else(|| {
@@ -269,6 +249,31 @@ impl Ssh2Executor {
                 "server weigerde authenticatie",
                 false,
             ));
+        }
+        Ok(session)
+    }
+
+    fn verified_host_session(&self, site: &Site, timeout: Duration) -> Result<Session, AppError> {
+        let session = self.handshake(site, timeout)?;
+        let actual = Self::fingerprint_from_session(&session)?;
+        match site.pinned_host_key.as_deref() {
+            None => {
+                return Err(AppError::ssh(
+                    "host_key_unknown",
+                    "De identiteit van deze SSH-server is nog niet geaccepteerd.",
+                    actual,
+                    false,
+                ));
+            }
+            Some(expected) if expected != actual => {
+                return Err(AppError::ssh(
+                    "host_key_mismatch",
+                    "Waarschuwing: de identiteit van de SSH-server is gewijzigd. De verbinding is geblokkeerd.",
+                    format!("Verwacht {expected}; ontvangen {actual}"),
+                    false,
+                ));
+            }
+            Some(_) => {}
         }
         Ok(session)
     }
@@ -337,12 +342,70 @@ impl Ssh2Executor {
     }
 }
 
-pub(crate) fn verified_terminal_session(
+pub(crate) fn verified_terminal_password_session(
     site: &Site,
-    credential: Option<&str>,
+    password: &str,
     timeout: Duration,
 ) -> Result<Session, AppError> {
-    Ssh2Executor.verified_session(site, credential, timeout)
+    let session = Ssh2Executor.verified_host_session(site, timeout)?;
+    let methods = match session.auth_methods(&site.ssh_username) {
+        Ok(methods) => methods,
+        Err(_error) if session.authenticated() => {
+            return Err(password_auth_unsupported(
+                "server accepteerde authenticatie zonder wachtwoord",
+            ));
+        }
+        Err(error) => {
+            return Err(map_ssh_error(
+                "ssh_authentication",
+                "De beschikbare SSH-authenticatiemethoden konden niet worden gecontroleerd.",
+                error,
+            ));
+        }
+    };
+    if !password_auth_supported(methods) {
+        return Err(password_auth_unsupported(&format!(
+            "aangeboden methoden: {}",
+            if methods.is_empty() { "geen" } else { methods }
+        )));
+    }
+    session
+        .userauth_password(&site.ssh_username, password)
+        .map_err(|error| {
+            map_ssh_error(
+                "ssh_authentication",
+                &format!(
+                    "Het wachtwoord voor SSH-gebruiker {} werd niet geaccepteerd.",
+                    site.ssh_username
+                ),
+                error,
+            )
+        })?;
+    if !session.authenticated() {
+        return Err(AppError::ssh(
+            "ssh_authentication",
+            format!(
+                "Het wachtwoord voor SSH-gebruiker {} werd niet geaccepteerd.",
+                site.ssh_username
+            ),
+            "server weigerde expliciete password-authenticatie",
+            false,
+        ));
+    }
+    Ok(session)
+}
+
+fn password_auth_supported(methods: &str) -> bool {
+    methods.split(',').any(|method| method.trim() == "password")
+}
+
+fn password_auth_unsupported(detail: &str) -> AppError {
+    AppError::ssh(
+        "ssh_password_auth_unsupported",
+        "Deze server accepteert geen SSH-wachtwoordauthenticatie. Terminaltoegang kan met de huidige beveiligingsinstelling niet worden geopend.",
+        detail,
+        false,
+    )
 }
 
 impl SshExecutor for Ssh2Executor {
@@ -707,5 +770,20 @@ mod tests {
         assert!(ensure_regular_file(&regular).is_ok());
         assert!(ensure_regular_file(&symlink).is_err());
         assert!(ensure_regular_file(&directory).is_err());
+    }
+
+    #[test]
+    fn interactive_terminal_requires_explicit_password_method() {
+        assert!(password_auth_supported("publickey,password"));
+        assert!(password_auth_supported("keyboard-interactive, password"));
+        assert!(!password_auth_supported("publickey,keyboard-interactive"));
+        assert!(!password_auth_supported("password-change"));
+        let error = password_auth_unsupported("aangeboden methoden: publickey");
+        assert_eq!(error.category, "ssh_password_auth_unsupported");
+        assert!(
+            error
+                .user_message
+                .contains("geen SSH-wachtwoordauthenticatie")
+        );
     }
 }

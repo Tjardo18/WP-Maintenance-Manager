@@ -1,8 +1,11 @@
 use crate::{
     command_catalog::shell_escape, database::Database, error::AppError, error_log, models::Site,
-    ssh::verified_terminal_session,
+    ssh::verified_terminal_password_session, terminal_auth::hash_secret,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use serde::Serialize;
 use ssh2::Session;
 use std::{
@@ -12,8 +15,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_INPUT_BYTES: usize = 256 * 1024;
 const CONNECT_WAIT: Duration = Duration::from_secs(45);
@@ -22,6 +27,7 @@ const CONNECT_WAIT: Duration = Duration::from_secs(45);
 #[serde(rename_all = "camelCase")]
 pub struct TerminalConnectionInfo {
     pub session_id: String,
+    pub authorization_token: String,
     pub site_id: String,
     pub start_path: String,
     pub columns: u32,
@@ -52,6 +58,8 @@ enum TerminalControl {
 
 struct TerminalHandle {
     site_id: String,
+    app_session_hash: [u8; 32],
+    authorization_hash: [u8; 32],
     sender: mpsc::Sender<TerminalControl>,
 }
 
@@ -66,7 +74,8 @@ impl TerminalManager {
         app: AppHandle,
         database: Database,
         site: Site,
-        credential: Option<String>,
+        app_session_token: &str,
+        ssh_password: Zeroizing<String>,
         columns: u32,
         rows: u32,
     ) -> Result<TerminalConnectionInfo, AppError> {
@@ -74,6 +83,12 @@ impl TerminalManager {
         let rows = rows.clamp(5, 300);
         self.close_site(&site.id);
         let session_id = Uuid::new_v4().to_string();
+        let mut authorization_bytes = [0_u8; 32];
+        getrandom::fill(&mut authorization_bytes).map_err(AppError::storage)?;
+        let authorization_token = URL_SAFE_NO_PAD.encode(authorization_bytes);
+        authorization_bytes.zeroize();
+        let authorization_hash = hash_secret(&authorization_token);
+        let app_session_hash = hash_secret(app_session_token);
         let (control_tx, control_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let worker_session_id = session_id.clone();
@@ -85,7 +100,7 @@ impl TerminalManager {
                     app,
                     database,
                     worker_site,
-                    credential,
+                    ssh_password,
                     worker_session_id,
                     columns,
                     rows,
@@ -118,11 +133,14 @@ impl TerminalManager {
                         session_id.clone(),
                         TerminalHandle {
                             site_id: site.id.clone(),
+                            app_session_hash,
+                            authorization_hash,
                             sender: control_tx,
                         },
                     );
                 Ok(TerminalConnectionInfo {
                     session_id,
+                    authorization_token,
                     site_id: site.id,
                     start_path: site.wordpress_path,
                     columns,
@@ -139,21 +157,55 @@ impl TerminalManager {
         }
     }
 
-    pub fn write(&self, session_id: &str, data: String) -> Result<(), AppError> {
+    pub fn write(
+        &self,
+        session_id: &str,
+        app_session_token: &str,
+        authorization_token: &str,
+        data: String,
+    ) -> Result<(), AppError> {
         if data.is_empty() {
             return Ok(());
         }
         if data.len() > MAX_INPUT_BYTES {
             return Err(AppError::validation("De terminalinvoer is te groot."));
         }
-        self.send(session_id, TerminalControl::Input(data.into_bytes()))
+        self.send_authorized(
+            session_id,
+            app_session_token,
+            authorization_token,
+            TerminalControl::Input(data.into_bytes()),
+        )
     }
 
-    pub fn resize(&self, session_id: &str, columns: u32, rows: u32) -> Result<(), AppError> {
+    pub fn resize(
+        &self,
+        session_id: &str,
+        app_session_token: &str,
+        authorization_token: &str,
+        columns: u32,
+        rows: u32,
+    ) -> Result<(), AppError> {
         if !(20..=500).contains(&columns) || !(5..=300).contains(&rows) {
             return Err(AppError::validation("De terminalafmetingen zijn ongeldig."));
         }
-        self.send(session_id, TerminalControl::Resize { columns, rows })
+        self.send_authorized(
+            session_id,
+            app_session_token,
+            authorization_token,
+            TerminalControl::Resize { columns, rows },
+        )
+    }
+
+    pub fn close_authorized(
+        &self,
+        session_id: &str,
+        app_session_token: &str,
+        authorization_token: &str,
+    ) -> Result<String, AppError> {
+        let site_id = self.authorize(session_id, app_session_token, authorization_token)?;
+        self.close(session_id)?;
+        Ok(site_id)
     }
 
     pub fn close(&self, session_id: &str) -> Result<(), AppError> {
@@ -183,7 +235,7 @@ impl TerminalManager {
         }
     }
 
-    fn close_site(&self, site_id: &str) {
+    pub fn close_site(&self, site_id: &str) {
         if let Ok(mut sessions) = self.sessions.lock() {
             let ids: Vec<String> = sessions
                 .iter()
@@ -198,7 +250,13 @@ impl TerminalManager {
         }
     }
 
-    fn send(&self, session_id: &str, control: TerminalControl) -> Result<(), AppError> {
+    fn send_authorized(
+        &self,
+        session_id: &str,
+        app_session_token: &str,
+        authorization_token: &str,
+        control: TerminalControl,
+    ) -> Result<(), AppError> {
         let mut sessions = self.sessions.lock().map_err(|_| {
             AppError::ssh(
                 "ssh_channel",
@@ -207,18 +265,21 @@ impl TerminalManager {
                 true,
             )
         })?;
-        let result = sessions
-            .get(session_id)
-            .ok_or_else(|| {
-                AppError::ssh(
-                    "ssh_channel",
-                    "De SSH-terminal is niet meer verbonden.",
-                    "terminal session ontbreekt",
-                    true,
-                )
-            })?
-            .sender
-            .send(control);
+        let handle = sessions.get(session_id).ok_or_else(missing_terminal)?;
+        if handle
+            .app_session_hash
+            .ct_eq(&hash_secret(app_session_token))
+            .unwrap_u8()
+            != 1
+            || handle
+                .authorization_hash
+                .ct_eq(&hash_secret(authorization_token))
+                .unwrap_u8()
+                != 1
+        {
+            return Err(invalid_terminal_authorization());
+        }
+        let result = handle.sender.send(control);
         if result.is_err() {
             sessions.remove(session_id);
             return Err(AppError::ssh(
@@ -230,6 +291,54 @@ impl TerminalManager {
         }
         Ok(())
     }
+
+    fn authorize(
+        &self,
+        session_id: &str,
+        app_session_token: &str,
+        authorization_token: &str,
+    ) -> Result<String, AppError> {
+        let sessions = self.sessions.lock().map_err(|_| {
+            AppError::ssh(
+                "ssh_channel",
+                "De terminalstatus is niet beschikbaar.",
+                "terminal mutex poisoned",
+                true,
+            )
+        })?;
+        let handle = sessions.get(session_id).ok_or_else(missing_terminal)?;
+        if handle
+            .app_session_hash
+            .ct_eq(&hash_secret(app_session_token))
+            .unwrap_u8()
+            == 1
+            && handle
+                .authorization_hash
+                .ct_eq(&hash_secret(authorization_token))
+                .unwrap_u8()
+                == 1
+        {
+            Ok(handle.site_id.clone())
+        } else {
+            Err(invalid_terminal_authorization())
+        }
+    }
+}
+
+fn missing_terminal() -> AppError {
+    AppError::ssh(
+        "ssh_channel",
+        "De SSH-terminal is niet meer verbonden.",
+        "terminal session ontbreekt",
+        true,
+    )
+}
+
+fn invalid_terminal_authorization() -> AppError {
+    AppError::unauthorized(
+        "terminal_authorization_invalid",
+        "De Terminal-autorisatie is niet meer geldig. Open de Terminal opnieuw.",
+    )
 }
 
 impl Drop for TerminalManager {
@@ -243,7 +352,7 @@ fn run_terminal_worker(
     app: AppHandle,
     database: Database,
     site: Site,
-    credential: Option<String>,
+    mut ssh_password: Zeroizing<String>,
     session_id: String,
     columns: u32,
     rows: u32,
@@ -251,14 +360,16 @@ fn run_terminal_worker(
     ready: mpsc::SyncSender<Result<(), AppError>>,
 ) {
     let started = Instant::now();
-    let session =
-        match verified_terminal_session(&site, credential.as_deref(), Duration::from_secs(30)) {
-            Ok(session) => session,
-            Err(error) => {
-                let _ = ready.send(Err(error));
-                return;
-            }
-        };
+    let session_result =
+        verified_terminal_password_session(&site, ssh_password.as_str(), Duration::from_secs(30));
+    ssh_password.zeroize();
+    let session = match session_result {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
     if let Err(error) = verify_start_directory(&session, &site.wordpress_path) {
         let _ = ready.send(Err(error));
         return;
@@ -514,10 +625,19 @@ mod tests {
         let manager = TerminalManager::default();
         assert!(
             manager
-                .write("missing", "x".repeat(MAX_INPUT_BYTES + 1))
+                .write(
+                    "missing",
+                    "app-session",
+                    "terminal-authorization",
+                    "x".repeat(MAX_INPUT_BYTES + 1),
+                )
                 .is_err()
         );
-        assert!(manager.resize("missing", 5, 1).is_err());
+        assert!(
+            manager
+                .resize("missing", "app-session", "terminal-authorization", 5, 1)
+                .is_err()
+        );
     }
 
     #[test]
@@ -528,15 +648,36 @@ mod tests {
             "session-a".into(),
             TerminalHandle {
                 site_id: "site-a".into(),
+                app_session_hash: hash_secret("app-session"),
+                authorization_hash: hash_secret("terminal-authorization"),
                 sender,
             },
         );
 
-        manager.write("session-a", "pwd\r".into()).unwrap();
         manager
-            .write("session-a", "cd wp-content\r".into())
+            .write(
+                "session-a",
+                "app-session",
+                "terminal-authorization",
+                "pwd\r".into(),
+            )
             .unwrap();
-        manager.write("session-a", "pwd\r".into()).unwrap();
+        manager
+            .write(
+                "session-a",
+                "app-session",
+                "terminal-authorization",
+                "cd wp-content\r".into(),
+            )
+            .unwrap();
+        manager
+            .write(
+                "session-a",
+                "app-session",
+                "terminal-authorization",
+                "pwd\r".into(),
+            )
+            .unwrap();
 
         let received: Vec<Vec<u8>> = (0..3)
             .map(|_| match receiver.recv().unwrap() {
@@ -555,6 +696,57 @@ mod tests {
 
         manager.close_all();
         assert!(matches!(receiver.recv().unwrap(), TerminalControl::Close));
+    }
+
+    #[test]
+    fn terminal_authorization_is_session_bound_and_revoked_on_close() {
+        let manager = TerminalManager::default();
+        let (sender, _receiver) = mpsc::channel();
+        manager.sessions.lock().unwrap().insert(
+            "terminal-a".into(),
+            TerminalHandle {
+                site_id: "site-a".into(),
+                app_session_hash: hash_secret("app-session"),
+                authorization_hash: hash_secret("authorization-a"),
+                sender,
+            },
+        );
+        assert!(
+            manager
+                .write(
+                    "terminal-a",
+                    "other-session",
+                    "authorization-a",
+                    "pwd\r".into(),
+                )
+                .is_err()
+        );
+        assert!(
+            manager
+                .write(
+                    "terminal-a",
+                    "app-session",
+                    "wrong-authorization",
+                    "pwd\r".into(),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .close_authorized("terminal-a", "app-session", "authorization-a")
+                .unwrap(),
+            "site-a"
+        );
+        assert!(
+            manager
+                .write(
+                    "terminal-a",
+                    "app-session",
+                    "authorization-a",
+                    "pwd\r".into(),
+                )
+                .is_err()
+        );
     }
 
     #[test]

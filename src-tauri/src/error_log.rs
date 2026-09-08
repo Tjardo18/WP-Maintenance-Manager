@@ -11,7 +11,10 @@ pub fn classify_error(error: &AppError, action: &str) -> ErrorCategory {
     let classified = match category.as_str() {
         "dns" | "dns_host_error" => ErrorCategory::Dns,
         "timeout" | "connection_timeout" => ErrorCategory::ConnectionTimeout,
-        "authentication_failed" | "ssh_authentication" => ErrorCategory::SshAuthentication,
+        "authentication_failed"
+        | "ssh_authentication"
+        | "ssh_password_auth_unsupported"
+        | "terminal_ssh_rate_limited" => ErrorCategory::SshAuthentication,
         "host_key_unknown" | "host_key_mismatch" | "ssh_host_key" => ErrorCategory::SshHostKey,
         "ssh_channel" | "ssh_protocol" | "sftp" | "sftp_path" | "sftp_file" | "sftp_delete" => {
             ErrorCategory::SshChannel
@@ -22,8 +25,16 @@ pub fn classify_error(error: &AppError, action: &str) -> ErrorCategory {
         "storage" | "database" => ErrorCategory::Database,
         "filesystem" | "io" => ErrorCategory::Filesystem,
         "parse" | "json" | "invalid_json" => ErrorCategory::Parse,
-        "locked" | "session_expired" | "invalid_session" | "setup_required"
-        | "invalid_password" | "rate_limited" => ErrorCategory::Authentication,
+        "locked"
+        | "session_expired"
+        | "invalid_session"
+        | "setup_required"
+        | "invalid_password"
+        | "rate_limited"
+        | "app_session_revoked_reauth_failed"
+        | "terminal_challenge_invalid"
+        | "terminal_challenge_expired"
+        | "terminal_authorization_invalid" => ErrorCategory::Authentication,
         "application" | "validation" | "not_found" | "credential_store" => {
             ErrorCategory::Application
         }
@@ -55,6 +66,10 @@ pub fn friendly_summary(error: &AppError) -> String {
             "Server niet bereikbaar binnen de toegestane tijd".into()
         }
         "authentication_failed" | "ssh_authentication" => "SSH-authenticatie mislukt".into(),
+        "ssh_password_auth_unsupported" => {
+            "Server ondersteunt geen expliciete SSH-wachtwoordauthenticatie".into()
+        }
+        "terminal_ssh_rate_limited" => "SSH-authenticatie tijdelijk begrensd".into(),
         "host_key_mismatch" => "SSH host key komt niet overeen".into(),
         "host_key_unknown" => "SSH-serveridentiteit is nog niet geaccepteerd".into(),
         _ if technical.contains("connection refused") || technical.contains("10061") => {

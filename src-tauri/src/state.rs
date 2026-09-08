@@ -1,6 +1,6 @@
 use crate::{
     auth::AuthManager, credentials::CredentialVault, database::Database, ssh::SshExecutor,
-    terminal::TerminalManager,
+    terminal::TerminalManager, terminal_auth::TerminalAccessManager,
 };
 use std::path::PathBuf;
 use std::sync::{
@@ -17,4 +17,5 @@ pub struct AppState {
     pub bulk_scan_cancelled: Arc<AtomicBool>,
     pub auth: AuthManager,
     pub terminals: TerminalManager,
+    pub terminal_access: TerminalAccessManager,
 }

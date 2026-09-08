@@ -14,6 +14,7 @@ use crate::{
     },
     state::AppState,
     terminal::TerminalConnectionInfo,
+    terminal_auth::TerminalChallengeInfo,
     validation::validate_site,
     wordpress_users, wp_cli, wp_cli_catalog,
 };
@@ -24,6 +25,7 @@ use std::{
     time::Instant,
 };
 use tauri::{AppHandle, Emitter, State};
+use zeroize::Zeroizing;
 
 #[tauri::command]
 pub fn get_auth_status(
@@ -118,6 +120,7 @@ pub fn touch_session(session_token: String, state: State<'_, AppState>) -> Resul
 pub fn lock_app(session_token: String, state: State<'_, AppState>) -> Result<(), AppError> {
     require_auth(&state, &session_token)?;
     state.terminals.close_all();
+    state.terminal_access.revoke_all();
     state.auth.invalidate()?;
     state.database.save_audit_event(
         None,
@@ -156,6 +159,7 @@ fn change_password_internal(state: &AppState, input: &PasswordChangeInput) -> Re
             .database
             .save_audit_event(None, "password_change", "local_app", "success", None);
     state.terminals.close_all();
+    state.terminal_access.revoke_all();
     state.auth.invalidate()?;
     audit_result
 }
@@ -227,9 +231,19 @@ fn require_auth(state: &AppState, session_token: &str) -> Result<(), AppError> {
             "Beveilig de applicatie voordat je verdergaat.",
         )
     })?;
-    state
+    let result = state
         .auth
-        .require(session_token, config.idle_timeout_minutes)
+        .require(session_token, config.idle_timeout_minutes);
+    if let Err(error) = &result
+        && matches!(
+            error.category.as_str(),
+            "locked" | "session_expired" | "setup_required"
+        )
+    {
+        state.terminals.close_all();
+        state.terminal_access.revoke_all();
+    }
+    result
 }
 
 #[tauri::command]
@@ -282,9 +296,95 @@ pub fn execute_wp_cli_command(
 }
 
 #[tauri::command]
+pub fn begin_terminal_reauthentication(
+    session_token: String,
+    site_id: String,
+    app_password: String,
+    state: State<'_, AppState>,
+) -> Result<TerminalChallengeInfo, AppError> {
+    require_auth(&state, &session_token)?;
+    begin_terminal_reauthentication_internal(
+        state.inner(),
+        &session_token,
+        &site_id,
+        Zeroizing::new(app_password),
+    )
+}
+
+fn begin_terminal_reauthentication_internal(
+    state: &AppState,
+    session_token: &str,
+    site_id: &str,
+    app_password: Zeroizing<String>,
+) -> Result<TerminalChallengeInfo, AppError> {
+    let stored = state.database.get_site(site_id)?;
+    let config = state
+        .database
+        .auth_config()?
+        .ok_or_else(|| AppError::validation("Stel eerst een applicatiewachtwoord in."))?;
+    if !auth::verify_password(app_password.as_str(), &config.password_hash) {
+        if let Err(error) = state.database.save_audit_event(
+            Some(site_id),
+            "terminal_reauthentication",
+            &stored.site.ssh_username,
+            "failed",
+            Some("Extra applicatieverificatie voor Terminal mislukt"),
+        ) {
+            eprintln!("security audit write failed category={}", error.category);
+        }
+        state.terminals.close_all();
+        state.terminal_access.revoke_all();
+        if let Err(error) = state.auth.invalidate() {
+            eprintln!("session invalidation failed category={}", error.category);
+        }
+        if let Err(error) = state.database.save_audit_event(
+            Some(site_id),
+            "app_session_revoked",
+            "terminal_reauthentication",
+            "success",
+            Some("Sessie ingetrokken na mislukte extra Terminal-verificatie"),
+        ) {
+            eprintln!("security audit write failed category={}", error.category);
+        }
+        return Err(AppError::unauthorized(
+            "app_session_revoked_reauth_failed",
+            "Sessie beëindigd. De extra beveiligingscontrole voor de Terminal is mislukt. Log opnieuw in om verder te gaan.",
+        ));
+    }
+    let challenge = state
+        .terminal_access
+        .create_challenge(session_token, site_id)?;
+    if let Err(error) = state.database.save_audit_event(
+        Some(site_id),
+        "terminal_reauthentication",
+        &stored.site.ssh_username,
+        "success",
+        Some("Extra applicatieverificatie bevestigd; tijdelijke challenge uitgegeven"),
+    ) {
+        eprintln!("security audit write failed category={}", error.category);
+    }
+    Ok(challenge)
+}
+
+#[tauri::command]
+pub fn cancel_terminal_reauthentication(
+    session_token: String,
+    site_id: String,
+    challenge_token: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    require_auth(&state, &session_token)?;
+    state
+        .terminal_access
+        .cancel_challenge(&session_token, &site_id, &challenge_token)
+}
+
+#[tauri::command]
 pub fn open_terminal(
     session_token: String,
     site_id: String,
+    challenge_token: String,
+    ssh_password: String,
     columns: u32,
     rows: u32,
     app: AppHandle,
@@ -293,17 +393,57 @@ pub fn open_terminal(
     require_auth(&state, &session_token)?;
     let started = Instant::now();
     let result = (|| {
+        state
+            .terminal_access
+            .consume_challenge(&session_token, &site_id, &challenge_token)?;
         let stored = state.database.get_site(&site_id)?;
-        let credential = stored_credential(&state, &stored)?;
         state.terminals.connect(
             app,
             state.database.clone(),
             stored.site,
-            credential,
+            &session_token,
+            Zeroizing::new(ssh_password),
             columns,
             rows,
         )
     })();
+    match &result {
+        Ok(_) => {
+            state
+                .terminal_access
+                .clear_ssh_failures(&session_token, &site_id);
+            if let Err(error) = state.database.save_audit_event(
+                Some(&site_id),
+                "terminal_opened",
+                "interactive_ssh",
+                "success",
+                Some("App-reauthenticatie en expliciete SSH-passwordauthenticatie geslaagd"),
+            ) {
+                eprintln!("security audit write failed category={}", error.category);
+            }
+        }
+        Err(error) if error.category == "ssh_authentication" => {
+            let delay = state
+                .terminal_access
+                .register_ssh_failure(&session_token, &site_id)
+                .unwrap_or(0);
+            let details =
+                (delay > 0).then_some("SSH-authenticatie mislukt; korte vertraging actief");
+            if let Err(audit_error) = state.database.save_audit_event(
+                Some(&site_id),
+                "terminal_ssh_auth_failed",
+                "interactive_ssh",
+                "failed",
+                details,
+            ) {
+                eprintln!(
+                    "security audit write failed category={}",
+                    audit_error.category
+                );
+            }
+        }
+        Err(_) => {}
+    }
     log_operation_error(
         &state,
         Some(&site_id),
@@ -317,6 +457,7 @@ pub fn open_terminal(
 pub fn write_terminal(
     session_token: String,
     terminal_session_id: String,
+    terminal_authorization: String,
     data: String,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
@@ -324,13 +465,19 @@ pub fn write_terminal(
         let _ = state.terminals.close(&terminal_session_id);
         return Err(error);
     }
-    state.terminals.write(&terminal_session_id, data)
+    state.terminals.write(
+        &terminal_session_id,
+        &session_token,
+        &terminal_authorization,
+        data,
+    )
 }
 
 #[tauri::command]
 pub fn resize_terminal(
     session_token: String,
     terminal_session_id: String,
+    terminal_authorization: String,
     columns: u32,
     rows: u32,
     state: State<'_, AppState>,
@@ -339,17 +486,38 @@ pub fn resize_terminal(
         let _ = state.terminals.close(&terminal_session_id);
         return Err(error);
     }
-    state.terminals.resize(&terminal_session_id, columns, rows)
+    state.terminals.resize(
+        &terminal_session_id,
+        &session_token,
+        &terminal_authorization,
+        columns,
+        rows,
+    )
 }
 
 #[tauri::command]
 pub fn close_terminal(
     session_token: String,
     terminal_session_id: String,
+    terminal_authorization: String,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     require_auth(&state, &session_token)?;
-    state.terminals.close(&terminal_session_id)
+    let site_id = state.terminals.close_authorized(
+        &terminal_session_id,
+        &session_token,
+        &terminal_authorization,
+    )?;
+    if let Err(error) = state.database.save_audit_event(
+        Some(&site_id),
+        "terminal_closed",
+        "interactive_ssh",
+        "success",
+        None,
+    ) {
+        eprintln!("security audit write failed category={}", error.category);
+    }
+    Ok(())
 }
 
 fn execute_wp_cli_internal(
@@ -517,6 +685,8 @@ pub fn delete_site(
 ) -> Result<(), AppError> {
     require_auth(&state, &session_token)?;
     uuid::Uuid::parse_str(&id).map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    state.terminals.close_site(&id);
+    state.terminal_access.revoke_site(&id);
     if let Some(reference) = state.database.delete_site(&id)? {
         state.credentials.delete(&reference)?;
     }
@@ -1943,6 +2113,7 @@ mod tests {
             bulk_scan_cancelled: Arc::new(AtomicBool::new(false)),
             auth: AuthManager::default(),
             terminals: crate::terminal::TerminalManager::default(),
+            terminal_access: crate::terminal_auth::TerminalAccessManager::default(),
         }
     }
 
@@ -2021,6 +2192,71 @@ mod tests {
         assert!(!auth::verify_password(old_password, &config.password_hash));
         assert!(auth::verify_password(new_password, &config.password_hash));
         assert!(require_auth(&state, &token).is_err());
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
+    }
+
+    #[test]
+    fn failed_terminal_reauthentication_revokes_the_backend_session() {
+        let temp = std::env::temp_dir().join(format!("wpmm-terminal-reauth-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        let app_password = "correcte lange wachtwoordzin";
+        database
+            .create_auth_config(&auth::hash_password(app_password).unwrap())
+            .unwrap();
+        let site = database.save_site(&site_input(), None).unwrap();
+        let state = app_state(database.clone(), &temp);
+        let token = state.auth.create_session().unwrap();
+
+        let error = begin_terminal_reauthentication_internal(
+            &state,
+            &token,
+            &site.id,
+            Zeroizing::new("verkeerde lange wachtwoordzin".into()),
+        )
+        .unwrap_err();
+        assert_eq!(error.category, "app_session_revoked_reauth_failed");
+        assert!(require_auth(&state, &token).is_err());
+        assert!(state.database.list_sites().is_ok());
+        let events = database.list_audit_events(Some(&site.id)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.action_type == "terminal_reauthentication" && event.status == "failed"
+        }));
+        assert!(
+            events
+                .iter()
+                .all(|event| !format!("{:?}", event).contains("verkeerde lange wachtwoordzin"))
+        );
+
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
+    }
+
+    #[test]
+    fn correct_terminal_reauthentication_issues_a_site_bound_challenge() {
+        let temp = std::env::temp_dir().join(format!("wpmm-terminal-challenge-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        let app_password = "correcte lange wachtwoordzin";
+        database
+            .create_auth_config(&auth::hash_password(app_password).unwrap())
+            .unwrap();
+        let site = database.save_site(&site_input(), None).unwrap();
+        let state = app_state(database, &temp);
+        let token = state.auth.create_session().unwrap();
+
+        let challenge = begin_terminal_reauthentication_internal(
+            &state,
+            &token,
+            &site.id,
+            Zeroizing::new(app_password.into()),
+        )
+        .unwrap();
+        assert_eq!(challenge.expires_in_seconds, 60);
+        assert!(
+            state
+                .terminal_access
+                .consume_challenge(&token, &site.id, &challenge.challenge_token)
+                .is_ok()
+        );
+
         let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
     }
 
