@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanProgress, BulkScanResult, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanProgress, BulkScanResult, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -10,6 +10,7 @@ let sessionToken: string | undefined;
 let browserConfigured = false;
 let browserPasswordHash = "";
 let browserIdleMinutes = 15;
+const browserTerminalChallenges = new Map<string, { siteId: string; expiresAt: number }>();
 
 function demoWpCliInspection(command: string): WpCliCommandInspection {
   const family = command.trim().split(/\s+/)[1]?.replace(/[^a-z0-9_-]/gi, "") || "custom";
@@ -24,8 +25,9 @@ async function call<T>(command: string, args: Record<string, unknown> = {}): Pro
   try { return await invoke<T>(command, { ...args, sessionToken }); }
   catch (cause) {
     const category = typeof cause === "object" && cause !== null && "category" in cause ? String((cause as { category: unknown }).category) : "";
-    if (["locked", "session_expired", "invalid_session", "setup_required"].includes(category)) {
+    if (["locked", "session_expired", "invalid_session", "setup_required", "app_session_revoked_reauth_failed"].includes(category)) {
       sessionToken = undefined;
+      browserTerminalChallenges.clear();
       window.dispatchEvent(new CustomEvent("wpmm:locked", { detail: cause }));
     }
     throw cause;
@@ -36,7 +38,7 @@ async function publicCall<T>(command: string, args: Record<string, unknown> = {}
 async function demoHash(password: string): Promise<string> { const bytes = new TextEncoder().encode(password); const hash = await crypto.subtle.digest("SHA-256", bytes); return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join(""); }
 
 export const authApi = {
-  setSessionToken(token?: string) { sessionToken = token; },
+  setSessionToken(token?: string) { sessionToken = token; if (!token) browserTerminalChallenges.clear(); },
   async status(): Promise<AuthStatus> { if (isTauri()) return publicCall("get_auth_status", { sessionToken: sessionToken ?? null }); return { configured: browserConfigured, authenticated: Boolean(sessionToken), idleTimeoutMinutes: browserIdleMinutes, retryAfterSeconds: 0 }; },
   async setup(password: string): Promise<LoginResult> { if (isTauri()) { const result = await publicCall<LoginResult>("setup_password", { password }); sessionToken = result.sessionToken; return result; } if (browserConfigured) throw new Error("De applicatiebeveiliging is al ingesteld."); browserPasswordHash = await demoHash(password); browserConfigured = true; sessionToken = crypto.randomUUID(); return { sessionToken, idleTimeoutMinutes: browserIdleMinutes }; },
   async login(password: string): Promise<LoginResult> { if (isTauri()) { const result = await publicCall<LoginResult>("login", { password }); sessionToken = result.sessionToken; return result; } if (await demoHash(password) !== browserPasswordHash) throw { category: "invalid_password", userMessage: "Het wachtwoord is niet correct.", retryable: false }; sessionToken = crypto.randomUUID(); return { sessionToken, idleTimeoutMinutes: browserIdleMinutes }; },
@@ -47,10 +49,34 @@ export const authApi = {
 };
 
 export const appApi = {
-  async openTerminal(siteId: string, columns: number, rows: number): Promise<TerminalConnectionInfo> { return isTauri() ? call("open_terminal", { siteId, columns, rows }) : { sessionId: crypto.randomUUID(), siteId, startPath: browserSites.find((site) => site.id === siteId)?.wordpressPath ?? "/var/www/html", columns, rows }; },
-  async writeTerminal(terminalSessionId: string, data: string): Promise<void> { if (isTauri()) await call("write_terminal", { terminalSessionId, data }); },
-  async resizeTerminal(terminalSessionId: string, columns: number, rows: number): Promise<void> { if (isTauri()) await call("resize_terminal", { terminalSessionId, columns, rows }); },
-  async closeTerminal(terminalSessionId: string): Promise<void> { if (isTauri()) await call("close_terminal", { terminalSessionId }); },
+  async beginTerminalReauthentication(siteId: string, appPassword: string): Promise<TerminalChallengeInfo> {
+    if (isTauri()) return call("begin_terminal_reauthentication", { siteId, appPassword });
+    if (await demoHash(appPassword) !== browserPasswordHash) {
+      const cause = { category: "app_session_revoked_reauth_failed", userMessage: "Sessie beëindigd. De extra beveiligingscontrole voor de Terminal is mislukt. Log opnieuw in om verder te gaan.", retryable: false };
+      sessionToken = undefined;
+      browserTerminalChallenges.clear();
+      window.dispatchEvent(new CustomEvent("wpmm:locked", { detail: cause }));
+      throw cause;
+    }
+    const challengeToken = crypto.randomUUID();
+    browserTerminalChallenges.set(challengeToken, { siteId, expiresAt: Date.now() + 60_000 });
+    return { challengeToken, expiresInSeconds: 60 };
+  },
+  async cancelTerminalReauthentication(siteId: string, challengeToken: string): Promise<void> {
+    if (isTauri()) await call("cancel_terminal_reauthentication", { siteId, challengeToken });
+    else if (browserTerminalChallenges.get(challengeToken)?.siteId === siteId) browserTerminalChallenges.delete(challengeToken);
+  },
+  async openTerminal(siteId: string, challengeToken: string, sshPassword: string, columns: number, rows: number): Promise<TerminalConnectionInfo> {
+    if (isTauri()) return call("open_terminal", { siteId, challengeToken, sshPassword, columns, rows });
+    const challenge = browserTerminalChallenges.get(challengeToken);
+    browserTerminalChallenges.delete(challengeToken);
+    if (!challenge || challenge.siteId !== siteId || challenge.expiresAt <= Date.now()) throw { category: "terminal_challenge_invalid", userMessage: "De Terminal-verificatie is ongeldig. Bevestig beide wachtwoorden opnieuw.", retryable: false };
+    if (!sshPassword) throw { category: "ssh_authentication", userMessage: "SSH-authenticatie mislukt.", retryable: false };
+    return { sessionId: crypto.randomUUID(), authorizationToken: crypto.randomUUID(), siteId, startPath: browserSites.find((site) => site.id === siteId)?.wordpressPath ?? "/var/www/html", columns, rows };
+  },
+  async writeTerminal(terminalSessionId: string, terminalAuthorization: string, data: string): Promise<void> { if (isTauri()) await call("write_terminal", { terminalSessionId, terminalAuthorization, data }); },
+  async resizeTerminal(terminalSessionId: string, terminalAuthorization: string, columns: number, rows: number): Promise<void> { if (isTauri()) await call("resize_terminal", { terminalSessionId, terminalAuthorization, columns, rows }); },
+  async closeTerminal(terminalSessionId: string, terminalAuthorization: string): Promise<void> { if (isTauri()) await call("close_terminal", { terminalSessionId, terminalAuthorization }); },
   async onTerminalOutput(handler: (payload: TerminalOutputEvent) => void): Promise<UnlistenFn> { if (!isTauri()) return () => undefined; return listen("terminal-output", (event) => handler(event.payload as TerminalOutputEvent)); },
   async onTerminalStatus(handler: (payload: TerminalStatusEvent) => void): Promise<UnlistenFn> { if (!isTauri()) return () => undefined; return listen("terminal-status", (event) => handler(event.payload as TerminalStatusEvent)); },
   async getWpCliCatalog(): Promise<WpCliCatalog> { return isTauri() ? call("get_wp_cli_catalog") : { available: false, rootCommandCount: 0, totalCommandCount: 0, globalParameterCount: 0, globalParameters: [], commands: [], error: "WP-CLI commandodatabase niet gevonden", technicalDetails: "De browserdemo laadt geen lokale Tauri-resources." }; },
