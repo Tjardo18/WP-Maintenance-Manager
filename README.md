@@ -6,6 +6,8 @@ Een lokale, Nederlandstalige Windows-desktopapp voor beheer en onderhoud van mee
 
 > Status: functionele MVP. Applicatielogin, secure SSH, root-checksums, intelligente PHP-classificatie, begrensd checksum-bestandsbeheer, WordPress-gebruikersbeheer, core-reparatie, updates, lokale databasebackups, foutenlog, historie en de interactieve SSH-terminal zijn aangesloten. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan of remote command rapporteren.
 
+Websitecontroles en bulkscans draaien als begrensde achtergrondtaken. Cached pagina's en navigatie blijven daardoor tijdens een scan bruikbaar, terwijl echte stapvoortgang en annulering beschikbaar blijven.
+
 ## Ondersteunde omgeving
 
 - Desktop: Windows 10/11 (architectuur blijft waar mogelijk cross-platform).
@@ -118,11 +120,11 @@ Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.des
 - Interactieve Terminal-tab met verplichte app-reauthenticatie, expliciete SSH-passwordauthenticatie, single-use challenge, aparte sitegebonden Terminal-autorisatie, persistente PTY/shell, live streaming, Ctrl+C, resize, vrije shellcommands en automatisch sluiten bij verlaten of lock.
 - WP-CLI-autocomplete en command help binnen de terminal voor eenvoudige nieuwe regels die met `wp` beginnen.
 - Bevestigingsdialogen voor iedere muterende actie.
-- Backend-bulkscans met live voortgang, foutisolatie per site, veilig stoppen en persistent instelbare paralleliteit (1–5 taken).
+- Centrale achtergrondjobs voor losse en bulk-scans, met echte stapvoortgang, één SSH-sessie per scan, foutisolatie, veilig stoppen en persistent instelbare paralleliteit (1–5 sites).
 - Developmentfixtures voor beoordeling zonder productiecredentials.
 - Restrictieve Tauri-capability en CSP zonder remote JavaScript.
 
-Zie [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md) en [docs/REMOTE_COMMANDS.md](docs/REMOTE_COMMANDS.md) voor ontwerp- en veiligheidsdetails.
+Zie [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md), [docs/PERFORMANCE.md](docs/PERFORMANCE.md) en [docs/REMOTE_COMMANDS.md](docs/REMOTE_COMMANDS.md) voor ontwerp-, performance- en veiligheidsdetails.
 
 ## Bekende beperkingen
 

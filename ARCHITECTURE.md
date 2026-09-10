@@ -24,15 +24,41 @@ De terminal maakt de managed commandcatalogus niet vrijer. Omgekeerd legt de cat
 
 Vue 3, Vue Router, Pinia en TypeScript vormen de interface. `src/services/tauri.ts` is de enige IPC-toegang. Een gewone browser gebruikt duidelijk fictieve `.test`-fixtures; Tauri gebruikt die nooit voor productieacties.
 
-De Security-interface toont een compacte samenvatting en een accordion per check. De volledige PHP-inventaris blijft in het scanresultaat beschikbaar, maar `php_files` filtert standaard op `attention`/`problem`. Grote lijsten krijgen zoek-/categoriefilters en frontendpaginering van maximaal 100 DOM-items per geopende sectie. Remote inventarisatie zelf is backendmatig op 5.000 records plus een truncatiesignaal begrensd.
+De Security-interface toont een compacte samenvatting en een accordion per check. De PHP-parser telt de volledige begrensde inventaris, maar bewaart en verstuurt standaard alleen opvallende `attention`/`problem`-resultaten. Grote lijsten krijgen een zoekdebounce van 200 ms, zoek-/categoriefilters en paginering van maximaal 100 DOM-items per geopende sectie. Remote inventarisatie zelf is backendmatig op 5.000 records plus een truncatiesignaal begrensd.
 
-De Terminal toont vóór iedere shell een lokale tweestaps-gate. Passwordvelden staan alleen in het component, gaan nooit door Pinia, URL-state of localStorage en worden direct na submit/cancel geleegd. xterm.js en FitAddon worden pas na succesvolle dubbele backendverificatie opgebouwd; verlaten disposeert de terminal en scrollback. Remote bytes gaan als base64-event over IPC en daarna als `Uint8Array` naar xterm, zodat spaces, tabs, newlines, Unicode, ANSI, carriage returns en progressoutput niet door HTML-layout worden gewijzigd. Invoer wordt in volgorde naar de backend verstuurd. De frontend houdt alleen de eenvoudige actuele regel bij om WP-CLI-autocomplete te tonen; er wordt geen lokale terminalhistory persistent gemaakt.
+De Terminal toont vóór iedere shell een lokale tweestaps-gate. Passwordvelden staan alleen in het component, gaan nooit door Pinia, URL-state of localStorage en worden direct na submit/cancel geleegd. xterm.js en FitAddon worden pas na succesvolle dubbele backendverificatie opgebouwd; verlaten disposeert de terminal en scrollback. Remote bytes gaan als base64-event over IPC en worden per animatieframe tot één `Uint8Array` samengevoegd voordat xterm schrijft. Zo blijven terminalsemantiek en hoge outputdoorvoer behouden zonder een Vue-update per chunk. Invoer wordt in volgorde naar de backend verstuurd. De frontend houdt alleen de eenvoudige actuele regel bij om WP-CLI-autocomplete te tonen; er wordt geen lokale terminalhistory persistent gemaakt.
 
 De WP-CLI autocomplete-index wordt één keer uit de recursieve resource opgebouwd en vervolgens lokaal geraadpleegd. Alleen een eenvoudige nieuwe regel die met `wp` begint activeert suggesties en help. De JSON is nooit een uitvoerautorisatiebron.
 
 ## Backend
 
 De Rust-backend is opgesplitst in domeinmodellen, SQLite-repositories, runtime-authenticatie, credentialopslag, SSH-adapter, managed commandcatalogus, interactieve terminalmanager, centrale error-logservice, checksum-bestandsservice, userservice, scan-/update-engine en maintenance-/core-orchestratie. De normale SSH-executor is een trait zodat managed flows mocks kunnen gebruiken.
+
+## Background Jobs and Responsiveness
+
+Een normale site- of bulkscan loopt niet meer binnen de levensduur van een lang Tauri-request:
+
+```text
+Vue/Pinia → start_site_scan → ScanJobManager → begrensde blocking worker
+                 ↓ direct       ↓ korte locks        ↓ één SSH-session, sequentiële channels
+              jobstate ← scan-job-updated events ← echte stapstatus/timings
+                                                      ↓
+                                         SQLite transaction → gerichte eindrefresh
+```
+
+`start_site_scan` valideert de appsessie en site, maakt of hergebruikt een job en retourneert daarna direct. De blocking `ssh2`, remote commands, parsing, HTTP-check en persistence draaien op een named workerthread. Alle Tauri-commands gebruiken bovendien Tauri's asynchrone dispatchcontext, zodat ook incidentele verbindingstests, updates, onderhoud, credentialstore- en SQLite-acties niet rechtstreeks op de WebView/UI-eventloop draaien. De oude synchrone `scan_site`- en `scan_all_sites`-IPC-endpoints zijn verwijderd. Jobstate is backend-owned en leeft daarom door wanneer een Vue-route unmount; `list_scan_jobs` herstelt de actuele state bij terugkeer. Events bevatten één immutable typed jobsnapshot per echte stapovergang, niet per bestand of voortgangstick.
+
+Per site bestaat maximaal één actieve scan. `ScanJobManager` bewaart korte mutexsecties rond statewijzigingen en houdt nooit een lock vast tijdens SSH-, HTTP- of database-I/O. Een cancellation-token wordt vóór iedere nieuwe stap en tijdens wachten op de globale gate gecontroleerd. Een reeds lopend niet-muterend SSH-command rondt veilig af; daarna wordt de job `cancelled` en wordt de RAII-concurrencypermit altijd vrijgegeven.
+
+De globale, instelbare limiet is 1–5 sites tegelijk (standaard 4). Binnen één site is de remote concurrency bewust 1: één geauthenticeerde libssh2-session wordt hergebruikt voor opeenvolgende channels. Daarmee daalt een gewone scan van circa 16 volledige SSH-handshakes/authenticaties naar één, zonder een `Session` onveilig tussen gelijktijdige commands te delen of de server met parallelle filesystemscans te belasten. Bulkscans gebruiken dezelfde jobs, gate en limiet als losse scans.
+
+De detailroute toont eerst cached SQLite-data. Updates worden daaruit weergegeven en alleen op de Updates-tab live vernieuwd; WordPress-gebruikers worden pas op de Gebruikers-tab opgehaald. Het Dashboard gebruikt uitsluitend de lokale sitesamenvatting. Pinia bewaart scanjobs centraal en dedupliceert gelijktijdige site-list-requests. Na completion volgt één gecontroleerde refresh; tussenliggende events vervangen alleen de betrokken jobstate.
+
+Elke scan rapporteert afzonderlijke timings voor connectie, WordPress-detectie/informatie, checksum, users, PHP/uploads, modified files, permissions, database, core/plugin/theme-updates, HTTP en persistence. Parserduur wordt zonder payload of secrets apart naar de developmentlog geschreven. De TypeScript IPC-laag logt in development alleen commandonaam, totale IPC-duur, responsgrootte en frontend-verwerkingstijd en waarschuwt boven 1 MiB. De detailpagina toont voor een afgeronde scan development-only de timings per stap.
+
+SQLite blijft bij de duurzame defaults, met `foreign_keys=ON`, WAL en een busy timeout van 5 seconden. WAL past hier omdat achtergrondscans kunnen schrijven terwijl de UI cached data leest. Scan en finding-inserts gebruiken één transactie plus hergebruikte prepared statements. De historiequery gebruikt drie gebonden batchqueries in plaats van queries per scan en per check. Extra indexes dekken scan-checks, findings, maintenance-stappen en cached updates; er is bewust geen `synchronous=OFF`-achtige durabilityverlaging.
+
+De reproduceerbare vóór/na-metingen, performancebudgetten en beperkingen staan in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ### Managed Commands
 
@@ -74,7 +100,7 @@ Operationele fouten lopen door een centrale classifier naar vaste categorieën z
 - SSH-passwords/passphrases voor managed functies staan in de OS credential store; een keybestand blijft op zijn bestaande lokale pad. Het handmatig ingevoerde Terminalwachtwoord wordt uitsluitend voor de huidige password-authenticatiepoging gebruikt en niet opgeslagen.
 - Host-key-pinning is verplicht vóór authenticatie. Een gewijzigde fingerprint blokkeert verbinding en terminal.
 - PHP-bestanden worden alleen statisch gelezen, nooit uitgevoerd. Locatie-, naam- en gecombineerde inhoudsindicatoren bepalen een conservatieve score met concrete redenen; één los risicokeyword in normale plugin-/themecode is onvoldoende.
-- Scanruns blijven in SQLite bewaard; de detailweergave kan de 50 recentste scans met checks en findings heropenen.
+- Scanruns blijven in SQLite bewaard; de detailweergave kan de 20 recentste scans met checks en findings heropenen.
 - Audit-events registreren authenticatie en expliciete destructieve GUI-acties zonder credentials of commandinhoud. Het foutenlog is een aparte operationele diagnosebron.
 - Database-export gebruikt een backend-gegenereerde `/tmp/wpmm-XXXXXXXX.sql`, streamt via SFTP naar een gzipbestand buiten de documentroot en valideert remote cleanup opnieuw.
-- Bulkscans starten maximaal 1–5 workers. Annuleren voorkomt nieuwe read-only scans; actieve scans mogen afronden en een sitespecifieke fout blokkeert andere sites niet.
+- Site- en bulkscans gebruiken dezelfde globale queue/gate met maximaal 1–5 actieve sites. Annuleren voorkomt nieuwe stappen; het huidige read-only command mag veilig afronden en een sitespecifieke fout blokkeert andere sites niet.
