@@ -11,8 +11,9 @@ use crate::{
         FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun,
         MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult,
         SecurityPolicyMutationResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite,
-        TrustedFile, TrustedFileInput, TrustedFileStatus, UpdateItem, WordPressUserDeleteInput,
-        WordPressUserUpdateInput, WordPressUsersData, WordfenceIntegrationStatus,
+        TrustedFile, TrustedFileInput, TrustedFileStatus, UpdateItem, VulnerabilityRefreshJobState,
+        WordPressUserDeleteInput, WordPressUserUpdateInput, WordPressUsersData,
+        WordfenceIntegrationStatus,
     },
     security_policy,
     state::AppState,
@@ -25,6 +26,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use std::{
     collections::{HashSet, VecDeque},
+    fs,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -2157,7 +2159,11 @@ pub fn get_wordfence_status(
     state: State<'_, AppState>,
 ) -> Result<WordfenceIntegrationStatus, AppError> {
     require_auth(&state, &session_token)?;
-    wordfence::integration_status(&state.credentials)
+    wordfence::integration_status(
+        &state.credentials,
+        &state.database,
+        &state.vulnerability_jobs,
+    )
 }
 
 #[tauri::command(async)]
@@ -2176,7 +2182,11 @@ pub fn save_wordfence_api_key(
         "success",
         Some("Wordfence API-sleutel opgeslagen in de beveiligde credentialopslag"),
     )?;
-    wordfence::integration_status(&state.credentials)
+    wordfence::integration_status(
+        &state.credentials,
+        &state.database,
+        &state.vulnerability_jobs,
+    )
 }
 
 #[tauri::command(async)]
@@ -2193,7 +2203,11 @@ pub fn remove_wordfence_api_key(
         "success",
         Some("Wordfence API-sleutel uit de beveiligde credentialopslag verwijderd"),
     )?;
-    wordfence::integration_status(&state.credentials)
+    wordfence::integration_status(
+        &state.credentials,
+        &state.database,
+        &state.vulnerability_jobs,
+    )
 }
 
 #[tauri::command(async)]
@@ -2223,9 +2237,154 @@ pub fn test_wordfence_connection(
             error,
         ));
     }
-    let mut status = wordfence::integration_status(&state.credentials)?;
+    let mut status = wordfence::integration_status(
+        &state.credentials,
+        &state.database,
+        &state.vulnerability_jobs,
+    )?;
     status.connection_status = "connected".into();
     Ok(status)
+}
+
+#[tauri::command(async)]
+pub fn start_wordfence_feed_refresh(
+    session_token: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<VulnerabilityRefreshJobState, AppError> {
+    require_auth(&state, &session_token)?;
+    start_wordfence_feed_refresh_internal(app, false)
+}
+
+#[tauri::command(async)]
+pub fn get_wordfence_feed_refresh_job(
+    session_token: String,
+    state: State<'_, AppState>,
+) -> Result<Option<VulnerabilityRefreshJobState>, AppError> {
+    require_auth(&state, &session_token)?;
+    state.vulnerability_jobs.current()
+}
+
+pub(crate) fn start_wordfence_feed_refresh_internal(
+    app: AppHandle,
+    automatic: bool,
+) -> Result<VulnerabilityRefreshJobState, AppError> {
+    let state = app.state::<AppState>();
+    if state
+        .credentials
+        .get_optional(wordfence::WORDFENCE_CREDENTIAL_REFERENCE)?
+        .is_none()
+    {
+        return Err(AppError::validation(
+            "Sla eerst een Wordfence API-sleutel op.",
+        ));
+    }
+    let cooldown = state.database.vulnerability_feed_cooldown_remaining(
+        wordfence::WORDFENCE_PROVIDER,
+        wordfence::FEED_COOLDOWN_SECONDS,
+    )?;
+    if cooldown > 0 {
+        return Err(AppError {
+            error_id: None,
+            category: "vulnerability_feed_cooldown".into(),
+            user_message: format!(
+                "De vulnerability database kan over {} minuten opnieuw worden vernieuwd.",
+                cooldown.div_ceil(60)
+            ),
+            technical_details: None,
+            retryable: true,
+        });
+    }
+    let (job, is_new) = state.vulnerability_jobs.create(automatic)?;
+    if !is_new {
+        return Ok(job);
+    }
+    let job_id = job.id.clone();
+    let worker_app = app.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("wordfence-feed-refresh".into())
+        .spawn(move || run_wordfence_feed_refresh(worker_app, job_id))
+    {
+        let error = AppError::storage(error);
+        let failed = state.vulnerability_jobs.fail(&job.id, error.clone())?;
+        emit_wordfence_refresh_job(&app, &failed);
+        return Err(error);
+    }
+    Ok(job)
+}
+
+fn run_wordfence_feed_refresh(app: AppHandle, job_id: String) {
+    let state = app.state::<AppState>();
+    if let Ok(job) = state.vulnerability_jobs.mark_running(&job_id) {
+        emit_wordfence_refresh_job(&app, &job);
+    }
+    let temp_path = state
+        .vulnerability_cache_directory
+        .join(format!("wordfence-{}.tmp", uuid::Uuid::new_v4()));
+    let started = Instant::now();
+    let result = (|| {
+        fs::create_dir_all(&state.vulnerability_cache_directory).map_err(AppError::storage)?;
+        let provider = wordfence::WordfenceIntelligenceProvider::new()?;
+        let api_key = Zeroizing::new(
+            state
+                .credentials
+                .get_optional(wordfence::WORDFENCE_CREDENTIAL_REFERENCE)?
+                .ok_or_else(|| AppError::validation("De Wordfence API-sleutel is verwijderd."))?,
+        );
+        let attempted_at = state
+            .database
+            .record_vulnerability_feed_attempt(wordfence::WORDFENCE_PROVIDER)?;
+        let bytes =
+            wordfence::VulnerabilityProvider::download_feed(&provider, &api_key, &temp_path)?;
+        if let Ok(job) = state
+            .vulnerability_jobs
+            .phase(&job_id, "validate", Some(bytes))
+        {
+            emit_wordfence_refresh_job(&app, &job);
+        }
+        if let Ok(job) = state.vulnerability_jobs.phase(&job_id, "process", None) {
+            emit_wordfence_refresh_job(&app, &job);
+        }
+        let summary = state
+            .database
+            .import_wordfence_feed(&temp_path, &attempted_at)?;
+        if let Ok(job) = state.vulnerability_jobs.phase(&job_id, "database", None) {
+            emit_wordfence_refresh_job(&app, &job);
+        }
+        Ok(summary)
+    })();
+    let _ = fs::remove_file(&temp_path);
+    match result {
+        Ok(summary) => {
+            if let Ok(job) = state.vulnerability_jobs.complete(&job_id, &summary) {
+                emit_wordfence_refresh_job(&app, &job);
+            }
+        }
+        Err(error) => {
+            let logged = error_log::persist_error(
+                &state.database,
+                None,
+                None,
+                "Wordfence vulnerability database bijwerken",
+                Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                None,
+                error,
+            );
+            let _ = state.database.record_vulnerability_feed_failure(
+                wordfence::WORDFENCE_PROVIDER,
+                &logged.user_message,
+            );
+            if let Ok(job) = state.vulnerability_jobs.fail(&job_id, logged) {
+                emit_wordfence_refresh_job(&app, &job);
+            }
+        }
+    }
+}
+
+fn emit_wordfence_refresh_job(app: &AppHandle, job: &VulnerabilityRefreshJobState) {
+    if let Err(error) = app.emit("wordfence-feed-refresh-updated", job) {
+        eprintln!("wordfence refresh event failed: {error}");
+    }
 }
 
 #[tauri::command(async)]
@@ -2951,11 +3110,13 @@ mod tests {
             credentials: CredentialVault,
             ssh: Arc::new(CleanupMockSsh::default()),
             backup_directory: temp.join("backups"),
+            vulnerability_cache_directory: temp.join("vulnerability-cache"),
             scan_concurrency: std::sync::atomic::AtomicUsize::new(1),
             auth: AuthManager::default(),
             terminals: crate::terminal::TerminalManager::default(),
             terminal_access: crate::terminal_auth::TerminalAccessManager::default(),
             scan_jobs: crate::scan_jobs::ScanJobManager::new(2),
+            vulnerability_jobs: crate::vulnerability_jobs::VulnerabilityRefreshManager::default(),
         }
     }
 

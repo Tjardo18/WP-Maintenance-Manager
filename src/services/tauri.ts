@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -17,6 +17,8 @@ const browserExceptions: FindingException[] = [];
 const browserTrustedFiles: TrustedFile[] = [];
 const browserScans = new Map<string, ScanResult>();
 let browserWordfenceConfigured = false;
+let browserWordfenceJob: VulnerabilityRefreshJobState | undefined;
+const browserWordfenceJobListeners = new Set<(job: VulnerabilityRefreshJobState) => void>();
 
 function browserScan(siteId: string) {
   const existing = browserScans.get(siteId);
@@ -243,6 +245,9 @@ export const appApi = {
   async saveWordfenceApiKey(apiKey: string): Promise<WordfenceIntegrationStatus> { if (isTauri()) return call("save_wordfence_api_key", { apiKey }); browserWordfenceConfigured = Boolean(apiKey.trim()); return appApi.getWordfenceStatus(); },
   async removeWordfenceApiKey(): Promise<WordfenceIntegrationStatus> { if (isTauri()) return call("remove_wordfence_api_key"); browserWordfenceConfigured = false; return appApi.getWordfenceStatus(); },
   async testWordfenceConnection(): Promise<WordfenceIntegrationStatus> { if (isTauri()) return call("test_wordfence_connection"); if (!browserWordfenceConfigured) throw new Error("Sla eerst een Wordfence API-sleutel op."); return { ...(await appApi.getWordfenceStatus()), connectionStatus: "connected" }; },
+  async startWordfenceFeedRefresh(): Promise<VulnerabilityRefreshJobState> { if (isTauri()) return call("start_wordfence_feed_refresh"); if (!browserWordfenceConfigured) throw new Error("Sla eerst een Wordfence API-sleutel op."); const now = new Date().toISOString(); browserWordfenceJob = { id: crypto.randomUUID(), status: "running", phase: "download", createdAt: now, startedAt: now, downloadedBytes: 0, vulnerabilityCount: 0, softwareRecordCount: 0, automatic: false }; window.setTimeout(() => { if (!browserWordfenceJob) return; browserWordfenceJob = { ...browserWordfenceJob, status: "completed", phase: "complete", finishedAt: new Date().toISOString(), downloadedBytes: 1_024_000, vulnerabilityCount: 33_000, softwareRecordCount: 36_000 }; browserWordfenceJobListeners.forEach((listener) => listener(structuredClone(browserWordfenceJob!))); }, 500); return structuredClone(browserWordfenceJob); },
+  async getWordfenceFeedRefreshJob(): Promise<VulnerabilityRefreshJobState | undefined> { if (isTauri()) return (await call<VulnerabilityRefreshJobState | null>("get_wordfence_feed_refresh_job")) ?? undefined; return browserWordfenceJob ? structuredClone(browserWordfenceJob) : undefined; },
+  async onWordfenceFeedRefreshUpdated(handler: (job: VulnerabilityRefreshJobState) => void): Promise<UnlistenFn> { if (isTauri()) return listen("wordfence-feed-refresh-updated", (event) => handler(event.payload as VulnerabilityRefreshJobState)); browserWordfenceJobListeners.add(handler); return () => browserWordfenceJobListeners.delete(handler); },
   async listAuditEvents(siteId?: string): Promise<AuditEvent[]> { return isTauri() ? call("list_audit_events", { siteId: siteId ?? null }) : []; },
   async listErrorLogs(filter: ErrorLogFilter = {}): Promise<ErrorLogPage> { return isTauri() ? call("list_error_logs", { filter }) : { records: [], total: 0, limit: filter.limit ?? 50, offset: filter.offset ?? 0 }; },
 };

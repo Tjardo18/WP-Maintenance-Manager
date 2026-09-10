@@ -20,6 +20,7 @@ mod state;
 mod terminal;
 mod terminal_auth;
 mod validation;
+mod vulnerability_jobs;
 mod wordfence;
 mod wordpress_users;
 mod wp_cli;
@@ -45,11 +46,13 @@ pub fn run() {
                 credentials: credentials::CredentialVault,
                 ssh: std::sync::Arc::new(ssh::Ssh2Executor),
                 backup_directory: data_dir.join("backups"),
+                vulnerability_cache_directory: data_dir.join("vulnerability-cache"),
                 scan_concurrency: std::sync::atomic::AtomicUsize::new(scan_concurrency),
                 auth: auth::AuthManager::default(),
                 terminals: terminal::TerminalManager::default(),
                 terminal_access: terminal_auth::TerminalAccessManager::default(),
                 scan_jobs: scan_jobs::ScanJobManager::new(scan_concurrency),
+                vulnerability_jobs: vulnerability_jobs::VulnerabilityRefreshManager::default(),
             });
             Ok(())
         })
@@ -101,6 +104,8 @@ pub fn run() {
             commands::save_wordfence_api_key,
             commands::remove_wordfence_api_key,
             commands::test_wordfence_connection,
+            commands::start_wordfence_feed_refresh,
+            commands::get_wordfence_feed_refresh_job,
             commands::check_updates,
             commands::list_cached_updates,
             commands::list_wordpress_users,

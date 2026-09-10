@@ -866,3 +866,52 @@ pub struct WordfenceIntegrationStatus {
     pub cooldown_remaining_seconds: u64,
     pub last_error: Option<String>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VulnerabilityFeedState {
+    pub active_dataset_id: Option<String>,
+    pub last_attempt_at: Option<String>,
+    pub last_successful_update_at: Option<String>,
+    pub last_error: Option<String>,
+    pub vulnerability_count: u64,
+    pub software_record_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VulnerabilityImportSummary {
+    pub dataset_id: String,
+    pub vulnerability_count: u64,
+    pub software_record_count: u64,
+    pub parsed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VulnerabilityRefreshStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl VulnerabilityRefreshStatus {
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Queued | Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VulnerabilityRefreshJobState {
+    pub id: String,
+    pub status: VulnerabilityRefreshStatus,
+    pub phase: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub downloaded_bytes: u64,
+    pub vulnerability_count: u64,
+    pub software_record_count: u64,
+    pub automatic: bool,
+    pub error: Option<crate::error::AppError>,
+}

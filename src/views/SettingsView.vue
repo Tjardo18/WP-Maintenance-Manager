@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
-import { DatabaseBackup, Gauge, Info, KeyRound, LockKeyhole, PlugZap, Save, ShieldCheck, Trash2 } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { DatabaseBackup, Gauge, Info, KeyRound, LoaderCircle, LockKeyhole, PlugZap, RefreshCw, Save, ShieldCheck, Trash2 } from "@lucide/vue";
 import { appApi } from "../services/tauri";
-import type { WordfenceIntegrationStatus } from "../types";
+import type { VulnerabilityRefreshJobState, WordfenceIntegrationStatus } from "../types";
 import { errorMessage } from "../utils/errors";
+import { formatDate } from "../utils/format";
 import { useAuthStore } from "../stores/auth";
 
 const auth = useAuthStore();
@@ -12,31 +13,39 @@ const idleMinutes = ref(15);
 const saved = ref(false);
 const saving = ref(false);
 const passwordBusy = ref(false);
-const integrationBusy = ref<"save" | "remove" | "test">();
+const integrationBusy = ref<"save" | "remove" | "test" | "refresh">();
 const currentPassword = ref("");
 const newPassword = ref("");
 const repeatedPassword = ref("");
 const wordfenceApiKey = ref("");
 const wordfence = ref<WordfenceIntegrationStatus>();
+const refreshJob = ref<VulnerabilityRefreshJobState>();
 const integrationMessage = ref<string>();
 const error = ref<string>();
 
 const wordfenceStatusLabel = computed(() => wordfence.value?.configured ? "Ingesteld" : "Niet geconfigureerd");
+const feedStatusLabel = computed(() => ({ missing: "Niet gedownload", current: "Actueel", stale: "Vernieuwing gewenst", refreshing: "Wordt bijgewerkt…", failed: "Vernieuwen mislukt" })[wordfence.value?.feedStatus ?? "missing"]);
+const refreshPhaseLabel = computed(() => ({ download: "Downloaden", validate: "Controleren", process: "Verwerken", database: "Database bijwerken", complete: "Klaar" })[refreshJob.value?.phase ?? wordfence.value?.refreshPhase ?? "download"]);
+let unlistenRefresh: (() => void) | undefined;
 
 onMounted(async () => {
   idleMinutes.value = auth.idleTimeoutMinutes;
   try {
-    const [settings, status] = await Promise.all([appApi.getSettings(), appApi.getWordfenceStatus()]);
+    const [settings, status, job] = await Promise.all([appApi.getSettings(), appApi.getWordfenceStatus(), appApi.getWordfenceFeedRefreshJob()]);
     concurrency.value = settings.scanConcurrency;
     wordfence.value = status;
+    refreshJob.value = job;
+    unlistenRefresh = await appApi.onWordfenceFeedRefreshUpdated(async (updated) => { refreshJob.value = updated; if (["completed", "failed"].includes(updated.status)) { integrationBusy.value = undefined; wordfence.value = await appApi.getWordfenceStatus(); } });
   } catch (cause) { error.value = errorMessage(cause); }
 });
+onBeforeUnmount(() => unlistenRefresh?.());
 
 async function save() { saving.value = true; error.value = undefined; try { const settings = await appApi.saveSettings({ scanConcurrency: concurrency.value }); await auth.updateIdleTimeout(idleMinutes.value); concurrency.value = settings.scanConcurrency; saved.value = true; setTimeout(() => saved.value = false, 2000); } catch (cause) { error.value = errorMessage(cause); } finally { saving.value = false; } }
 async function changePassword() { if (newPassword.value !== repeatedPassword.value || newPassword.value.length < 12) return; passwordBusy.value = true; error.value = undefined; try { await auth.changePassword(currentPassword.value, newPassword.value); } catch (cause) { error.value = errorMessage(cause); } finally { passwordBusy.value = false; } }
 async function saveWordfenceKey() { integrationBusy.value = "save"; error.value = undefined; integrationMessage.value = undefined; try { wordfence.value = await appApi.saveWordfenceApiKey(wordfenceApiKey.value); wordfenceApiKey.value = ""; integrationMessage.value = "API-sleutel veilig opgeslagen. Test nu de verbinding."; } catch (cause) { error.value = errorMessage(cause); } finally { integrationBusy.value = undefined; } }
 async function removeWordfenceKey() { integrationBusy.value = "remove"; error.value = undefined; integrationMessage.value = undefined; try { wordfence.value = await appApi.removeWordfenceApiKey(); wordfenceApiKey.value = ""; integrationMessage.value = "API-sleutel verwijderd. Een bestaande lokale database blijft behouden."; } catch (cause) { error.value = errorMessage(cause); } finally { integrationBusy.value = undefined; } }
 async function testWordfenceConnection() { integrationBusy.value = "test"; error.value = undefined; integrationMessage.value = undefined; try { wordfence.value = await appApi.testWordfenceConnection(); integrationMessage.value = "Verbinding geslaagd. Wordfence Intelligence is bereikbaar en de API-sleutel is geldig."; } catch (cause) { error.value = errorMessage(cause); } finally { integrationBusy.value = undefined; } }
+async function refreshWordfenceFeed() { integrationBusy.value = "refresh"; error.value = undefined; integrationMessage.value = undefined; try { refreshJob.value = await appApi.startWordfenceFeedRefresh(); wordfence.value = { ...wordfence.value!, refreshRunning: true, feedStatus: "refreshing" }; } catch (cause) { error.value = errorMessage(cause); integrationBusy.value = undefined; } }
 </script>
 
 <template>
@@ -48,6 +57,12 @@ async function testWordfenceConnection() { integrationBusy.value = "test"; error
         <label><span>API-sleutel</span><input v-model="wordfenceApiKey" type="password" autocomplete="new-password" :placeholder="wordfence?.configured ? 'Nieuwe API-sleutel invoeren' : 'Plak hier je Wordfence API-sleutel'" maxlength="512" /><small>De sleutel gaat rechtstreeks naar de beveiligde opslag van Windows en wordt niet in SQLite of de interface bewaard.</small></label>
         <div class="integration-actions"><button class="button primary" :disabled="integrationBusy !== undefined || !wordfenceApiKey.trim()" @click="saveWordfenceKey"><Save :size="16" /> {{ integrationBusy === 'save' ? 'Opslaan…' : wordfence?.configured ? 'API-sleutel vervangen' : 'Opslaan' }}</button><button v-if="wordfence?.configured" class="button secondary" :disabled="integrationBusy !== undefined" @click="testWordfenceConnection"><PlugZap :size="16" /> {{ integrationBusy === 'test' ? 'Testen…' : 'Verbinding testen' }}</button><button v-if="wordfence?.configured" class="button danger-text" :disabled="integrationBusy !== undefined" @click="removeWordfenceKey"><Trash2 :size="16" /> {{ integrationBusy === 'remove' ? 'Verwijderen…' : 'API-sleutel verwijderen' }}</button></div>
         <p v-if="integrationMessage" class="saved-copy integration-message">{{ integrationMessage }}</p>
+        <div class="feed-status-panel">
+          <div><small>Vulnerability database</small><strong>{{ feedStatusLabel }}</strong></div><div><small>Laatste update</small><strong>{{ formatDate(wordfence?.lastSuccessfulUpdateAt) }}</strong></div><div><small>Volgende automatische update</small><strong>{{ formatDate(wordfence?.nextAutomaticUpdateAt) }}</strong></div><div><small>Vulnerabilities</small><strong>{{ wordfence?.vulnerabilityCount.toLocaleString('nl-NL') ?? 0 }}</strong></div>
+        </div>
+        <div v-if="wordfence?.refreshRunning || ['queued', 'running'].includes(refreshJob?.status ?? '')" class="feed-progress"><LoaderCircle class="spin" :size="17" /><span><strong>Wordfence database bijwerken…</strong><small>{{ refreshPhaseLabel }}<template v-if="refreshJob?.downloadedBytes"> · {{ (refreshJob.downloadedBytes / 1024 / 1024).toFixed(1) }} MB</template></small></span></div>
+        <p v-if="wordfence?.lastError" class="inline-warning">{{ wordfence.lastError }} De vorige lokale database blijft beschikbaar.</p>
+        <div class="integration-actions"><button class="button secondary" :disabled="!wordfence?.configured || wordfence.refreshRunning || integrationBusy !== undefined || Boolean(wordfence.cooldownRemainingSeconds)" @click="refreshWordfenceFeed"><RefreshCw :size="16" :class="{ spin: wordfence?.refreshRunning }" /> Database nu vernieuwen</button><small v-if="wordfence?.cooldownRemainingSeconds">Opnieuw vernieuwen mogelijk over {{ Math.ceil(wordfence.cooldownRemainingSeconds / 60) }} minuten.</small></div>
       </div>
     </section>
     <section class="card form-card"><div class="section-heading"><span class="section-icon"><Gauge /></span><div><h3>Verbindingen</h3><p>Voorkom dat de computer of hostingservers overbelast raken.</p></div></div><div class="form-grid"><label><span>Gelijktijdige scans</span><input v-model.number="concurrency" type="number" min="1" max="5" /><small>Rust dwingt altijd een maximum van 5 SSH-verbindingen af.</small></label><div class="notice"><Info :size="18" /><p>Iedere catalogusactie gebruikt een eigen veilige time-out op basis van het type controle of update.</p></div></div></section>

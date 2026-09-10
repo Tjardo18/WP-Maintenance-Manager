@@ -5,12 +5,20 @@ use crate::{
         ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity, ExceptionScope, Finding,
         FindingContext, FindingDisposition, FindingException, FindingSeverity, MaintenanceRun,
         MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus, StepStatus,
-        StoredSite, TrustedFile, TrustedFileStatus, UpdateItem, UpdateKind,
+        StoredSite, TrustedFile, TrustedFileStatus, UpdateItem, UpdateKind, VulnerabilityFeedState,
+        VulnerabilityImportSummary,
     },
+    wordfence::{WORDFENCE_PROVIDER, WordfenceVulnerability},
 };
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{Connection, OptionalExtension, Row, params};
-use std::{collections::HashMap, fs, path::PathBuf};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
+use serde::de::{DeserializeSeed, Error as _, MapAccess, Visitor};
+use std::{
+    collections::HashMap,
+    fmt, fs,
+    io::BufReader,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -136,6 +144,22 @@ impl Database {
                 .execute_batch(include_str!("../migrations/0008_security_exceptions.sql"))?;
             transaction.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(8, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
+        let vulnerability_intelligence_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 9)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !vulnerability_intelligence_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!(
+                "../migrations/0009_vulnerability_intelligence.sql"
+            ))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(9, ?1)",
                 [utc_now()],
             )?;
             transaction.commit()?;
@@ -876,6 +900,150 @@ impl Database {
         Ok(())
     }
 
+    pub fn vulnerability_feed_state(
+        &self,
+        provider: &str,
+    ) -> Result<VulnerabilityFeedState, AppError> {
+        let connection = self.connect()?;
+        connection
+            .query_row(
+                "SELECT s.active_dataset_id,s.last_attempt_at,s.last_successful_update_at,s.last_error,COALESCE(d.vulnerability_count,0),COALESCE(d.software_record_count,0) FROM vulnerability_feed_state s LEFT JOIN vulnerability_datasets d ON d.id=s.active_dataset_id WHERE s.provider=?1",
+                [provider],
+                |row| {
+                    Ok(VulnerabilityFeedState {
+                        active_dataset_id: row.get(0)?,
+                        last_attempt_at: row.get(1)?,
+                        last_successful_update_at: row.get(2)?,
+                        last_error: row.get(3)?,
+                        vulnerability_count: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                        software_record_count: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
+                    })
+                },
+            )
+            .optional()
+            .map(|state| state.unwrap_or_default())
+            .map_err(AppError::from)
+    }
+
+    pub fn vulnerability_feed_cooldown_remaining(
+        &self,
+        provider: &str,
+        cooldown_seconds: i64,
+    ) -> Result<u64, AppError> {
+        let state = self.vulnerability_feed_state(provider)?;
+        let Some(last_attempt) = state
+            .last_attempt_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        else {
+            return Ok(0);
+        };
+        let remaining = cooldown_seconds - (Utc::now().timestamp() - last_attempt.timestamp());
+        Ok(u64::try_from(remaining.max(0)).unwrap_or(0))
+    }
+
+    pub fn record_vulnerability_feed_attempt(&self, provider: &str) -> Result<String, AppError> {
+        let connection = self.connect()?;
+        let now = utc_now();
+        connection.execute(
+            "INSERT INTO vulnerability_feed_state(provider,last_attempt_at,updated_at) VALUES(?1,?2,?2) ON CONFLICT(provider) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,updated_at=excluded.updated_at",
+            params![provider, now],
+        )?;
+        Ok(now)
+    }
+
+    pub fn record_vulnerability_feed_failure(
+        &self,
+        provider: &str,
+        summary: &str,
+    ) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT INTO vulnerability_feed_state(provider,last_error,updated_at) VALUES(?1,?2,?3) ON CONFLICT(provider) DO UPDATE SET last_error=excluded.last_error,updated_at=excluded.updated_at",
+            params![provider, bound_text(summary, 500), utc_now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn import_wordfence_feed(
+        &self,
+        source: &Path,
+        downloaded_at: &str,
+    ) -> Result<VulnerabilityImportSummary, AppError> {
+        let file = fs::File::open(source).map_err(AppError::storage)?;
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let dataset_id = Uuid::new_v4().to_string();
+        let parsed_at = utc_now();
+        transaction.execute(
+            "INSERT INTO vulnerability_datasets(id,provider,feed_type,downloaded_at,parsed_at,vulnerability_count,software_record_count,status,created_at) VALUES(?1,?2,'production',?3,?4,0,0,'superseded',?4)",
+            params![dataset_id, WORDFENCE_PROVIDER, downloaded_at, parsed_at],
+        )?;
+
+        let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(file));
+        let (vulnerability_count, software_record_count) = WordfenceFeedSeed {
+            transaction: &transaction,
+            dataset_id: &dataset_id,
+        }
+        .deserialize(&mut deserializer)
+        .map_err(|error| AppError {
+            error_id: None,
+            category: "vulnerability_parse".into(),
+            user_message: "De Wordfence vulnerability database kon niet worden verwerkt.".into(),
+            technical_details: Some(format!(
+                "Ongeldige V3 Production Feed bij regel {}, kolom {}: {error}",
+                error.line(),
+                error.column()
+            )),
+            retryable: false,
+        })?;
+        deserializer.end().map_err(|error| AppError {
+            error_id: None,
+            category: "vulnerability_parse".into(),
+            user_message: "De Wordfence vulnerability database bevat extra ongeldige data.".into(),
+            technical_details: Some(error.to_string()),
+            retryable: false,
+        })?;
+        if vulnerability_count == 0 || software_record_count == 0 {
+            return Err(AppError {
+                error_id: None,
+                category: "vulnerability_parse".into(),
+                user_message: "De Wordfence vulnerability database bevat geen bruikbare records."
+                    .into(),
+                technical_details: Some("Een lege feed wordt niet geactiveerd.".into()),
+                retryable: false,
+            });
+        }
+
+        transaction.execute(
+            "UPDATE vulnerability_datasets SET status='superseded' WHERE provider=?1 AND status='active'",
+            [WORDFENCE_PROVIDER],
+        )?;
+        let vulnerability_count_db = i64::try_from(vulnerability_count)
+            .map_err(|_| AppError::storage("Vulnerability count overflow"))?;
+        let software_record_count_db = i64::try_from(software_record_count)
+            .map_err(|_| AppError::storage("Software record count overflow"))?;
+        transaction.execute(
+            "UPDATE vulnerability_datasets SET vulnerability_count=?2,software_record_count=?3,status='active' WHERE id=?1",
+            params![dataset_id, vulnerability_count_db, software_record_count_db],
+        )?;
+        transaction.execute(
+            "INSERT INTO vulnerability_feed_state(provider,active_dataset_id,last_attempt_at,last_successful_update_at,last_error,updated_at) VALUES(?1,?2,?3,?3,NULL,?4) ON CONFLICT(provider) DO UPDATE SET active_dataset_id=excluded.active_dataset_id,last_attempt_at=excluded.last_attempt_at,last_successful_update_at=excluded.last_successful_update_at,last_error=NULL,updated_at=excluded.updated_at",
+            params![WORDFENCE_PROVIDER, dataset_id, downloaded_at, parsed_at],
+        )?;
+        transaction.execute(
+            "DELETE FROM vulnerability_datasets WHERE provider=?1 AND id<>?2",
+            params![WORDFENCE_PROVIDER, dataset_id],
+        )?;
+        transaction.commit()?;
+        Ok(VulnerabilityImportSummary {
+            dataset_id,
+            vulnerability_count,
+            software_record_count,
+            parsed_at,
+        })
+    }
+
     pub fn auth_config(&self) -> Result<Option<AuthConfig>, AppError> {
         let connection = self.connect()?;
         connection
@@ -1053,6 +1221,183 @@ impl Database {
     }
 }
 
+struct WordfenceFeedSeed<'transaction, 'connection> {
+    transaction: &'transaction Transaction<'connection>,
+    dataset_id: &'transaction str,
+}
+
+impl<'de> DeserializeSeed<'de> for WordfenceFeedSeed<'_, '_> {
+    type Value = (u64, u64);
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(WordfenceFeedVisitor {
+            transaction: self.transaction,
+            dataset_id: self.dataset_id,
+        })
+    }
+}
+
+struct WordfenceFeedVisitor<'transaction, 'connection> {
+    transaction: &'transaction Transaction<'connection>,
+    dataset_id: &'transaction str,
+}
+
+impl<'de> Visitor<'de> for WordfenceFeedVisitor<'_, '_> {
+    type Value = (u64, u64);
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("een object met Wordfence V3-vulnerabilityrecords")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut vulnerability_count = 0_u64;
+        let mut software_record_count = 0_u64;
+        while let Some((key, record)) = map.next_entry::<String, WordfenceVulnerability>()? {
+            validate_wordfence_record(&key, &record).map_err(A::Error::custom)?;
+            let inserted = insert_wordfence_record(self.transaction, self.dataset_id, &record)
+                .map_err(A::Error::custom)?;
+            vulnerability_count = vulnerability_count
+                .checked_add(1)
+                .ok_or_else(|| A::Error::custom("te veel vulnerabilityrecords"))?;
+            software_record_count = software_record_count
+                .checked_add(inserted)
+                .ok_or_else(|| A::Error::custom("te veel softwarerecords"))?;
+        }
+        Ok((vulnerability_count, software_record_count))
+    }
+}
+
+fn validate_wordfence_record(key: &str, record: &WordfenceVulnerability) -> Result<(), String> {
+    if Uuid::parse_str(key).is_err() || key != record.id {
+        return Err("de UUID-sleutel en vulnerability-id komen niet exact overeen".into());
+    }
+    if record.title.trim().is_empty() || record.title.len() > 20_000 {
+        return Err(format!(
+            "vulnerability {} heeft een ongeldige titel",
+            record.id
+        ));
+    }
+    if record.software.len() > 10_000
+        || record.references.len() > 10_000
+        || record.researchers.len() > 10_000
+    {
+        return Err(format!(
+            "vulnerability {} overschrijdt recordlimieten",
+            record.id
+        ));
+    }
+    for software in &record.software {
+        if !matches!(software.software_type.as_str(), "core" | "plugin" | "theme") {
+            return Err(format!(
+                "vulnerability {} heeft onbekend softwaretype",
+                record.id
+            ));
+        }
+        if software.slug.trim().is_empty()
+            || software.slug.len() > 500
+            || software.name.len() > 20_000
+            || software.affected_versions.len() > 10_000
+            || software.patched_versions.len() > 10_000
+        {
+            return Err(format!(
+                "vulnerability {} heeft ongeldige softwaremetadata",
+                record.id
+            ));
+        }
+        for range in software.affected_versions.values() {
+            if range.from_version.is_empty()
+                || range.to_version.is_empty()
+                || range.from_version.len() > 500
+                || range.to_version.len() > 500
+            {
+                return Err(format!(
+                    "vulnerability {} heeft een ongeldig versiebereik",
+                    record.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn insert_wordfence_record(
+    transaction: &Transaction<'_>,
+    dataset_id: &str,
+    record: &WordfenceVulnerability,
+) -> Result<u64, String> {
+    let researchers_json = serde_json::to_string(&record.researchers).map_err(|e| e.to_string())?;
+    let references_json = serde_json::to_string(&record.references).map_err(|e| e.to_string())?;
+    let copyrights_json = record
+        .copyrights
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let cwe = record.cwe.as_ref();
+    let cvss = record.cvss.as_ref();
+    transaction
+        .execute(
+            "INSERT INTO vulnerabilities(dataset_id,provider,vulnerability_id,title,description,informational,cve,cve_link,published,updated,cvss_vector,cvss_score,cvss_rating,cwe_id,cwe_name,cwe_description,researchers_json,references_json,copyrights_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+            params![
+                dataset_id,
+                WORDFENCE_PROVIDER,
+                record.id,
+                record.title,
+                record.description,
+                record.informational,
+                record.cve,
+                record.cve_link,
+                record.published,
+                record.updated,
+                cvss.map(|value| value.vector.as_str()),
+                cvss.map(|value| value.score),
+                cvss.map(|value| value.rating.as_str()),
+                cwe.map(|value| value.id),
+                cwe.map(|value| value.name.as_str()),
+                cwe.map(|value| value.description.as_str()),
+                researchers_json,
+                references_json,
+                copyrights_json,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    for software in &record.software {
+        let affected_ranges_json =
+            serde_json::to_string(&software.affected_versions).map_err(|e| e.to_string())?;
+        let patched_versions_json =
+            serde_json::to_string(&software.patched_versions).map_err(|e| e.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO vulnerable_software(id,dataset_id,provider,vulnerability_id,software_type,software_slug,software_name,affected_ranges_json,patched,patched_versions_json,remediation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    dataset_id,
+                    WORDFENCE_PROVIDER,
+                    record.id,
+                    software.software_type,
+                    software.slug,
+                    software.name,
+                    affected_ranges_json,
+                    software.patched,
+                    patched_versions_json,
+                    software.remediation,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    u64::try_from(record.software.len()).map_err(|error| error.to_string())
+}
+
+fn bound_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 fn row_to_finding_exception(row: &Row<'_>) -> rusqlite::Result<FindingException> {
     Ok(FindingException {
         id: row.get(0)?,
@@ -1185,6 +1530,12 @@ mod tests {
         }
     }
 
+    fn wordfence_fixture(vulnerability_id: &str, software_json: &str) -> String {
+        format!(
+            r#"{{"{vulnerability_id}":{{"id":"{vulnerability_id}","title":"Fixture vulnerability","software":[{software_json}],"informational":false,"description":"Stored XSS fixture","references":["https://www.wordfence.com/threat-intel/vulnerabilities/example"],"cwe":{{"id":79,"name":"XSS","description":"Fixture"}},"cvss":{{"vector":"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N","score":6.1,"rating":"Medium"}},"cve":"CVE-2026-1234","cve_link":"https://www.cve.org/CVERecord?id=CVE-2026-1234","researchers":["Researcher"],"published":"2026-09-01 10:00:00","updated":"2026-09-02 11:00:00","copyrights":{{"message":"Copyright applies","mitre":{{"notice":"MITRE notice","license":"License text","license_url":"https://www.cve.org/Legal/TermsOfUse"}}}}}}}}"#
+        )
+    }
+
     #[test]
     fn error_log_persists_filters_and_removes_expired_records() {
         let path = std::env::temp_dir().join(format!("wpmm-errors-{}.sqlite3", Uuid::new_v4()));
@@ -1219,6 +1570,111 @@ mod tests {
         assert_eq!(
             database.delete_site(&saved.id).unwrap().as_deref(),
             Some("test-ref")
+        );
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn vulnerability_feed_import_is_atomic_normalized_and_replaces_complete_datasets() {
+        let path = std::env::temp_dir().join(format!("wpmm-feed-{}.sqlite3", Uuid::new_v4()));
+        let feed_path = std::env::temp_dir().join(format!("wpmm-feed-{}.json", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let first_id = Uuid::new_v4().to_string();
+        let plugin = r#"{"type":"plugin","name":"Example Plugin","slug":"example-plugin","affected_versions":{"1.0.0 - 1.2.3":{"from_version":"1.0.0","from_inclusive":true,"to_version":"1.2.3","to_inclusive":true}},"patched":true,"patched_versions":["1.2.4"],"remediation":"Update to 1.2.4"}"#;
+        fs::write(&feed_path, wordfence_fixture(&first_id, plugin)).unwrap();
+        let first = database
+            .import_wordfence_feed(&feed_path, &utc_now())
+            .unwrap();
+        assert_eq!(first.vulnerability_count, 1);
+        assert_eq!(first.software_record_count, 1);
+        let state = database
+            .vulnerability_feed_state(WORDFENCE_PROVIDER)
+            .unwrap();
+        assert_eq!(
+            state.active_dataset_id.as_deref(),
+            Some(first.dataset_id.as_str())
+        );
+        assert_eq!(state.vulnerability_count, 1);
+
+        fs::write(&feed_path, "{malformed").unwrap();
+        assert!(
+            database
+                .import_wordfence_feed(&feed_path, &utc_now())
+                .is_err()
+        );
+        assert_eq!(
+            database
+                .vulnerability_feed_state(WORDFENCE_PROVIDER)
+                .unwrap()
+                .active_dataset_id,
+            Some(first.dataset_id)
+        );
+
+        let second_id = Uuid::new_v4().to_string();
+        let core = r#"{"type":"core","name":"WordPress","slug":"wordpress","affected_versions":{"* - 6.6.1":{"from_version":"*","from_inclusive":true,"to_version":"6.6.1","to_inclusive":true}},"patched":true,"patched_versions":["6.6.2"],"remediation":"Update WordPress"}"#;
+        fs::write(&feed_path, wordfence_fixture(&second_id, core)).unwrap();
+        let second = database
+            .import_wordfence_feed(&feed_path, &utc_now())
+            .unwrap();
+        assert_ne!(second.dataset_id, first_id);
+        let connection = database.connect().unwrap();
+        let datasets: i64 = connection
+            .query_row("SELECT COUNT(*) FROM vulnerability_datasets", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let old_records: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM vulnerabilities WHERE vulnerability_id=?1",
+                [first_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let copyrights: String = connection
+            .query_row(
+                "SELECT copyrights_json FROM vulnerabilities WHERE vulnerability_id=?1",
+                [second_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(datasets, 1);
+        assert_eq!(old_records, 0);
+        assert!(copyrights.contains("MITRE notice"));
+        drop(connection);
+        drop(database);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(feed_path);
+    }
+
+    #[test]
+    fn vulnerability_feed_attempt_enforces_a_local_cooldown() {
+        let path = std::env::temp_dir().join(format!("wpmm-cooldown-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        database
+            .record_vulnerability_feed_attempt(WORDFENCE_PROVIDER)
+            .unwrap();
+        assert!(
+            database
+                .vulnerability_feed_cooldown_remaining(WORDFENCE_PROVIDER, 1_800)
+                .unwrap()
+                > 1_700
+        );
+        let old_attempt = (Utc::now() - chrono::Duration::minutes(31))
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+        database
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE vulnerability_feed_state SET last_attempt_at=?1 WHERE provider=?2",
+                params![old_attempt, WORDFENCE_PROVIDER],
+            )
+            .unwrap();
+        assert_eq!(
+            database
+                .vulnerability_feed_cooldown_remaining(WORDFENCE_PROVIDER, 1_800)
+                .unwrap(),
+            0
         );
         drop(database);
         let _ = fs::remove_file(path);
