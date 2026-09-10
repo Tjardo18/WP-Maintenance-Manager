@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanProgress, BulkScanResult, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult, Site, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, Site, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -11,6 +11,44 @@ let browserConfigured = false;
 let browserPasswordHash = "";
 let browserIdleMinutes = 15;
 const browserTerminalChallenges = new Map<string, { siteId: string; expiresAt: number }>();
+const browserScanJobs = new Map<string, ScanJobState>();
+const browserScanJobListeners = new Set<(job: ScanJobState) => void>();
+
+const demoScanSteps: ScanJobState["steps"] = [
+  ["ssh_connect", "SSH-verbinding"], ["wordpress_detection", "WordPress detecteren"],
+  ["wordpress", "WordPress controleren"],
+  ["checksum", "Core-checksums"], ["users", "Gebruikers"],
+  ["php", "PHP-bestanden"], ["uploads", "Uploads"],
+  ["modified", "Gewijzigde bestanden"], ["permissions", "Bestandsrechten"],
+  ["configuration", "WordPress-configuratie"], ["database", "Database"],
+  ["core_updates", "WordPress-updates"], ["plugin_list", "Plugin-updates"],
+  ["theme_list", "Thema-updates"], ["homepage", "Homepage"], ["persist", "Resultaat opslaan"],
+].map(([key, label]) => ({ key, label, status: "pending" }));
+
+function emitBrowserScanJob(job: ScanJobState) {
+  const snapshot = structuredClone(job);
+  browserScanJobs.set(job.id, snapshot);
+  browserScanJobListeners.forEach((listener) => listener(structuredClone(snapshot)));
+}
+
+function startBrowserScanJob(site: Site): ScanJobState {
+  const existing = [...browserScanJobs.values()].find((job) => job.siteId === site.id && ["queued", "running"].includes(job.status));
+  if (existing) return structuredClone(existing);
+  const createdAt = new Date().toISOString();
+  const job: ScanJobState = { id: crypto.randomUUID(), jobType: "site_scan", siteId: site.id, siteName: site.name, status: "queued", createdAt, completedSteps: 0, totalSteps: demoScanSteps.length, cancellationRequested: false, steps: structuredClone(demoScanSteps) };
+  emitBrowserScanJob(job);
+  window.setTimeout(() => {
+    const current = browserScanJobs.get(job.id);
+    if (!current || current.status === "cancelled") return;
+    current.status = "running"; current.startedAt = new Date().toISOString(); current.currentStep = current.steps[0]?.key; if (current.steps[0]) { current.steps[0].status = "running"; current.steps[0].startedAt = current.startedAt; } emitBrowserScanJob(current);
+  }, 0);
+  window.setTimeout(() => {
+    const current = browserScanJobs.get(job.id);
+    if (!current || current.status === "cancelled") return;
+    current.status = "completed"; current.finishedAt = new Date().toISOString(); current.currentStep = undefined; current.completedSteps = current.totalSteps; current.resultScanId = crypto.randomUUID(); current.steps = current.steps.map((step) => ({ ...step, status: "success", durationMs: 20 })); emitBrowserScanJob(current);
+  }, 300);
+  return structuredClone(job);
+}
 
 function demoWpCliInspection(command: string): WpCliCommandInspection {
   const family = command.trim().split(/\s+/)[1]?.replace(/[^a-z0-9_-]/gi, "") || "custom";
@@ -22,7 +60,19 @@ function demoWpCliInspection(command: string): WpCliCommandInspection {
 
 async function call<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
   if (!sessionToken) throw { category: "locked", userMessage: "WP Maintenance Manager is vergrendeld.", retryable: false };
-  try { return await invoke<T>(command, { ...args, sessionToken }); }
+  const started = globalThis.performance.now();
+  try {
+    const result = await invoke<T>(command, { ...args, sessionToken });
+    if (import.meta.env.DEV) {
+      const frontendStarted = globalThis.performance.now();
+      const responseBytes = new TextEncoder().encode(JSON.stringify(result) ?? "").byteLength;
+      const frontendProcessingMs = globalThis.performance.now() - frontendStarted;
+      const ipcDurationMs = globalThis.performance.now() - started;
+      const message = `[performance] command=${command} ipc_ms=${ipcDurationMs.toFixed(1)} response_bytes=${responseBytes} frontend_processing_ms=${frontendProcessingMs.toFixed(1)}`;
+      if (responseBytes > 1024 * 1024) console.warn(message); else console.debug(message);
+    }
+    return result;
+  }
   catch (cause) {
     const category = typeof cause === "object" && cause !== null && "category" in cause ? String((cause as { category: unknown }).category) : "";
     if (["locked", "session_expired", "invalid_session", "setup_required", "app_session_revoked_reauth_failed"].includes(category)) {
@@ -99,7 +149,19 @@ export const appApi = {
     return { success: true, requiresHostKeyAcceptance: false, fingerprint: "SHA256:demo-fingerprint", wordpressVersion: "6.8.2", phpVersion: "8.3.12", wpCliVersion: "2.12.0", detectedUrl: input.url, steps: ["SSH bereikbaar", "Host fingerprint gecontroleerd", "Authenticatie geslaagd", "WordPress-pad gevonden", "WP-CLI werkt", "WordPress-installatie gevonden", "Database bereikbaar"].map((label, index) => ({ key: String(index), label, status: "success" })) };
   },
   async acceptHostKey(siteId: string, fingerprint: string): Promise<void> { if (isTauri()) await call("accept_host_key", { siteId, fingerprint }); },
-  async scanSite(siteId: string, modifiedDays = 30): Promise<ScanResult> { return isTauri() ? call("scan_site", { siteId, modifiedDays }) : { ...structuredClone(demoScan), id: crypto.randomUUID(), siteId }; },
+  async startSiteScan(siteId: string, modifiedDays = 30): Promise<ScanJobState> {
+    if (isTauri()) return call("start_site_scan", { siteId, modifiedDays });
+    const site = browserSites.find((candidate) => candidate.id === siteId);
+    if (!site) throw new Error("Website niet gevonden.");
+    return startBrowserScanJob(site);
+  },
+  async getScanJob(jobId: string): Promise<ScanJobState> { if (isTauri()) return call("get_scan_job", { jobId }); const job = browserScanJobs.get(jobId); if (!job) throw new Error("Scantaak niet gevonden."); return structuredClone(job); },
+  async getSiteScanJob(siteId: string): Promise<ScanJobState | undefined> { if (isTauri()) return (await call<ScanJobState | null>("get_site_scan_job", { siteId })) ?? undefined; const job = [...browserScanJobs.values()].filter((item) => item.siteId === siteId).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]; return job ? structuredClone(job) : undefined; },
+  async listScanJobs(activeOnly = false): Promise<ScanJobState[]> { if (isTauri()) return call("list_scan_jobs", { activeOnly }); return [...browserScanJobs.values()].filter((job) => !activeOnly || ["queued", "running"].includes(job.status)).map((job) => structuredClone(job)); },
+  async cancelSiteScan(jobId: string): Promise<ScanJobState> { if (isTauri()) return call("cancel_site_scan", { jobId }); const job = browserScanJobs.get(jobId); if (!job) throw new Error("Scantaak niet gevonden."); job.cancellationRequested = true; job.status = "cancelled"; job.currentStep = undefined; job.finishedAt = new Date().toISOString(); emitBrowserScanJob(job); return structuredClone(job); },
+  async startAllSiteScans(modifiedDays = 30): Promise<BulkScanStart> { if (isTauri()) return call("start_all_site_scans", { modifiedDays }); return { jobs: browserSites.map(startBrowserScanJob) }; },
+  async cancelScanJobs(jobIds: string[]): Promise<ScanJobState[]> { if (isTauri()) return call("cancel_scan_jobs", { jobIds }); return Promise.all(jobIds.map((jobId) => appApi.cancelSiteScan(jobId))); },
+  async onScanJobUpdated(handler: (job: ScanJobState) => void): Promise<UnlistenFn> { if (isTauri()) return listen("scan-job-updated", (event) => handler(event.payload as ScanJobState)); browserScanJobListeners.add(handler); return () => browserScanJobListeners.delete(handler); },
   async listScans(siteId: string): Promise<ScanResult[]> { return isTauri() ? call("list_scan_runs", { siteId }) : [{ ...structuredClone(demoScan), siteId }]; },
   async previewChecksumFinding(siteId: string, findingId: string): Promise<FilePreview> { if (isTauri()) return call("preview_checksum_finding", { siteId, findingId }); const finding = demoScan.checks.flatMap((check) => check.findings).find((item) => item.id === findingId); if (!finding?.path) throw new Error("Checksumfinding niet gevonden."); const parts = finding.path.split("/"); return { finding: structuredClone(finding), fileName: parts[parts.length - 1] ?? finding.path, relativePath: finding.path, sizeBytes: 54, modifiedAt: new Date().toISOString(), fileType: "php-bestand", extension: "php", textContent: "<script>alert('preview wordt als tekst getoond')</script>\n<?php // demo ?>", binary: false, truncated: false }; },
   async deleteChecksumFinding(siteId: string, findingId: string): Promise<ChecksumDeleteResult> { if (isTauri()) return call("delete_checksum_finding", { siteId, findingId }); const path = demoScan.checks.flatMap((check) => check.findings).find((item) => item.id === findingId)?.path; return { requested: 1, deleted: path ? 1 : 0, deletedPaths: path ? [path] : [], failures: [], scan: { ...structuredClone(demoScan), siteId } }; },
@@ -111,12 +173,11 @@ export const appApi = {
   async repairWordPressCore(siteId: string): Promise<CoreOperationResult> { if (isTauri()) return call("repair_wordpress_core", { siteId }); const run = { ...structuredClone(demoHistory[0]), id: crypto.randomUUID(), siteId, beforeVersions: "WordPress 6.8.2 · locale nl_NL", afterVersions: "WordPress 6.8.2 · core hersteld" }; return { run, scan: { ...structuredClone(demoScan), siteId }, updatesAfter: structuredClone(demoUpdates), currentVersion: "6.8.2" }; },
   async updateWordPressCore(siteId: string): Promise<CoreOperationResult> { if (isTauri()) return call("update_wordpress_core", { siteId }); const run = { ...structuredClone(demoHistory[0]), id: crypto.randomUUID(), siteId, beforeVersions: "WordPress 6.8.1", afterVersions: "WordPress 6.8.2" }; return { run, scan: { ...structuredClone(demoScan), siteId }, updatesAfter: structuredClone(demoUpdates.filter((update) => update.kind !== "core")), currentVersion: "6.8.2" }; },
   async checkUpdates(siteId: string): Promise<UpdateItem[]> { return isTauri() ? call("check_updates", { siteId }) : structuredClone(demoUpdates); },
+  async listCachedUpdates(siteId: string): Promise<UpdateItem[]> { return isTauri() ? call("list_cached_updates", { siteId }) : structuredClone(demoUpdates); },
   async runUpdate(siteId: string, kind: string, slug?: string): Promise<void> { if (isTauri()) await call("run_update", { siteId, kind, slug }); else await new Promise((resolve) => setTimeout(resolve, 700)); },
   async runMaintenance(siteId: string): Promise<MaintenanceRun> { return isTauri() ? call("run_maintenance", { siteId }) : { ...structuredClone(demoHistory[0]), id: crypto.randomUUID(), siteId }; },
   async listHistory(siteId?: string): Promise<MaintenanceRun[]> { return isTauri() ? call("list_maintenance_runs", { siteId: siteId ?? null }) : structuredClone(demoHistory.filter((run) => !siteId || run.siteId === siteId)); },
   async onMaintenanceProgress(handler: (payload: { siteId: string; runId: string; step: MaintenanceStep }) => void): Promise<UnlistenFn> { if (!isTauri()) return () => undefined; return listen("maintenance-progress", (event) => handler(event.payload as { siteId: string; runId: string; step: MaintenanceStep })); },
-  async scanAllSites(onProgress: (progress: BulkScanProgress) => void): Promise<BulkScanResult> { if (isTauri()) { const unlisten = await listen("bulk-scan-progress", (event) => onProgress(event.payload as BulkScanProgress)); try { return await call("scan_all_sites"); } finally { unlisten(); } } let completed = 0; const failures: BulkScanResult["failures"] = []; const queue = [...browserSites]; while (queue.length) { const batch = queue.splice(0, 4); onProgress({ total: browserSites.length, completed, activeSites: batch.map((site) => site.name), failedSites: failures.map((item) => item.siteName) }); await Promise.all(batch.map(async (site) => { await new Promise((resolve) => setTimeout(resolve, 250)); if (site.status === "unreachable") failures.push({ siteId: site.id, siteName: site.name, error: { category: "dns_host_error", userMessage: "Niet bereikbaar", retryable: true } }); completed += 1; })); onProgress({ total: browserSites.length, completed, activeSites: [], failedSites: failures.map((item) => item.siteName) }); } return { total: browserSites.length, completed, cancelled: false, failures }; },
-  async cancelBulkScan(): Promise<void> { if (isTauri()) await call("cancel_bulk_scan"); },
   async getSettings(): Promise<AppSettings> { return isTauri() ? call("get_settings") : { scanConcurrency: 4 }; },
   async saveSettings(settings: AppSettings): Promise<AppSettings> { return isTauri() ? call("save_settings", { settings }) : settings; },
   async listAuditEvents(siteId?: string): Promise<AuditEvent[]> { return isTauri() ? call("list_audit_events", { siteId: siteId ?? null }) : []; },

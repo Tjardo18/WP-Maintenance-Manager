@@ -1,21 +1,26 @@
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, shallowRef } from "vue";
 import { appApi } from "../services/tauri";
 import type { Site, SiteInput } from "../types";
 import { errorMessage } from "../utils/errors";
 
 export const useSitesStore = defineStore("sites", () => {
-  const sites = ref<Site[]>([]);
+  const sites = shallowRef<Site[]>([]);
   const loading = ref(false);
   const error = ref<string>();
+  let loadPromise: Promise<void> | undefined;
   const byId = computed(() => new Map(sites.value.map((site) => [site.id, site])));
 
   async function load() {
-    loading.value = true;
-    error.value = undefined;
-    try { sites.value = await appApi.listSites(); }
-    catch (cause) { error.value = errorMessage(cause); }
-    finally { loading.value = false; }
+    if (loadPromise) return loadPromise;
+    loadPromise = (async () => {
+      loading.value = true;
+      error.value = undefined;
+      try { sites.value = await appApi.listSites(); }
+      catch (cause) { error.value = errorMessage(cause); }
+      finally { loading.value = false; loadPromise = undefined; }
+    })();
+    return loadPromise;
   }
   async function save(input: SiteInput) { const site = await appApi.saveSite(input); await load(); return site; }
   async function remove(id: string) { await appApi.deleteSite(id); await load(); }

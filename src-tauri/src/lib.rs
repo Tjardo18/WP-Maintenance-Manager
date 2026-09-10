@@ -13,6 +13,7 @@ mod health;
 mod maintenance;
 mod models;
 mod parsers;
+mod scan_jobs;
 mod ssh;
 mod state;
 mod terminal;
@@ -43,10 +44,10 @@ pub fn run() {
                 ssh: std::sync::Arc::new(ssh::Ssh2Executor),
                 backup_directory: data_dir.join("backups"),
                 scan_concurrency: std::sync::atomic::AtomicUsize::new(scan_concurrency),
-                bulk_scan_cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 auth: auth::AuthManager::default(),
                 terminals: terminal::TerminalManager::default(),
                 terminal_access: terminal_auth::TerminalAccessManager::default(),
+                scan_jobs: scan_jobs::ScanJobManager::new(scan_concurrency),
             });
             Ok(())
         })
@@ -74,16 +75,21 @@ pub fn run() {
             commands::delete_site,
             commands::accept_host_key,
             commands::test_connection,
-            commands::scan_site,
+            commands::start_site_scan,
+            commands::get_scan_job,
+            commands::get_site_scan_job,
+            commands::list_scan_jobs,
+            commands::cancel_site_scan,
+            commands::start_all_site_scans,
+            commands::cancel_scan_jobs,
             commands::list_scan_runs,
             commands::preview_checksum_finding,
             commands::delete_checksum_finding,
             commands::delete_checksum_findings,
-            commands::scan_all_sites,
-            commands::cancel_bulk_scan,
             commands::get_settings,
             commands::save_settings,
             commands::check_updates,
+            commands::list_cached_updates,
             commands::list_wordpress_users,
             commands::update_wordpress_user,
             commands::delete_wordpress_user,

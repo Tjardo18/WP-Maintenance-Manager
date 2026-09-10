@@ -5,12 +5,12 @@ use crate::{
     error::AppError,
     error_log, maintenance,
     models::{
-        AppSettings, AuditEvent, AuthStatus, BulkScanFailure, BulkScanProgress, BulkScanResult,
-        ChecksumDeleteFailure, ChecksumDeleteResult, ConnectionStep, ConnectionTestResult,
-        CoreOperationInfo, CoreOperationKind, CoreOperationResult, ErrorLogFilter, ErrorLogPage,
-        FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanResult,
-        Site, SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem, WordPressUserDeleteInput,
-        WordPressUserUpdateInput, WordPressUsersData,
+        AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteFailure,
+        ChecksumDeleteResult, ConnectionStep, ConnectionTestResult, CoreOperationInfo,
+        CoreOperationKind, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview,
+        LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState,
+        ScanResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem,
+        WordPressUserDeleteInput, WordPressUserUpdateInput, WordPressUsersData,
     },
     state::AppState,
     terminal::{TerminalConnectRequest, TerminalConnectionInfo, TerminalOpenInput},
@@ -21,13 +21,16 @@ use crate::{
 use serde::Serialize;
 use std::{
     collections::{HashSet, VecDeque},
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use zeroize::Zeroizing;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_auth_status(
     session_token: Option<String>,
     state: State<'_, AppState>,
@@ -49,7 +52,7 @@ pub fn get_auth_status(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn setup_password(
     password: String,
     state: State<'_, AppState>,
@@ -75,7 +78,7 @@ pub fn setup_password(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn login(password: String, state: State<'_, AppState>) -> Result<LoginResult, AppError> {
     state.auth.ensure_login_allowed()?;
     let config = state
@@ -111,12 +114,12 @@ pub fn login(password: String, state: State<'_, AppState>) -> Result<LoginResult
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn touch_session(session_token: String, state: State<'_, AppState>) -> Result<(), AppError> {
     require_auth(&state, &session_token)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn lock_app(session_token: String, state: State<'_, AppState>) -> Result<(), AppError> {
     require_auth(&state, &session_token)?;
     state.terminals.close_all();
@@ -131,7 +134,7 @@ pub fn lock_app(session_token: String, state: State<'_, AppState>) -> Result<(),
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn change_password(
     session_token: String,
     input: PasswordChangeInput,
@@ -164,7 +167,7 @@ fn change_password_internal(state: &AppState, input: &PasswordChangeInput) -> Re
     audit_result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_idle_timeout(
     session_token: String,
     minutes: u16,
@@ -181,7 +184,7 @@ pub fn set_idle_timeout(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_audit_events(
     session_token: String,
     site_id: Option<String>,
@@ -191,7 +194,7 @@ pub fn list_audit_events(
     state.database.list_audit_events(site_id.as_deref())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_error_logs(
     session_token: String,
     filter: ErrorLogFilter,
@@ -246,7 +249,7 @@ fn require_auth(state: &AppState, session_token: &str) -> Result<(), AppError> {
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_wp_cli_catalog(
     session_token: String,
     app: AppHandle,
@@ -256,7 +259,7 @@ pub fn get_wp_cli_catalog(
     Ok(wp_cli_catalog::load_from_app(&app))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inspect_wp_cli_command(
     session_token: String,
     site_id: String,
@@ -268,7 +271,7 @@ pub fn inspect_wp_cli_command(
     wp_cli::inspect_command(&command, &stored.site.wordpress_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn execute_wp_cli_command(
     session_token: String,
     site_id: String,
@@ -295,7 +298,7 @@ pub fn execute_wp_cli_command(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn begin_terminal_reauthentication(
     session_token: String,
     site_id: String,
@@ -366,7 +369,7 @@ fn begin_terminal_reauthentication_internal(
     Ok(challenge)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_terminal_reauthentication(
     session_token: String,
     site_id: String,
@@ -379,7 +382,7 @@ pub fn cancel_terminal_reauthentication(
         .cancel_challenge(&session_token, &site_id, &challenge_token)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_terminal(
     session_token: String,
     input: TerminalOpenInput,
@@ -458,7 +461,7 @@ pub fn open_terminal(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn write_terminal(
     session_token: String,
     terminal_session_id: String,
@@ -478,7 +481,7 @@ pub fn write_terminal(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resize_terminal(
     session_token: String,
     terminal_session_id: String,
@@ -500,7 +503,7 @@ pub fn resize_terminal(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn close_terminal(
     session_token: String,
     terminal_session_id: String,
@@ -627,7 +630,7 @@ fn save_wp_cli_audit(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_sites(
     session_token: String,
     state: State<'_, AppState>,
@@ -636,7 +639,7 @@ pub fn list_sites(
     state.database.list_sites()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_site(
     session_token: String,
     mut input: SiteInput,
@@ -682,7 +685,7 @@ pub fn save_site(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_site(
     session_token: String,
     id: String,
@@ -698,7 +701,7 @@ pub fn delete_site(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn accept_host_key(
     session_token: String,
     site_id: String,
@@ -732,7 +735,7 @@ pub fn accept_host_key(
     state.database.set_host_key(&site_id, &actual)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn test_connection(
     session_token: String,
     input: SiteInput,
@@ -941,26 +944,352 @@ pub fn test_connection(
     })
 }
 
-#[tauri::command]
-pub fn scan_site(
+const SITE_SCAN_STEPS: &[(&str, &str)] = &[
+    ("ssh_connect", "SSH-verbinding"),
+    ("wordpress_detection", "WordPress detecteren"),
+    ("wordpress", "WordPress-informatie"),
+    ("checksum", "WordPress core checksum"),
+    ("users", "Gebruikersaccounts"),
+    ("php", "PHP-bestanden"),
+    ("uploads", "PHP in uploads"),
+    ("modified", "Gewijzigde bestanden"),
+    ("permissions", "Bestandsrechten"),
+    ("configuration", "WordPress-configuratie"),
+    ("database", "Databasecontrole"),
+    ("core_updates", "WordPress-updates"),
+    ("plugin_list", "Plugin-updates"),
+    ("theme_list", "Thema-updates"),
+    ("homepage", "Homepagecontrole"),
+    ("persist", "Resultaten opslaan"),
+];
+
+#[tauri::command(async)]
+pub fn start_site_scan(
     session_token: String,
     site_id: String,
     modified_days: u16,
+    app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<ScanResult, AppError> {
+) -> Result<ScanJobState, AppError> {
     require_auth(&state, &session_token)?;
-    let started = Instant::now();
-    let result = scan_site_internal(&state, &site_id, modified_days);
-    log_operation_error(
-        &state,
-        Some(&site_id),
-        "Securityscan uitvoeren",
-        started,
-        result,
-    )
+    crate::validation::validate_days(modified_days)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    let site = state.database.get_site(&site_id)?.site;
+    let (job, created) = state
+        .scan_jobs
+        .create_site_scan(&site.id, &site.name, SITE_SCAN_STEPS)?;
+    emit_scan_job(&app, &job);
+    if created {
+        let job_id = job.id.clone();
+        let worker_app = app.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("site-scan-{}", &job_id[..8]))
+            .spawn(move || run_scan_job(worker_app, job_id, site_id, modified_days))
+        {
+            let error = AppError::storage(error);
+            let failed = state.scan_jobs.fail(&job.id, error.clone())?;
+            emit_scan_job(&app, &failed);
+            return Err(error);
+        }
+    }
+    Ok(job)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
+pub fn get_scan_job(
+    session_token: String,
+    job_id: String,
+    state: State<'_, AppState>,
+) -> Result<ScanJobState, AppError> {
+    require_auth(&state, &session_token)?;
+    state.scan_jobs.get(&job_id)
+}
+
+#[tauri::command(async)]
+pub fn get_site_scan_job(
+    session_token: String,
+    site_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<ScanJobState>, AppError> {
+    require_auth(&state, &session_token)?;
+    state.scan_jobs.for_site(&site_id)
+}
+
+#[tauri::command(async)]
+pub fn list_scan_jobs(
+    session_token: String,
+    active_only: bool,
+    state: State<'_, AppState>,
+) -> Result<Vec<ScanJobState>, AppError> {
+    require_auth(&state, &session_token)?;
+    state.scan_jobs.list(active_only)
+}
+
+#[tauri::command(async)]
+pub fn cancel_site_scan(
+    session_token: String,
+    job_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ScanJobState, AppError> {
+    require_auth(&state, &session_token)?;
+    let job = state.scan_jobs.cancel(&job_id)?;
+    emit_scan_job(&app, &job);
+    Ok(job)
+}
+
+#[tauri::command(async)]
+pub fn start_all_site_scans(
+    session_token: String,
+    modified_days: u16,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<BulkScanStart, AppError> {
+    require_auth(&state, &session_token)?;
+    crate::validation::validate_days(modified_days)?;
+    let sites = state.database.list_sites()?;
+    let mut jobs = Vec::with_capacity(sites.len());
+    let mut queued = VecDeque::new();
+    for site in sites {
+        let (job, created) =
+            state
+                .scan_jobs
+                .create_site_scan(&site.id, &site.name, SITE_SCAN_STEPS)?;
+        emit_scan_job(&app, &job);
+        if created {
+            queued.push_back((job.id.clone(), site.id));
+        }
+        jobs.push(job);
+    }
+    if !queued.is_empty() {
+        let worker_count = state
+            .scan_concurrency
+            .load(Ordering::SeqCst)
+            .clamp(1, 5)
+            .min(queued.len());
+        let queued = Arc::new(Mutex::new(queued));
+        let worker_app = app.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("bulk-site-scan-coordinator".into())
+            .spawn(move || {
+                std::thread::scope(|scope| {
+                    for _ in 0..worker_count {
+                        let queue = Arc::clone(&queued);
+                        let app = worker_app.clone();
+                        scope.spawn(move || {
+                            loop {
+                                let next = queue.lock().ok().and_then(|mut jobs| jobs.pop_front());
+                                let Some((job_id, site_id)) = next else {
+                                    break;
+                                };
+                                run_scan_job(app.clone(), job_id, site_id, modified_days);
+                            }
+                        });
+                    }
+                });
+            })
+        {
+            let error = AppError::storage(error);
+            for job in &jobs {
+                if job.status.is_active()
+                    && let Ok(failed) = state.scan_jobs.fail(&job.id, error.clone())
+                {
+                    emit_scan_job(&app, &failed);
+                }
+            }
+            return Err(error);
+        }
+    }
+    Ok(BulkScanStart { jobs })
+}
+
+#[tauri::command(async)]
+pub fn cancel_scan_jobs(
+    session_token: String,
+    job_ids: Vec<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<ScanJobState>, AppError> {
+    require_auth(&state, &session_token)?;
+    if job_ids.len() > 500 {
+        return Err(AppError::validation(
+            "Er zijn te veel scantaken geselecteerd.",
+        ));
+    }
+    let mut jobs = Vec::with_capacity(job_ids.len());
+    for job_id in job_ids {
+        let job = state.scan_jobs.cancel(&job_id)?;
+        emit_scan_job(&app, &job);
+        jobs.push(job);
+    }
+    Ok(jobs)
+}
+
+fn run_scan_job(app: AppHandle, job_id: String, site_id: String, modified_days: u16) {
+    let state = app.state::<AppState>();
+    let cancellation = match state.scan_jobs.cancellation(&job_id) {
+        Ok(cancellation) => cancellation,
+        Err(error) => {
+            eprintln!(
+                "scan job cancellation lookup failed category={}",
+                error.category
+            );
+            return;
+        }
+    };
+    let _permit = match state.scan_jobs.acquire(&cancellation) {
+        Ok(Some(permit)) => permit,
+        Ok(None) => {
+            if let Ok(job) = state.scan_jobs.mark_cancelled(&job_id) {
+                emit_scan_job(&app, &job);
+            }
+            return;
+        }
+        Err(error) => {
+            if let Ok(job) = state.scan_jobs.fail(&job_id, error) {
+                emit_scan_job(&app, &job);
+            }
+            return;
+        }
+    };
+    if cancellation.load(Ordering::SeqCst) {
+        if let Ok(job) = state.scan_jobs.mark_cancelled(&job_id) {
+            emit_scan_job(&app, &job);
+        }
+        return;
+    }
+    match state.scan_jobs.mark_running(&job_id) {
+        Ok(job) => emit_scan_job(&app, &job),
+        Err(error) => {
+            eprintln!("scan job start failed category={}", error.category);
+            return;
+        }
+    }
+    let progress_site_name = state
+        .scan_jobs
+        .get(&job_id)
+        .map(|job| job.site_name)
+        .unwrap_or_else(|_| site_id.clone());
+    let mut progress = JobScanProgress {
+        app: &app,
+        state: &state,
+        job_id: &job_id,
+        site_id: &site_id,
+        site_name: &progress_site_name,
+        cancellation: Arc::clone(&cancellation),
+    };
+    let started = Instant::now();
+    let result = scan_site_internal_with_progress(&state, &site_id, modified_days, &mut progress);
+    if cancellation.load(Ordering::SeqCst) {
+        if let Ok(job) = state.scan_jobs.mark_cancelled(&job_id) {
+            emit_scan_job(&app, &job);
+        }
+        return;
+    }
+    match result {
+        Ok(scan) => {
+            eprintln!(
+                "site_id={} job_id={} scan_total_ms={} status=completed",
+                site_id,
+                job_id,
+                started.elapsed().as_millis()
+            );
+            if let Ok(job) = state.scan_jobs.complete(&job_id, &scan.id) {
+                emit_scan_job(&app, &job);
+            }
+        }
+        Err(error) => {
+            if error.category == "scan_cancelled" {
+                if let Ok(job) = state.scan_jobs.mark_cancelled(&job_id) {
+                    emit_scan_job(&app, &job);
+                }
+                return;
+            }
+            let site_name = state
+                .database
+                .get_site(&site_id)
+                .ok()
+                .map(|stored| stored.site.name);
+            eprintln!(
+                "site_id={} job_id={} scan_total_ms={} status=failed category={}",
+                site_id,
+                job_id,
+                started.elapsed().as_millis(),
+                error.category
+            );
+            let logged = error_log::persist_error(
+                &state.database,
+                Some(&site_id),
+                site_name.as_deref(),
+                "Securityscan uitvoeren",
+                Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                None,
+                error,
+            );
+            if let Ok(job) = state.scan_jobs.fail(&job_id, logged) {
+                emit_scan_job(&app, &job);
+            }
+        }
+    }
+}
+
+struct JobScanProgress<'a> {
+    app: &'a AppHandle,
+    state: &'a AppState,
+    job_id: &'a str,
+    site_id: &'a str,
+    site_name: &'a str,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl engine::ScanProgress for JobScanProgress<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.load(Ordering::SeqCst)
+    }
+
+    fn step_started(&mut self, key: &str) {
+        if let Ok(job) = self.state.scan_jobs.step_started(self.job_id, key) {
+            emit_scan_job(self.app, &job);
+        }
+    }
+
+    fn step_finished(
+        &mut self,
+        key: &str,
+        status: StepStatus,
+        duration_ms: u64,
+        detail: Option<String>,
+    ) {
+        if status == StepStatus::Failed {
+            let message = detail.as_deref().unwrap_or("De scanstap is mislukt.");
+            let _ = error_log::persist_error(
+                &self.state.database,
+                Some(self.site_id),
+                Some(self.site_name),
+                &format!("Scan · {key}"),
+                Some(duration_ms),
+                None,
+                AppError::ssh("scan_step_failed", message, key, true),
+            );
+        }
+        if let Ok(job) =
+            self.state
+                .scan_jobs
+                .step_finished(self.job_id, key, status, duration_ms, detail)
+        {
+            emit_scan_job(self.app, &job);
+        }
+    }
+}
+
+fn emit_scan_job(app: &AppHandle, job: &ScanJobState) {
+    if let Err(error) = app.emit("scan-job-updated", job) {
+        eprintln!("scan job event failed: {error}");
+    }
+}
+
+#[tauri::command(async)]
 pub fn list_scan_runs(
     session_token: String,
     site_id: String,
@@ -972,7 +1301,7 @@ pub fn list_scan_runs(
     state.database.list_scans(&site_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn preview_checksum_finding(
     session_token: String,
     site_id: String,
@@ -999,7 +1328,7 @@ pub fn preview_checksum_finding(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_checksum_finding(
     session_token: String,
     site_id: String,
@@ -1018,7 +1347,7 @@ pub fn delete_checksum_finding(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_checksum_findings(
     session_token: String,
     site_id: String,
@@ -1195,14 +1524,26 @@ fn scan_site_internal(
     site_id: &str,
     modified_days: u16,
 ) -> Result<ScanResult, AppError> {
+    struct SilentProgress;
+    impl engine::ScanProgress for SilentProgress {}
+    scan_site_internal_with_progress(state, site_id, modified_days, &mut SilentProgress)
+}
+
+fn scan_site_internal_with_progress(
+    state: &AppState,
+    site_id: &str,
+    modified_days: u16,
+    progress: &mut dyn engine::ScanProgress,
+) -> Result<ScanResult, AppError> {
     crate::validation::validate_days(modified_days)?;
     let stored = state.database.get_site(site_id)?;
     let credential = stored_credential_from_state(state, &stored)?;
-    let mut outcome = match engine::scan_site(
+    let outcome = match engine::scan_site_with_progress(
         state.ssh.as_ref(),
         &stored,
         credential.as_deref(),
         modified_days,
+        progress,
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -1222,124 +1563,41 @@ fn scan_site_internal(
     state
         .database
         .update_versions(site_id, &outcome.wordpress_version, &outcome.php_version)?;
-    match engine::check_updates(state.ssh.as_ref(), &stored, credential.as_deref()) {
-        Ok(updates) => state.database.save_updates(site_id, &updates)?,
-        Err(error) => {
-            let technical_details = error.safe_diagnostic();
-            outcome.result.checks.push(crate::models::ScanCheck {
-                key: "updates".into(),
-                label: "Updatecontrole".into(),
-                status: StepStatus::Failed,
-                summary: error.user_message,
-                technical_details,
-                findings: Vec::new(),
-            });
-            if outcome.result.status == SiteStatus::Healthy {
-                outcome.result.status = SiteStatus::Attention;
-            }
-        }
+    if let Some(updates) = &outcome.updates {
+        state.database.save_updates(site_id, updates)?;
     }
-    state
+    if progress.is_cancelled() {
+        return Err(AppError::ssh(
+            "scan_cancelled",
+            "De scan is geannuleerd.",
+            "annulering aangevraagd voor het opslaan",
+            false,
+        ));
+    }
+    progress.step_started("persist");
+    let persist_started = Instant::now();
+    if let Err(error) = state
         .database
-        .save_scan(&outcome.result, &outcome.security_status)?;
+        .save_scan(&outcome.result, &outcome.security_status)
+    {
+        progress.step_finished(
+            "persist",
+            StepStatus::Failed,
+            u64::try_from(persist_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            Some(error.user_message.clone()),
+        );
+        return Err(error);
+    }
+    progress.step_finished(
+        "persist",
+        StepStatus::Success,
+        u64::try_from(persist_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        Some("Scanresultaat atomair opgeslagen.".into()),
+    );
     Ok(outcome.result)
 }
 
-#[tauri::command]
-pub fn scan_all_sites(
-    session_token: String,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<BulkScanResult, AppError> {
-    require_auth(&state, &session_token)?;
-    let sites = state.database.list_sites()?;
-    let total = sites.len();
-    state.bulk_scan_cancelled.store(false, Ordering::SeqCst);
-    let queue = Arc::new(Mutex::new(VecDeque::from(
-        sites
-            .iter()
-            .map(|site| (site.id.clone(), site.name.clone()))
-            .collect::<Vec<_>>(),
-    )));
-    let active = Arc::new(Mutex::new(Vec::<String>::new()));
-    let failures = Arc::new(Mutex::new(Vec::<BulkScanFailure>::new()));
-    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let worker_count = state
-        .scan_concurrency
-        .load(Ordering::SeqCst)
-        .clamp(1, 5)
-        .min(total.max(1));
-    std::thread::scope(|scope| {
-        for _ in 0..worker_count {
-            let queue = Arc::clone(&queue);
-            let active = Arc::clone(&active);
-            let failures = Arc::clone(&failures);
-            let completed = Arc::clone(&completed);
-            let app = app.clone();
-            let state_ref: &AppState = &state;
-            scope.spawn(move || {
-                loop {
-                    if state_ref.bulk_scan_cancelled.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let next = match queue.lock() {
-                        Ok(mut items) => items.pop_front(),
-                        Err(error) => {
-                            eprintln!("bulk scan queue lock failed: {error}");
-                            break;
-                        }
-                    };
-                    let Some((site_id, site_name)) = next else {
-                        break;
-                    };
-                    match active.lock() {
-                        Ok(mut active_sites) => active_sites.push(site_name.clone()),
-                        Err(error) => eprintln!("bulk scan active-sites lock failed: {error}"),
-                    }
-                    emit_bulk_progress(&app, total, &completed, &active, &failures);
-                    if let Err(error) = scan_site_internal(state_ref, &site_id, 30) {
-                        match failures.lock() {
-                            Ok(mut failed) => failed.push(BulkScanFailure {
-                                site_id,
-                                site_name: site_name.clone(),
-                                error,
-                            }),
-                            Err(lock_error) => {
-                                eprintln!("bulk scan failures lock failed: {lock_error}")
-                            }
-                        }
-                    }
-                    match active.lock() {
-                        Ok(mut active_sites) => active_sites.retain(|name| name != &site_name),
-                        Err(error) => eprintln!("bulk scan active-sites lock failed: {error}"),
-                    }
-                    completed.fetch_add(1, Ordering::SeqCst);
-                    emit_bulk_progress(&app, total, &completed, &active, &failures);
-                }
-            });
-        }
-    });
-    let completed = completed.load(Ordering::SeqCst);
-    let failures = failures
-        .lock()
-        .map_err(|_| AppError::storage("Bulk scan failure lock poisoned"))?
-        .clone();
-    Ok(BulkScanResult {
-        total,
-        completed,
-        cancelled: state.bulk_scan_cancelled.load(Ordering::SeqCst),
-        failures,
-    })
-}
-
-#[tauri::command]
-pub fn cancel_bulk_scan(session_token: String, state: State<'_, AppState>) -> Result<(), AppError> {
-    require_auth(&state, &session_token)?;
-    state.bulk_scan_cancelled.store(true, Ordering::SeqCst);
-    Ok(())
-}
-
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_settings(
     session_token: String,
     state: State<'_, AppState>,
@@ -1350,7 +1608,7 @@ pub fn get_settings(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_settings(
     session_token: String,
     settings: AppSettings,
@@ -1368,42 +1626,23 @@ pub fn save_settings(
     state
         .scan_concurrency
         .store(settings.scan_concurrency, Ordering::SeqCst);
+    state.scan_jobs.set_concurrency(settings.scan_concurrency);
     Ok(settings)
 }
 
-fn emit_bulk_progress(
-    app: &AppHandle,
-    total: usize,
-    completed: &std::sync::atomic::AtomicUsize,
-    active: &Mutex<Vec<String>>,
-    failures: &Mutex<Vec<BulkScanFailure>>,
-) {
-    let active_sites = active
-        .lock()
-        .map_or_else(|_| Vec::new(), |items| items.clone());
-    let failed_sites = failures.lock().map_or_else(
-        |_| Vec::new(),
-        |items| {
-            items
-                .iter()
-                .map(|failure| failure.site_name.clone())
-                .collect()
-        },
-    );
-    if let Err(error) = app.emit(
-        "bulk-scan-progress",
-        BulkScanProgress {
-            total,
-            completed: completed.load(Ordering::SeqCst),
-            active_sites,
-            failed_sites,
-        },
-    ) {
-        eprintln!("bulk scan progress event failed: {error}");
-    }
+#[tauri::command(async)]
+pub fn list_cached_updates(
+    session_token: String,
+    site_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<UpdateItem>, AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    state.database.list_cached_updates(&site_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn check_updates(
     session_token: String,
     site_id: String,
@@ -1427,7 +1666,7 @@ pub fn check_updates(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_wordpress_users(
     session_token: String,
     site_id: String,
@@ -1451,7 +1690,7 @@ pub fn list_wordpress_users(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_wordpress_user(
     session_token: String,
     site_id: String,
@@ -1486,7 +1725,7 @@ pub fn update_wordpress_user(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_wordpress_user(
     session_token: String,
     site_id: String,
@@ -1551,7 +1790,7 @@ fn audit_wordpress_user_action(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_update(
     session_token: String,
     site_id: String,
@@ -1619,7 +1858,7 @@ struct MaintenanceProgressEvent {
     step: MaintenanceStep,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inspect_core_operation(
     session_token: String,
     site_id: String,
@@ -1643,7 +1882,7 @@ pub fn inspect_core_operation(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn repair_wordpress_core(
     session_token: String,
     site_id: String,
@@ -1662,7 +1901,7 @@ pub fn repair_wordpress_core(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_wordpress_core(
     session_token: String,
     site_id: String,
@@ -1771,7 +2010,7 @@ fn run_core_operation(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_maintenance(
     session_token: String,
     site_id: String,
@@ -1846,7 +2085,7 @@ fn run_maintenance_internal(
     Ok(outcome.run)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_maintenance_runs(
     session_token: String,
     site_id: Option<String>,
@@ -1991,7 +2230,7 @@ mod tests {
         models::{AuthMethod, ChecksumStatus, Finding, FindingSeverity, ScanCheck},
         ssh::{ExecOutput, SshExecutor},
     };
-    use std::{path::Path, sync::atomic::AtomicBool};
+    use std::path::Path;
     use uuid::Uuid;
 
     #[derive(Default)]
@@ -2115,10 +2354,10 @@ mod tests {
             ssh: Arc::new(CleanupMockSsh::default()),
             backup_directory: temp.join("backups"),
             scan_concurrency: std::sync::atomic::AtomicUsize::new(1),
-            bulk_scan_cancelled: Arc::new(AtomicBool::new(false)),
             auth: AuthManager::default(),
             terminals: crate::terminal::TerminalManager::default(),
             terminal_access: crate::terminal_auth::TerminalAccessManager::default(),
+            scan_jobs: crate::scan_jobs::ScanJobManager::new(2),
         }
     }
 
@@ -2126,7 +2365,12 @@ mod tests {
     fn protected_tauri_commands_all_enforce_backend_authentication() {
         let public_commands = ["get_auth_status", "setup_password", "login"];
         let source = include_str!("commands.rs");
-        for command in source.split("#[tauri::command]").skip(1) {
+        let command_attribute = ["#[tauri::", "command"].concat();
+        for command in source.split(&command_attribute).skip(1) {
+            assert!(
+                command.trim_start().starts_with("(async)]"),
+                "Ieder Tauri-command moet buiten de UI-eventloop worden uitgevoerd"
+            );
             let name = command
                 .split_once("pub fn ")
                 .and_then(|(_, rest)| rest.split_once('('))

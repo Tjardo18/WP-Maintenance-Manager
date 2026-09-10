@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from "vue";
+import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
 import { CheckCircle2, ChevronDown, CircleAlert, Eye, LoaderCircle, Search, Trash2 } from "@lucide/vue";
 import type { Finding, ScanCheck } from "../types";
 import { filterSecurityFindings, noteworthyFindingCount, paginateSecurityFindings, type SecurityCategory } from "../services/securityResults";
@@ -24,6 +24,8 @@ const emit = defineEmits<{
 
 const openKeys = ref<string[]>([]);
 const queries = reactive<Record<string, string>>({});
+const queryInputs = reactive<Record<string, string>>({});
+const queryTimers: Record<string, number | undefined> = {};
 const categories = reactive<Record<string, SecurityCategory>>({});
 const pages = reactive<Record<string, number>>({});
 const pageSizes = reactive<Record<string, number>>({});
@@ -32,6 +34,7 @@ const showAllPhp = ref(false);
 watch(() => [props.finishedAt, ...props.checks.map((check) => check.key)], () => {
   for (const check of props.checks) {
     queries[check.key] ??= "";
+    queryInputs[check.key] ??= "";
     categories[check.key] ??= "all";
     pages[check.key] ??= 1;
     pageSizes[check.key] ??= 25;
@@ -74,6 +77,17 @@ function resultFor(check: ScanCheck) {
 function resetPage(key: string) {
   pages[key] = 1;
 }
+
+function scheduleQuery(key: string) {
+  if (queryTimers[key] !== undefined) globalThis.clearTimeout(queryTimers[key]);
+  queryTimers[key] = globalThis.setTimeout(() => {
+    queries[key] = queryInputs[key] ?? "";
+    resetPage(key);
+    queryTimers[key] = undefined;
+  }, 200);
+}
+
+onUnmounted(() => Object.values(queryTimers).forEach((timer) => { if (timer !== undefined) globalThis.clearTimeout(timer); }));
 
 function setPage(key: string, page: number) {
   pages[key] = Math.max(1, page);
@@ -143,7 +157,7 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
         <details v-if="check.status === 'failed' && check.technicalDetails" class="scan-diagnostic"><summary>Technische details</summary><pre>{{ check.technicalDetails }}</pre></details>
 
         <div v-if="check.key === 'php_files' || check.key === 'modified_files'" class="security-result-toolbar">
-          <label class="security-search"><Search :size="14" /><input v-model="queries[check.key]" type="search" placeholder="Zoek op pad of bestandsnaam" :aria-label="`Zoeken in ${check.label}`" @input="resetPage(check.key)" /></label>
+          <label class="security-search"><Search :size="14" /><input v-model="queryInputs[check.key]" type="search" placeholder="Zoek op pad of bestandsnaam" :aria-label="`Zoeken in ${check.label}`" @input="scheduleQuery(check.key)" /></label>
           <select v-model="categories[check.key]" :aria-label="`Categorie voor ${check.label}`" @change="resetPage(check.key)"><option v-for="option in categoryOptions(check)" :key="option.value" :value="option.value">{{ option.label }}</option></select>
           <label v-if="check.key === 'php_files'" class="security-toggle"><input v-model="showAllPhp" type="checkbox" @change="resetPage(check.key)" /> Toon alle PHP-bestanden</label>
         </div>

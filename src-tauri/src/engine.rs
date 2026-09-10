@@ -7,8 +7,9 @@ use crate::{
         StoredSite, UpdateItem, UpdateKind,
     },
     parsers,
-    ssh::{ExecOutput, SshExecutor},
+    ssh::{ExecOutput, SshConnection, SshExecutor},
 };
+use std::time::Instant;
 use uuid::Uuid;
 
 pub struct ScanOutcome {
@@ -16,7 +17,26 @@ pub struct ScanOutcome {
     pub security_status: String,
     pub wordpress_version: String,
     pub php_version: String,
+    pub updates: Option<Vec<UpdateItem>>,
 }
+
+pub trait ScanProgress {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn step_started(&mut self, _key: &str) {}
+    fn step_finished(
+        &mut self,
+        _key: &str,
+        _status: StepStatus,
+        _duration_ms: u64,
+        _detail: Option<String>,
+    ) {
+    }
+}
+
+struct NoopScanProgress;
+impl ScanProgress for NoopScanProgress {}
 
 pub fn scan_site(
     executor: &dyn SshExecutor,
@@ -24,53 +44,97 @@ pub fn scan_site(
     credential: Option<&str>,
     modified_days: u16,
 ) -> Result<ScanOutcome, AppError> {
-    executor.authenticate(&stored.site, credential)?;
-    let started_at = utc_now();
-    let wordpress_version = text_action(
+    scan_site_with_progress(
         executor,
         stored,
         credential,
-        RemoteAction::GetWordPressVersion,
-    )?
-    .trim()
-    .to_owned();
-    let php_version = text_action(executor, stored, credential, RemoteAction::GetPhpVersion)?
-        .trim()
-        .to_owned();
+        modified_days,
+        &mut NoopScanProgress,
+    )
+}
+
+pub fn scan_site_with_progress(
+    executor: &dyn SshExecutor,
+    stored: &StoredSite,
+    credential: Option<&str>,
+    modified_days: u16,
+    progress: &mut dyn ScanProgress,
+) -> Result<ScanOutcome, AppError> {
+    let started_at = utc_now();
+    let mut connection = measured_result(progress, "ssh_connect", || {
+        executor.open_connection(&stored.site, credential)
+    })?;
+    measured_result(progress, "wordpress_detection", || {
+        connection_text_action(connection.as_mut(), stored, RemoteAction::DetectWordPress)
+            .map(|_| ())
+    })?;
+    let (wordpress_version, php_version) = measured_result(progress, "wordpress", || {
+        Ok((
+            connection_text_action(
+                connection.as_mut(),
+                stored,
+                RemoteAction::GetWordPressVersion,
+            )?
+            .trim()
+            .to_owned(),
+            connection_text_action(connection.as_mut(), stored, RemoteAction::GetPhpVersion)?
+                .trim()
+                .to_owned(),
+        ))
+    })?;
     let mut truncated = false;
     let mut checks = Vec::new();
 
-    checks.push(checksum_check(executor, stored, credential));
-    checks.push(
-        match text_action(executor, stored, credential, RemoteAction::ListUsers) {
-            Ok(output) => match parsers::parse_users(&output) {
-                Ok(findings) => {
-                    findings_check("users", "Gebruikersaccounts", findings, "accounts", false)
+    checks.push(measured_check(progress, "checksum", || {
+        checksum_check(connection.as_mut(), stored)
+    })?);
+    checks.push(measured_check(
+        progress,
+        "users",
+        || match connection_text_action(connection.as_mut(), stored, RemoteAction::ListUsers) {
+            Ok(output) => {
+                match measured_parse(&stored.site.id, "users", || parsers::parse_users(&output)) {
+                    Ok(findings) => {
+                        findings_check("users", "Gebruikersaccounts", findings, "accounts", false)
+                    }
+                    Err(error) => failed_check("users", "Gebruikersaccounts", error),
                 }
-                Err(error) => failed_check("users", "Gebruikersaccounts", error),
-            },
+            }
             Err(error) => failed_check("users", "Gebruikersaccounts", error),
         },
-    );
+    )?);
 
-    checks.push(
-        match binary_action(executor, stored, credential, RemoteAction::FindPhpFiles) {
+    let mut php_cut = false;
+    checks.push(measured_check(
+        progress,
+        "php",
+        || match connection_binary_action(connection.as_mut(), stored, RemoteAction::FindPhpFiles) {
             Ok(output) => {
-                let (findings, cut) =
-                    parsers::parse_php_inventory(&output, &stored.site.wordpress_path);
-                truncated |= cut;
+                let (findings, cut) = measured_parse(&stored.site.id, "php_inventory", || {
+                    parsers::parse_php_inventory(&output, &stored.site.wordpress_path)
+                });
+                php_cut = cut;
                 php_inventory_check(findings, cut)
             }
             Err(error) => failed_check("php_files", "PHP in wp-content", error),
         },
-    );
+    )?);
+    truncated |= php_cut;
 
-    checks.push(
-        match binary_action(executor, stored, credential, RemoteAction::FindPhpInUploads) {
+    let mut uploads_cut = false;
+    checks.push(measured_check(
+        progress,
+        "uploads",
+        || match connection_binary_action(
+            connection.as_mut(),
+            stored,
+            RemoteAction::FindPhpInUploads,
+        ) {
             Ok(output) => {
-                let (findings, cut) =
-                    parsers::parse_nul_paths(&output, &stored.site.wordpress_path, true);
-                truncated |= cut;
+                let (findings, cut) = measured_parse(&stored.site.id, "php_uploads", || {
+                    parsers::parse_nul_paths(&output, &stored.site.wordpress_path, true)
+                });
+                uploads_cut = cut;
                 findings_check(
                     "php_uploads",
                     "PHP in uploads",
@@ -81,21 +145,25 @@ pub fn scan_site(
             }
             Err(error) => failed_check("php_uploads", "PHP in uploads", error),
         },
-    );
+    )?);
+    truncated |= uploads_cut;
 
-    checks.push(
-        match binary_action(
-            executor,
+    let mut modified_cut = false;
+    checks.push(measured_check(
+        progress,
+        "modified",
+        || match connection_binary_action(
+            connection.as_mut(),
             stored,
-            credential,
             RemoteAction::FindModifiedFiles {
                 days: modified_days,
             },
         ) {
             Ok(output) => {
-                let (findings, cut) =
-                    parsers::parse_modified_files(&output, &stored.site.wordpress_path);
-                truncated |= cut;
+                let (findings, cut) = measured_parse(&stored.site.id, "modified_files", || {
+                    parsers::parse_modified_files(&output, &stored.site.wordpress_path)
+                });
+                modified_cut = cut;
                 findings_check(
                     "modified_files",
                     &format!("Gewijzigde bestanden afgelopen {modified_days} dagen"),
@@ -106,19 +174,23 @@ pub fn scan_site(
             }
             Err(error) => failed_check("modified_files", "Gewijzigde bestanden", error),
         },
-    );
+    )?);
+    truncated |= modified_cut;
 
-    checks.push(
-        match binary_action(
-            executor,
+    let mut permissions_cut = false;
+    checks.push(measured_check(
+        progress,
+        "permissions",
+        || match connection_binary_action(
+            connection.as_mut(),
             stored,
-            credential,
             RemoteAction::CheckUnsafePermissions,
         ) {
             Ok(output) => {
-                let (findings, cut) =
-                    parsers::permission_findings(&output, &stored.site.wordpress_path);
-                truncated |= cut;
+                let (findings, cut) = measured_parse(&stored.site.id, "permissions", || {
+                    parsers::permission_findings(&output, &stored.site.wordpress_path)
+                });
+                permissions_cut = cut;
                 findings_check(
                     "permissions",
                     "Bestandsrechten",
@@ -129,16 +201,20 @@ pub fn scan_site(
             }
             Err(error) => failed_check("permissions", "Bestandsrechten", error),
         },
-    );
+    )?);
+    truncated |= permissions_cut;
 
-    checks.push(
-        match text_action(
-            executor,
+    checks.push(measured_check(
+        progress,
+        "configuration",
+        || match connection_text_action(
+            connection.as_mut(),
             stored,
-            credential,
             RemoteAction::CheckSelectedWpConfigConstants,
         ) {
-            Ok(output) => match parsers::parse_config(&output) {
+            Ok(output) => match measured_parse(&stored.site.id, "configuration", || {
+                parsers::parse_config(&output)
+            }) {
                 Ok(findings) => findings_check(
                     "configuration",
                     "WordPress-configuratie",
@@ -150,10 +226,12 @@ pub fn scan_site(
             },
             Err(error) => failed_check("configuration", "WordPress-configuratie", error),
         },
-    );
+    )?);
 
-    checks.push(
-        match text_action(executor, stored, credential, RemoteAction::CheckDatabase) {
+    checks.push(measured_check(
+        progress,
+        "database",
+        || match connection_text_action(connection.as_mut(), stored, RemoteAction::CheckDatabase) {
             Ok(_) => ScanCheck {
                 key: "database".into(),
                 label: "Database".into(),
@@ -164,7 +242,59 @@ pub fn scan_site(
             },
             Err(error) => failed_check("database", "Database", error),
         },
-    );
+    )?);
+
+    let (detected_updates, update_errors) =
+        scan_updates_with_progress(connection.as_mut(), stored, &wordpress_version, progress)?;
+    let updates = update_errors.is_empty().then_some(detected_updates.clone());
+    checks.push(if update_errors.is_empty() {
+        ScanCheck {
+            key: "updates".into(),
+            label: "Updatecontrole".into(),
+            status: StepStatus::Success,
+            summary: format!("{} beschikbare updates gevonden.", detected_updates.len()),
+            technical_details: None,
+            findings: Vec::new(),
+        }
+    } else {
+        ScanCheck {
+            key: "updates".into(),
+            label: "Updatecontrole".into(),
+            status: StepStatus::Failed,
+            summary: format!(
+                "{} van de updatecontroles zijn mislukt.",
+                update_errors.len()
+            ),
+            technical_details: Some(
+                update_errors
+                    .iter()
+                    .filter_map(AppError::safe_diagnostic)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            findings: Vec::new(),
+        }
+    });
+
+    checks.push(measured_check(
+        progress,
+        "homepage",
+        || match crate::health::check_homepage(&stored.site.url) {
+            Ok(result) => ScanCheck {
+                key: "homepage".into(),
+                label: "Homepage".into(),
+                status: if result.reachable {
+                    StepStatus::Success
+                } else {
+                    StepStatus::Warning
+                },
+                summary: result.detail,
+                technical_details: None,
+                findings: Vec::new(),
+            },
+            Err(error) => failed_check("homepage", "Homepage", error),
+        },
+    )?);
 
     let security_status = security_summary(&checks).to_owned();
     let status = scan_status(&checks);
@@ -182,6 +312,7 @@ pub fn scan_site(
         security_status,
         wordpress_version,
         php_version,
+        updates,
     })
 }
 
@@ -190,31 +321,174 @@ pub fn check_updates(
     stored: &StoredSite,
     credential: Option<&str>,
 ) -> Result<Vec<UpdateItem>, AppError> {
-    executor.authenticate(&stored.site, credential)?;
-    let current = text_action(
-        executor,
+    let mut connection = executor.open_connection(&stored.site, credential)?;
+    let current = connection_text_action(
+        connection.as_mut(),
         stored,
-        credential,
         RemoteAction::GetWordPressVersion,
     )?;
+    check_updates_on_connection(connection.as_mut(), stored, current.trim())
+}
+
+fn check_updates_on_connection(
+    connection: &mut dyn SshConnection,
+    stored: &StoredSite,
+    current_version: &str,
+) -> Result<Vec<UpdateItem>, AppError> {
     let mut updates = parsers::parse_core_updates(
-        &text_action(executor, stored, credential, RemoteAction::CheckCoreUpdates)?,
-        current.trim(),
+        &connection_text_action(connection, stored, RemoteAction::CheckCoreUpdates)?,
+        current_version,
     )?;
     updates.extend(parsers::parse_update_list(
-        &text_action(
-            executor,
-            stored,
-            credential,
-            RemoteAction::ListPluginUpdates,
-        )?,
+        &connection_text_action(connection, stored, RemoteAction::ListPluginUpdates)?,
         UpdateKind::Plugin,
     )?);
     updates.extend(parsers::parse_update_list(
-        &text_action(executor, stored, credential, RemoteAction::ListThemeUpdates)?,
+        &connection_text_action(connection, stored, RemoteAction::ListThemeUpdates)?,
         UpdateKind::Theme,
     )?);
     Ok(updates)
+}
+
+fn scan_updates_with_progress(
+    connection: &mut dyn SshConnection,
+    stored: &StoredSite,
+    current_version: &str,
+    progress: &mut dyn ScanProgress,
+) -> Result<(Vec<UpdateItem>, Vec<AppError>), AppError> {
+    let mut updates = Vec::new();
+    let mut errors = Vec::new();
+
+    let core = measured_result(progress, "core_updates", || {
+        let output = connection_text_action(connection, stored, RemoteAction::CheckCoreUpdates)?;
+        measured_parse(&stored.site.id, "core_updates", || {
+            parsers::parse_core_updates(&output, current_version)
+        })
+    });
+    match core {
+        Ok(items) => updates.extend(items),
+        Err(error) if error.category == "scan_cancelled" => return Err(error),
+        Err(error) => errors.push(error),
+    }
+
+    let plugins = measured_result(progress, "plugin_list", || {
+        let output = connection_text_action(connection, stored, RemoteAction::ListPluginUpdates)?;
+        measured_parse(&stored.site.id, "plugin_updates", || {
+            parsers::parse_update_list(&output, UpdateKind::Plugin)
+        })
+    });
+    match plugins {
+        Ok(items) => updates.extend(items),
+        Err(error) if error.category == "scan_cancelled" => return Err(error),
+        Err(error) => errors.push(error),
+    }
+
+    let themes = measured_result(progress, "theme_list", || {
+        let output = connection_text_action(connection, stored, RemoteAction::ListThemeUpdates)?;
+        measured_parse(&stored.site.id, "theme_updates", || {
+            parsers::parse_update_list(&output, UpdateKind::Theme)
+        })
+    });
+    match themes {
+        Ok(items) => updates.extend(items),
+        Err(error) if error.category == "scan_cancelled" => return Err(error),
+        Err(error) => errors.push(error),
+    }
+
+    Ok((updates, errors))
+}
+
+fn cancelled_error() -> AppError {
+    AppError::ssh(
+        "scan_cancelled",
+        "De scan is geannuleerd.",
+        "annulering aangevraagd tussen scanstappen",
+        false,
+    )
+}
+
+fn measured_result<T>(
+    progress: &mut dyn ScanProgress,
+    key: &str,
+    operation: impl FnOnce() -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    if progress.is_cancelled() {
+        return Err(cancelled_error());
+    }
+    progress.step_started(key);
+    let started = Instant::now();
+    let result = operation();
+    let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match &result {
+        Ok(_) => progress.step_finished(key, StepStatus::Success, duration, None),
+        Err(error) => progress.step_finished(
+            key,
+            StepStatus::Failed,
+            duration,
+            Some(error.user_message.clone()),
+        ),
+    }
+    result
+}
+
+fn measured_check(
+    progress: &mut dyn ScanProgress,
+    key: &str,
+    operation: impl FnOnce() -> ScanCheck,
+) -> Result<ScanCheck, AppError> {
+    if progress.is_cancelled() {
+        return Err(cancelled_error());
+    }
+    progress.step_started(key);
+    let started = Instant::now();
+    let check = operation();
+    let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    progress.step_finished(key, check.status, duration, Some(check.summary.clone()));
+    Ok(check)
+}
+
+fn measured_parse<T>(site_id: &str, parser: &str, operation: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = operation();
+    eprintln!(
+        "site_id={} parser={} parsing_ms={} status=complete",
+        site_id,
+        parser,
+        started.elapsed().as_millis()
+    );
+    result
+}
+
+fn connection_text_action(
+    connection: &mut dyn SshConnection,
+    stored: &StoredSite,
+    action: RemoteAction,
+) -> Result<String, AppError> {
+    connection_checked_output(connection, build(&stored.site.wordpress_path, action)?)?
+        .stdout_text()
+}
+
+fn connection_binary_action(
+    connection: &mut dyn SshConnection,
+    stored: &StoredSite,
+    action: RemoteAction,
+) -> Result<Vec<u8>, AppError> {
+    Ok(connection_checked_output(connection, build(&stored.site.wordpress_path, action)?)?.stdout)
+}
+
+fn connection_checked_output(
+    connection: &mut dyn SshConnection,
+    command: RemoteCommand,
+) -> Result<ExecOutput, AppError> {
+    let output = connection.execute(&command)?;
+    if output.exit_code != 0 {
+        return Err(AppError::command_failed(
+            command.action_name,
+            output.exit_code,
+            &String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    Ok(output)
 }
 
 pub fn run_update(
@@ -279,21 +553,6 @@ pub fn text_action(
     .stdout_text()
 }
 
-fn binary_action(
-    executor: &dyn SshExecutor,
-    stored: &StoredSite,
-    credential: Option<&str>,
-    action: RemoteAction,
-) -> Result<Vec<u8>, AppError> {
-    Ok(checked_output(
-        executor,
-        &stored.site,
-        credential,
-        build(&stored.site.wordpress_path, action)?,
-    )?
-    .stdout)
-}
-
 pub fn checked_output(
     executor: &dyn SshExecutor,
     site: &crate::models::Site,
@@ -311,11 +570,7 @@ pub fn checked_output(
     Ok(output)
 }
 
-fn checksum_check(
-    executor: &dyn SshExecutor,
-    stored: &StoredSite,
-    credential: Option<&str>,
-) -> ScanCheck {
+fn checksum_check(connection: &mut dyn SshConnection, stored: &StoredSite) -> ScanCheck {
     let observed_at = utc_now();
     let command = match build(
         &stored.site.wordpress_path,
@@ -324,16 +579,16 @@ fn checksum_check(
         Ok(command) => command,
         Err(error) => return failed_checksum_check(error, &observed_at),
     };
-    match executor.execute(&stored.site, credential, &command) {
+    match connection.execute(&command) {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            match parsers::parse_checksum_output(&stdout, &observed_at) {
+            match measured_parse(&stored.site.id, "core_checksum", || {
+                parsers::parse_checksum_output(&stdout, &observed_at)
+            }) {
                 Ok(findings) if output.exit_code == 0 || !findings.is_empty() => {
                     checksum_findings_check(findings)
                 }
-                Ok(_) | Err(_) => {
-                    checksum_plain_fallback(executor, stored, credential, &observed_at)
-                }
+                Ok(_) | Err(_) => checksum_plain_fallback(connection, stored, &observed_at),
             }
         }
         Err(error) => failed_checksum_check(error, &observed_at),
@@ -341,9 +596,8 @@ fn checksum_check(
 }
 
 fn checksum_plain_fallback(
-    executor: &dyn SshExecutor,
+    connection: &mut dyn SshConnection,
     stored: &StoredSite,
-    credential: Option<&str>,
     observed_at: &str,
 ) -> ScanCheck {
     let command = match build(
@@ -353,7 +607,7 @@ fn checksum_plain_fallback(
         Ok(command) => command,
         Err(error) => return failed_checksum_check(error, observed_at),
     };
-    let output = match executor.execute(&stored.site, credential, &command) {
+    let output = match connection.execute(&command) {
         Ok(output) => output,
         Err(error) => return failed_checksum_check(error, observed_at),
     };
@@ -362,7 +616,9 @@ fn checksum_plain_fallback(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    match parsers::parse_checksum_plain_output(&combined, observed_at) {
+    match measured_parse(&stored.site.id, "core_checksum_fallback", || {
+        parsers::parse_checksum_plain_output(&combined, observed_at)
+    }) {
         Ok(findings) if output.exit_code == 0 || !findings.is_empty() => {
             checksum_findings_check(findings)
         }
@@ -458,11 +714,13 @@ fn findings_check(
     }
 }
 
-fn php_inventory_check(findings: Vec<Finding>, truncated: bool) -> ScanCheck {
+fn php_inventory_check(mut findings: Vec<Finding>, truncated: bool) -> ScanCheck {
+    let total = findings.len();
     let noteworthy = findings
         .iter()
         .filter(|finding| finding.severity != FindingSeverity::Info)
         .count();
+    findings.retain(|finding| finding.severity != FindingSeverity::Info);
     let suffix = if truncated {
         " Er zijn meer resultaten dan weergegeven; verfijn de filters."
     } else {
@@ -478,7 +736,7 @@ fn php_inventory_check(findings: Vec<Finding>, truncated: bool) -> ScanCheck {
         },
         summary: format!(
             "{noteworthy} opvallende bestanden van {} geïnventariseerd.{suffix}",
-            findings.len()
+            total
         ),
         technical_details: None,
         findings,
@@ -550,16 +808,21 @@ mod tests {
         models::{AuthMethod, Site},
         ssh::ExecOutput,
     };
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     struct MockSsh {
         outputs: HashMap<&'static str, ExecOutput>,
+        authentications: AtomicUsize,
     }
     impl SshExecutor for MockSsh {
         fn fingerprint(&self, _: &Site) -> Result<String, AppError> {
             Ok("SHA256:test".into())
         }
         fn authenticate(&self, _: &Site, _: Option<&str>) -> Result<(), AppError> {
+            self.authentications.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn execute(
@@ -644,9 +907,12 @@ mod tests {
                     ),
                 ),
             ]),
+            authentications: AtomicUsize::new(0),
         };
 
-        let check = checksum_check(&ssh, &stored(), Some("secret"));
+        let site = stored();
+        let mut connection = ssh.open_connection(&site.site, Some("secret")).unwrap();
+        let check = checksum_check(connection.as_mut(), &site);
         assert_eq!(check.status, StepStatus::Warning);
         assert_eq!(check.findings.len(), 1);
         assert_eq!(
@@ -684,16 +950,89 @@ mod tests {
                 ),
                 ("ListThemeUpdates", output("[]")),
             ]),
+            authentications: AtomicUsize::new(0),
         };
         let updates = check_updates(&ssh, &stored(), Some("secret")).unwrap();
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[1].slug, "seo");
+        assert_eq!(ssh.authentications.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn full_scan_authenticates_once_and_reports_each_expensive_step() {
+        let ssh = MockSsh {
+            outputs: HashMap::from([
+                ("GetWordPressVersion", output("6.8.2")),
+                ("DetectWordPress", output("1")),
+                ("GetPhpVersion", output("8.3.12")),
+                (
+                    "VerifyCoreChecksums",
+                    output("Success: WordPress installation verifies against checksums."),
+                ),
+                ("ListUsers", output("[]")),
+                ("FindPhpFiles", output("")),
+                ("FindPhpInUploads", output("")),
+                ("FindModifiedFiles", output("")),
+                ("CheckUnsafePermissions", output("")),
+                (
+                    "CheckSelectedWpConfigConstants",
+                    output(
+                        r#"{"WP_DEBUG":false,"DISALLOW_FILE_EDIT":true,"WP_ENVIRONMENT_TYPE":"production"}"#,
+                    ),
+                ),
+                ("CheckDatabase", output("Success: Database checked.")),
+                ("CheckCoreUpdates", output("[]")),
+                ("ListPluginUpdates", output("[]")),
+                ("ListThemeUpdates", output("[]")),
+            ]),
+            authentications: AtomicUsize::new(0),
+        };
+        let mut stored = stored();
+        stored.site.url = "http://127.0.0.1:9".into();
+        let mut progress = RecordingProgress::default();
+
+        let outcome =
+            scan_site_with_progress(&ssh, &stored, Some("secret"), 30, &mut progress).unwrap();
+
+        assert_eq!(ssh.authentications.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome.wordpress_version, "6.8.2");
+        assert_eq!(
+            progress.started.first().map(String::as_str),
+            Some("ssh_connect")
+        );
+        assert!(progress.started.contains(&"plugin_list".into()));
+        assert!(progress.started.contains(&"homepage".into()));
+        assert_eq!(progress.started.len(), progress.finished.len());
+        eprintln!("synthetic_scan_timings={:?}", progress.finished);
+    }
+
+    #[derive(Default)]
+    struct RecordingProgress {
+        started: Vec<String>,
+        finished: Vec<(String, u64)>,
+    }
+
+    impl ScanProgress for RecordingProgress {
+        fn step_started(&mut self, key: &str) {
+            self.started.push(key.into());
+        }
+
+        fn step_finished(
+            &mut self,
+            key: &str,
+            _status: StepStatus,
+            duration_ms: u64,
+            _detail: Option<String>,
+        ) {
+            self.finished.push((key.into(), duration_ms));
+        }
     }
 
     #[test]
     fn arbitrary_update_kinds_are_rejected() {
         let ssh = MockSsh {
             outputs: HashMap::new(),
+            authentications: AtomicUsize::new(0),
         };
         let error = run_update(&ssh, &stored(), None, "shell", Some("id")).unwrap_err();
         assert_eq!(error.category, "validation");

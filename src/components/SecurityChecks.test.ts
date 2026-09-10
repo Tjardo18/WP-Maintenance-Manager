@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Finding, ScanCheck } from "../types";
 import SecurityChecks from "./SecurityChecks.vue";
 
@@ -8,7 +8,7 @@ function finding(path: string, category: string, severity: Finding["severity"] =
 }
 
 const phpFindings = [
-  ...Array.from({ length: 1_000 }, (_, index) => finding(`wp-content/plugins/demo/file-${index}.php`, "plugins")),
+  ...Array.from({ length: 10_000 }, (_, index) => finding(`wp-content/plugins/demo/file-${index}.php`, "plugins")),
   finding("wp-content/uploads/2026/a.jpg.php", "uploads", "attention"),
   finding("wp-content/cache/loader.php", "cache", "attention"),
 ];
@@ -46,19 +46,23 @@ describe("SecurityChecks", () => {
   });
 
   it("filters and paginates thousands of findings without creating a giant DOM", async () => {
+    vi.useFakeTimers();
     const wrapper = render();
     await wrapper.get(".security-toggle input").setValue(true);
     expect(wrapper.findAll(".security-findings .finding")).toHaveLength(25);
-    expect(wrapper.text()).toContain("1–25 van 1002");
+    expect(wrapper.text()).toContain("1–25 van 10002");
 
     await wrapper.get(".security-search input").setValue("file-999.php");
+    await vi.advanceTimersByTimeAsync(200);
     expect(wrapper.findAll(".security-findings .finding")).toHaveLength(1);
     expect(wrapper.text()).toContain("file-999.php");
 
     await wrapper.get(".security-search input").setValue("");
+    await vi.advanceTimersByTimeAsync(200);
     await wrapper.get(".security-pagination button:last-child").trigger("click");
-    expect(wrapper.text()).toContain("26–50 van 1002");
+    expect(wrapper.text()).toContain("26–50 van 10002");
     expect(wrapper.findAll(".security-findings .finding")).toHaveLength(25);
     expect(wrapper.findAll(".finding").length).toBeLessThanOrEqual(25);
+    vi.useRealTimers();
   });
 });

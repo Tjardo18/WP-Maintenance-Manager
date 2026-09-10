@@ -91,6 +91,7 @@ describe("SshTerminal", () => {
     let binary = "";
     for (const byte of output) binary += String.fromCharCode(byte);
     callbacks.output!({ sessionId: "terminal-1", dataBase64: globalThis.btoa(binary) });
+    await new Promise<void>((resolve) => globalThis.requestAnimationFrame(() => resolve()));
     expect(terminalMock.writes.slice(-1)[0]).toEqual(output);
 
     terminalMock.dataHandler!("\u0003");

@@ -4,12 +4,12 @@ use crate::{
         AuditEvent, AuthConfig, AuthMethod, ChecksumFindingRecord, ChecksumStatus, ErrorCategory,
         ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity, Finding, FindingSeverity,
         MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus,
-        StepStatus, StoredSite, UpdateItem,
+        StepStatus, StoredSite, UpdateItem, UpdateKind,
     },
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use std::{fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -109,6 +109,21 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let performance_indexes_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 7)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !performance_indexes_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(include_str!("../migrations/0007_performance_indexes.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(7, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -194,21 +209,43 @@ impl Database {
             "INSERT INTO scan_runs(id,site_id,started_at,finished_at,status,truncated) VALUES(?1,?2,?3,?4,?5,?6)",
             params![scan.id, scan.site_id, scan.started_at, scan.finished_at, scan.status.as_db(), scan.truncated],
         )?;
-        for check in &scan.checks {
-            let check_id = Uuid::new_v4().to_string();
-            transaction.execute(
+        {
+            let mut insert_check = transaction.prepare_cached(
                 "INSERT INTO scan_checks(id,scan_run_id,check_key,label,status,summary,technical_details) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![check_id, scan.id, check.key, check.label, check.status.as_db(), check.summary, check.technical_details],
             )?;
-            for finding in &check.findings {
-                let finding_id = finding
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| Uuid::new_v4().to_string());
-                transaction.execute(
-                    "INSERT INTO findings(id,scan_check_id,category,severity,title,detail,path,checksum_status,observed_at,site_id,scan_run_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                    params![finding_id, check_id, finding.category, finding.severity.as_db(), finding.title, finding.detail, finding.path, finding.checksum_status.map(ChecksumStatus::as_db), finding.observed_at, scan.site_id, scan.id],
-                )?;
+            let mut insert_finding = transaction.prepare_cached(
+                "INSERT INTO findings(id,scan_check_id,category,severity,title,detail,path,checksum_status,observed_at,site_id,scan_run_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            )?;
+            for check in &scan.checks {
+                let check_id = Uuid::new_v4().to_string();
+                insert_check.execute(params![
+                    check_id,
+                    scan.id,
+                    check.key,
+                    check.label,
+                    check.status.as_db(),
+                    check.summary,
+                    check.technical_details
+                ])?;
+                for finding in &check.findings {
+                    let finding_id = finding
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| Uuid::new_v4().to_string());
+                    insert_finding.execute(params![
+                        finding_id,
+                        check_id,
+                        finding.category,
+                        finding.severity.as_db(),
+                        finding.title,
+                        finding.detail,
+                        finding.path,
+                        finding.checksum_status.map(ChecksumStatus::as_db),
+                        finding.observed_at,
+                        scan.site_id,
+                        scan.id
+                    ])?;
+                }
             }
         }
         transaction.execute(
@@ -220,7 +257,7 @@ impl Database {
     }
 
     pub fn list_scans(&self, site_id: &str) -> Result<Vec<ScanResult>, AppError> {
-        self.list_scans_with_limit(site_id, 50)
+        self.list_scans_with_limit(site_id, 20)
     }
 
     pub fn current_unexpected_checksum_finding(
@@ -273,63 +310,96 @@ impl Database {
     ) -> Result<Vec<ScanResult>, AppError> {
         let connection = self.connect()?;
         let row_limit = i64::try_from(limit).map_err(AppError::storage)?;
-        let mut scan_statement = connection.prepare(
-            "SELECT id,site_id,started_at,COALESCE(finished_at,started_at),status,truncated FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC LIMIT ?2",
-        )?;
-        let scan_rows = scan_statement.query_map(params![site_id, row_limit], |row| {
-            Ok(ScanResult {
-                id: row.get(0)?,
-                site_id: row.get(1)?,
-                started_at: row.get(2)?,
-                finished_at: row.get(3)?,
-                status: SiteStatus::from_db(&row.get::<_, String>(4)?),
-                checks: Vec::new(),
-                truncated: row.get(5)?,
-            })
-        })?;
-        let mut scans: Vec<ScanResult> = scan_rows.collect::<rusqlite::Result<_>>()?;
-        for scan in &mut scans {
-            let mut check_statement = connection.prepare(
-                "SELECT id,check_key,label,status,summary,technical_details FROM scan_checks WHERE scan_run_id=?1 ORDER BY rowid",
+        let mut scans: Vec<ScanResult> = {
+            let mut statement = connection.prepare(
+                "SELECT id,site_id,started_at,COALESCE(finished_at,started_at),status,truncated FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC LIMIT ?2",
             )?;
-            let check_rows = check_statement.query_map([&scan.id], |row| {
+            statement
+                .query_map(params![site_id, row_limit], |row| {
+                    Ok(ScanResult {
+                        id: row.get(0)?,
+                        site_id: row.get(1)?,
+                        started_at: row.get(2)?,
+                        finished_at: row.get(3)?,
+                        status: SiteStatus::from_db(&row.get::<_, String>(4)?),
+                        checks: Vec::new(),
+                        truncated: row.get(5)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        if scans.is_empty() {
+            return Ok(scans);
+        }
+
+        let scan_indexes: HashMap<String, usize> = scans
+            .iter()
+            .enumerate()
+            .map(|(index, scan)| (scan.id.clone(), index))
+            .collect();
+        let mut check_indexes: HashMap<String, (usize, usize)> = HashMap::new();
+        {
+            let mut statement = connection.prepare(
+                "SELECT sc.id,sc.scan_run_id,sc.check_key,sc.label,sc.status,sc.summary,sc.technical_details
+                 FROM scan_checks sc
+                 WHERE sc.scan_run_id IN (SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC LIMIT ?2)
+                 ORDER BY sc.rowid",
+            )?;
+            let rows = statement.query_map(params![site_id, row_limit], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
                     ScanCheck {
-                        key: row.get(1)?,
-                        label: row.get(2)?,
-                        status: StepStatus::from_db(&row.get::<_, String>(3)?),
-                        summary: row.get(4)?,
-                        technical_details: row.get(5)?,
+                        key: row.get(2)?,
+                        label: row.get(3)?,
+                        status: StepStatus::from_db(&row.get::<_, String>(4)?),
+                        summary: row.get(5)?,
+                        technical_details: row.get(6)?,
                         findings: Vec::new(),
                     },
                 ))
             })?;
-            let mut checks: Vec<(String, ScanCheck)> =
-                check_rows.collect::<rusqlite::Result<_>>()?;
-            for (check_id, check) in &mut checks {
-                let mut finding_statement = connection.prepare(
-                    "SELECT id,category,severity,title,detail,path,checksum_status,observed_at FROM findings WHERE scan_check_id=?1 ORDER BY rowid",
-                )?;
-                check.findings = finding_statement
-                    .query_map([check_id.as_str()], |row| {
-                        Ok(Finding {
-                            id: row.get(0)?,
-                            category: row.get(1)?,
-                            severity: FindingSeverity::from_db(&row.get::<_, String>(2)?),
-                            title: row.get(3)?,
-                            detail: row.get(4)?,
-                            path: row.get(5)?,
-                            checksum_status: row
-                                .get::<_, Option<String>>(6)?
-                                .as_deref()
-                                .and_then(ChecksumStatus::from_db),
-                            observed_at: row.get(7)?,
-                        })
-                    })?
-                    .collect::<rusqlite::Result<_>>()?;
+            for row in rows {
+                let (check_id, scan_id, check) = row?;
+                if let Some(&scan_index) = scan_indexes.get(&scan_id) {
+                    let check_index = scans[scan_index].checks.len();
+                    scans[scan_index].checks.push(check);
+                    check_indexes.insert(check_id, (scan_index, check_index));
+                }
             }
-            scan.checks = checks.into_iter().map(|(_, check)| check).collect();
+        }
+        {
+            let mut statement = connection.prepare(
+                "SELECT f.scan_check_id,f.id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at
+                 FROM findings f
+                 JOIN scan_checks sc ON sc.id=f.scan_check_id
+                 WHERE sc.scan_run_id IN (SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC LIMIT ?2)
+                 ORDER BY f.rowid",
+            )?;
+            let rows = statement.query_map(params![site_id, row_limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    Finding {
+                        id: row.get(1)?,
+                        category: row.get(2)?,
+                        severity: FindingSeverity::from_db(&row.get::<_, String>(3)?),
+                        title: row.get(4)?,
+                        detail: row.get(5)?,
+                        path: row.get(6)?,
+                        checksum_status: row
+                            .get::<_, Option<String>>(7)?
+                            .as_deref()
+                            .and_then(ChecksumStatus::from_db),
+                        observed_at: row.get(8)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (check_id, finding) = row?;
+                if let Some(&(scan_index, check_index)) = check_indexes.get(&check_id) {
+                    scans[scan_index].checks[check_index].findings.push(finding);
+                }
+            }
         }
         Ok(scans)
     }
@@ -351,6 +421,26 @@ impl Database {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn list_cached_updates(&self, site_id: &str) -> Result<Vec<UpdateItem>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT kind,slug,name,current_version,new_version FROM available_updates WHERE site_id=?1 ORDER BY kind,name COLLATE NOCASE",
+        )?;
+        statement
+            .query_map([site_id], |row| {
+                Ok(UpdateItem {
+                    kind: UpdateKind::from_db(&row.get::<_, String>(0)?),
+                    slug: row.get(1)?,
+                    name: row.get(2)?,
+                    current_version: row.get(3)?,
+                    new_version: row.get(4)?,
+                    status: "available".into(),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(AppError::from)
     }
 
     pub fn update_versions(
@@ -872,6 +962,89 @@ mod tests {
                 .is_err()
         );
 
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persists_five_thousand_findings_in_one_transaction() {
+        let path = std::env::temp_dir().join(format!("wpmm-stress-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let site = database.save_site(&input(), None).unwrap();
+        let findings = (0..5_000)
+            .map(|index| Finding {
+                id: Some(format!("stress-{index}")),
+                category: "stress".into(),
+                severity: FindingSeverity::Attention,
+                title: format!("Finding {index}"),
+                detail: "Gebonden testfinding".into(),
+                path: Some(format!("wp-content/uploads/file-{index}.php")),
+                checksum_status: None,
+                observed_at: None,
+            })
+            .collect();
+        let scan = ScanResult {
+            id: Uuid::new_v4().to_string(),
+            site_id: site.id.clone(),
+            started_at: utc_now(),
+            finished_at: utc_now(),
+            status: SiteStatus::Attention,
+            checks: vec![ScanCheck {
+                key: "stress".into(),
+                label: "Stress".into(),
+                status: StepStatus::Warning,
+                summary: "5000 findings".into(),
+                technical_details: None,
+                findings,
+            }],
+            truncated: false,
+        };
+
+        let write_started = std::time::Instant::now();
+        database.save_scan(&scan, "Aandacht nodig").unwrap();
+        let write_ms = write_started.elapsed().as_millis();
+        let read_started = std::time::Instant::now();
+        let restored = database.list_scans(&site.id).unwrap();
+        eprintln!(
+            "sqlite_5000_findings_write_ms={} read_ms={}",
+            write_ms,
+            read_started.elapsed().as_millis()
+        );
+        assert_eq!(restored[0].checks[0].findings.len(), 5_000);
+
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn performance_migration_enables_wal_and_indexed_lookup_plans() {
+        let path = std::env::temp_dir().join(format!("wpmm-query-plan-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let connection = database.connect().unwrap();
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+
+        let scan_check_plan: String = connection
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM scan_checks WHERE scan_run_id=?1 AND check_key=?2",
+                params!["scan", "core_checksum"],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(scan_check_plan.contains("idx_scan_checks_run_key"));
+
+        let finding_plan: String = connection
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM findings WHERE scan_check_id=?1",
+                ["check"],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(finding_plan.contains("idx_findings_check"));
+
+        drop(connection);
         drop(database);
         let _ = fs::remove_file(path);
     }

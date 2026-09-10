@@ -36,6 +36,7 @@ const selectedSuggestion = ref(0);
 const suggestionsDismissed = ref(false);
 const acknowledged = ref(globalThis.localStorage?.getItem("wpmm:terminal-warning-v1") === "acknowledged");
 const pendingOutput = new Array<TerminalOutputEvent>();
+const queuedOutput = new Array<Uint8Array>();
 let terminal: Terminal | undefined;
 let fitAddon: FitAddon | undefined;
 let resizeObserver: InstanceType<typeof globalThis.ResizeObserver> | undefined;
@@ -44,6 +45,7 @@ let stopStatus: (() => void) | undefined;
 let dataDisposable: { dispose(): void } | undefined;
 let resizeDisposable: { dispose(): void } | undefined;
 let writeQueue = Promise.resolve();
+let outputFrame: number | undefined;
 
 const autocomplete = computed(() => catalog.value?.available ? new WpCliAutocompleteIndex(catalog.value) : undefined);
 const wpInput = computed(() => currentLine.value.trimStart());
@@ -201,7 +203,7 @@ function initializeTerminal() {
     resizeObserver.observe(terminalElement.value);
   }
   for (const payload of pendingOutput.splice(0)) {
-    if (payload.sessionId === terminalSessionId.value) terminal.write(decodeTerminalPayload(payload.dataBase64));
+    if (payload.sessionId === terminalSessionId.value) queueTerminalOutput(decodeTerminalPayload(payload.dataBase64));
   }
   const id = terminalSessionId.value;
   const authorization = terminalAuthorization.value;
@@ -220,6 +222,9 @@ function teardownTerminal() {
   fitAddon = undefined;
   terminal = undefined;
   pendingOutput.splice(0);
+  queuedOutput.splice(0);
+  if (outputFrame !== undefined) globalThis.cancelAnimationFrame?.(outputFrame);
+  outputFrame = undefined;
   currentLine.value = "";
 }
 
@@ -247,7 +252,24 @@ function handleOutput(payload: TerminalOutputEvent) {
     if (connectionStatus.value === "connecting" || payload.sessionId === terminalSessionId.value) pendingOutput.push(payload);
     return;
   }
-  terminal.write(decodeTerminalPayload(payload.dataBase64));
+  queueTerminalOutput(decodeTerminalPayload(payload.dataBase64));
+}
+
+function queueTerminalOutput(bytes: Uint8Array) {
+  queuedOutput.push(bytes);
+  if (outputFrame !== undefined) return;
+  const schedule = globalThis.requestAnimationFrame ?? ((callback: (time: number) => void) => globalThis.setTimeout(() => callback(globalThis.performance.now()), 16));
+  outputFrame = schedule(flushTerminalOutput);
+}
+
+function flushTerminalOutput() {
+  outputFrame = undefined;
+  if (!terminal || !queuedOutput.length) { queuedOutput.splice(0); return; }
+  const chunks = queuedOutput.splice(0);
+  const merged = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+  let offset = 0;
+  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
+  terminal.write(merged);
 }
 
 function handleStatus(payload: TerminalStatusEvent) {

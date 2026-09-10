@@ -4,11 +4,13 @@ import { useRoute, RouterLink, RouterView } from "vue-router";
 import { Activity, CircleAlert, Globe2, History, LayoutDashboard, LoaderCircle, LockKeyhole, Settings, ShieldCheck } from "@lucide/vue";
 import { useSitesStore } from "./stores/sites";
 import { useAuthStore } from "./stores/auth";
+import { useScanJobsStore } from "./stores/scanJobs";
 import AuthView from "./views/AuthView.vue";
 
 const route = useRoute();
 const sites = useSitesStore();
 const auth = useAuthStore();
+const scanJobs = useScanJobsStore();
 const pageTitle = computed(() => String(route.meta.title ?? "WP Maintenance Manager"));
 
 onMounted(() => {
@@ -20,7 +22,16 @@ onMounted(() => {
     }
   });
 });
-watch(() => auth.authenticated, (unlocked) => { if (unlocked) void sites.load(); else sites.clear(); });
+watch(() => auth.authenticated, (unlocked) => {
+  if (unlocked) {
+    void sites.load();
+    void scanJobs.initialize();
+  } else {
+    sites.clear();
+    scanJobs.clear();
+  }
+});
+watch(() => scanJobs.active.length, (active, previous) => { if (previous > 0 && active === 0) void sites.load(); });
 </script>
 
 <template>

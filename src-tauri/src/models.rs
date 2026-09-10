@@ -558,6 +558,15 @@ impl UpdateKind {
             Self::Language => "language",
         }
     }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "plugin" => Self::Plugin,
+            "theme" => Self::Theme,
+            "language" => Self::Language,
+            _ => Self::Core,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -596,30 +605,57 @@ pub struct MaintenanceRun {
     pub after_versions: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanJobStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl ScanJobStatus {
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Queued | Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanJobStep {
+    pub key: String,
+    pub label: String,
+    pub status: StepStatus,
+    pub started_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BulkScanFailure {
+pub struct ScanJobState {
+    pub id: String,
+    pub job_type: String,
     pub site_id: String,
     pub site_name: String,
-    pub error: crate::error::AppError,
+    pub status: ScanJobStatus,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub current_step: Option<String>,
+    pub completed_steps: usize,
+    pub total_steps: usize,
+    pub cancellation_requested: bool,
+    pub result_scan_id: Option<String>,
+    pub error: Option<crate::error::AppError>,
+    pub steps: Vec<ScanJobStep>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BulkScanResult {
-    pub total: usize,
-    pub completed: usize,
-    pub cancelled: bool,
-    pub failures: Vec<BulkScanFailure>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BulkScanProgress {
-    pub total: usize,
-    pub completed: usize,
-    pub active_sites: Vec<String>,
-    pub failed_sites: Vec<String>,
+pub struct BulkScanStart {
+    pub jobs: Vec<ScanJobState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

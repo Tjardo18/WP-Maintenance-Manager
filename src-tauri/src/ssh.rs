@@ -55,6 +55,19 @@ pub trait SshExecutor: Send + Sync {
         credential: Option<&str>,
         command: &RemoteCommand,
     ) -> Result<ExecOutput, AppError>;
+
+    fn open_connection<'a>(
+        &'a self,
+        site: &'a Site,
+        credential: Option<&'a str>,
+    ) -> Result<Box<dyn SshConnection + 'a>, AppError> {
+        self.authenticate(site, credential)?;
+        Ok(Box::new(ExecutorConnection {
+            executor: self,
+            site,
+            credential,
+        }))
+    }
     fn download(
         &self,
         site: &Site,
@@ -84,6 +97,33 @@ pub trait SshExecutor: Send + Sync {
         Err(AppError::validation(
             "Bestandsverwijdering wordt niet ondersteund door deze SSH-uitvoerder.",
         ))
+    }
+}
+
+pub trait SshConnection {
+    fn execute(&mut self, command: &RemoteCommand) -> Result<ExecOutput, AppError>;
+}
+
+struct ExecutorConnection<'a, E: SshExecutor + ?Sized> {
+    executor: &'a E,
+    site: &'a Site,
+    credential: Option<&'a str>,
+}
+
+impl<E: SshExecutor + ?Sized> SshConnection for ExecutorConnection<'_, E> {
+    fn execute(&mut self, command: &RemoteCommand) -> Result<ExecOutput, AppError> {
+        self.executor.execute(self.site, self.credential, command)
+    }
+}
+
+struct Ssh2Connection {
+    session: Session,
+    site_id: String,
+}
+
+impl SshConnection for Ssh2Connection {
+    fn execute(&mut self, command: &RemoteCommand) -> Result<ExecOutput, AppError> {
+        execute_on_session(&self.session, &self.site_id, command)
     }
 }
 
@@ -420,6 +460,140 @@ fn password_auth_unsupported(detail: &str) -> AppError {
     )
 }
 
+fn execute_on_session(
+    session: &Session,
+    site_id: &str,
+    command: &RemoteCommand,
+) -> Result<ExecOutput, AppError> {
+    let started = Instant::now();
+    let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    session.set_timeout(command.timeout.as_millis().min(u32::MAX as u128) as u32);
+    let result = (|| {
+        let mut channel = session.channel_session().map_err(|error| {
+            map_ssh_error(
+                "ssh_channel",
+                "De server kon geen uitvoerkanaal openen.",
+                error,
+            )
+        })?;
+        channel.exec(&command.command).map_err(|error| {
+            map_ssh_error(
+                "command_failed",
+                "De serveractie kon niet worden gestart.",
+                error,
+            )
+        })?;
+        let mut stdout = Vec::new();
+        channel
+            .by_ref()
+            .take(command.max_output_bytes as u64 + 1)
+            .read_to_end(&mut stdout)
+            .map_err(|error| {
+                AppError::ssh(
+                    "ssh_channel",
+                    "Het serverantwoord kon niet worden gelezen.",
+                    error,
+                    true,
+                )
+            })?;
+        let mut truncated = stdout.len() > command.max_output_bytes;
+        if truncated {
+            if !command.truncate_output {
+                let _ = channel.close();
+                return Err(AppError::ssh(
+                    "output_limit",
+                    "De server stuurde te veel gegevens terug; de actie is veilig afgebroken.",
+                    format!("limiet {} bytes", command.max_output_bytes),
+                    false,
+                ));
+            }
+            stdout.truncate(command.max_output_bytes);
+            std::io::copy(&mut channel, &mut std::io::sink()).map_err(|error| {
+                AppError::ssh(
+                    "ssh_channel",
+                    "Het resterende serverantwoord kon niet worden verwerkt.",
+                    error,
+                    true,
+                )
+            })?;
+        }
+        let mut stderr = Vec::new();
+        {
+            let mut stderr_stream = channel.stderr();
+            stderr_stream
+                .by_ref()
+                .take(256 * 1024 + 1)
+                .read_to_end(&mut stderr)
+                .map_err(|error| {
+                    AppError::ssh(
+                        "ssh_channel",
+                        "De technische servermelding kon niet worden gelezen.",
+                        error,
+                        true,
+                    )
+                })?;
+            if stderr.len() > 256 * 1024 {
+                if !command.truncate_output {
+                    let _ = channel.close();
+                    return Err(AppError::ssh(
+                        "output_limit",
+                        "De server stuurde te veel technische uitvoer terug; de actie is veilig afgebroken.",
+                        "stderr-limiet 262144 bytes",
+                        false,
+                    ));
+                }
+                stderr.truncate(256 * 1024);
+                truncated = true;
+                std::io::copy(&mut stderr_stream, &mut std::io::sink()).map_err(|error| {
+                    AppError::ssh(
+                        "ssh_channel",
+                        "De resterende technische uitvoer kon niet worden verwerkt.",
+                        error,
+                        true,
+                    )
+                })?;
+            }
+        }
+        channel.wait_close().map_err(|error| {
+            map_ssh_error(
+                "ssh_channel",
+                "De SSH-actie werd niet netjes afgesloten.",
+                error,
+            )
+        })?;
+        let exit_code = channel.exit_status().map_err(|error| {
+            map_ssh_error("ssh_channel", "De server gaf geen exitstatus terug.", error)
+        })?;
+        Ok(ExecOutput {
+            stdout,
+            stderr,
+            exit_code,
+            truncated,
+        })
+    })();
+    match &result {
+        Ok(output) => eprintln!(
+            "site_id={} action={} started_at={} ended_at={} duration_ms={} status=complete exit_code={}",
+            site_id,
+            command.action_name,
+            started_at,
+            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            started.elapsed().as_millis(),
+            output.exit_code
+        ),
+        Err(error) => eprintln!(
+            "site_id={} action={} started_at={} ended_at={} duration_ms={} status=failed category={}",
+            site_id,
+            command.action_name,
+            started_at,
+            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            started.elapsed().as_millis(),
+            error.category
+        ),
+    }
+    result
+}
+
 impl SshExecutor for Ssh2Executor {
     fn fingerprint(&self, site: &Site) -> Result<String, AppError> {
         let session = self.handshake(site, Self::CONNECT_TIMEOUT)?;
@@ -437,133 +611,20 @@ impl SshExecutor for Ssh2Executor {
         credential: Option<&str>,
         command: &RemoteCommand,
     ) -> Result<ExecOutput, AppError> {
-        let started = Instant::now();
-        let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        let result = (|| {
-            let session = self.verified_session(site, credential, command.timeout)?;
-            let mut channel = session.channel_session().map_err(|error| {
-                map_ssh_error(
-                    "ssh_channel",
-                    "De server kon geen uitvoerkanaal openen.",
-                    error,
-                )
-            })?;
-            channel.exec(&command.command).map_err(|error| {
-                map_ssh_error(
-                    "command_failed",
-                    "De serveractie kon niet worden gestart.",
-                    error,
-                )
-            })?;
-            let mut stdout = Vec::new();
-            channel
-                .by_ref()
-                .take(command.max_output_bytes as u64 + 1)
-                .read_to_end(&mut stdout)
-                .map_err(|error| {
-                    AppError::ssh(
-                        "ssh_channel",
-                        "Het serverantwoord kon niet worden gelezen.",
-                        error,
-                        true,
-                    )
-                })?;
-            let mut truncated = stdout.len() > command.max_output_bytes;
-            if truncated {
-                if !command.truncate_output {
-                    let _ = channel.close();
-                    return Err(AppError::ssh(
-                        "output_limit",
-                        "De server stuurde te veel gegevens terug; de actie is veilig afgebroken.",
-                        format!("limiet {} bytes", command.max_output_bytes),
-                        false,
-                    ));
-                }
-                stdout.truncate(command.max_output_bytes);
-                std::io::copy(&mut channel, &mut std::io::sink()).map_err(|error| {
-                    AppError::ssh(
-                        "ssh_channel",
-                        "Het resterende serverantwoord kon niet worden verwerkt.",
-                        error,
-                        true,
-                    )
-                })?;
-            }
-            let mut stderr = Vec::new();
-            {
-                let mut stderr_stream = channel.stderr();
-                stderr_stream
-                    .by_ref()
-                    .take(256 * 1024 + 1)
-                    .read_to_end(&mut stderr)
-                    .map_err(|error| {
-                        AppError::ssh(
-                            "ssh_channel",
-                            "De technische servermelding kon niet worden gelezen.",
-                            error,
-                            true,
-                        )
-                    })?;
-                if stderr.len() > 256 * 1024 {
-                    if !command.truncate_output {
-                        let _ = channel.close();
-                        return Err(AppError::ssh(
-                            "output_limit",
-                            "De server stuurde te veel technische uitvoer terug; de actie is veilig afgebroken.",
-                            "stderr-limiet 262144 bytes",
-                            false,
-                        ));
-                    }
-                    stderr.truncate(256 * 1024);
-                    truncated = true;
-                    std::io::copy(&mut stderr_stream, &mut std::io::sink()).map_err(|error| {
-                        AppError::ssh(
-                            "ssh_channel",
-                            "De resterende technische uitvoer kon niet worden verwerkt.",
-                            error,
-                            true,
-                        )
-                    })?;
-                }
-            }
-            channel.wait_close().map_err(|error| {
-                map_ssh_error(
-                    "ssh_channel",
-                    "De SSH-actie werd niet netjes afgesloten.",
-                    error,
-                )
-            })?;
-            let exit_code = channel.exit_status().map_err(|error| {
-                map_ssh_error("ssh_channel", "De server gaf geen exitstatus terug.", error)
-            })?;
-            Ok(ExecOutput {
-                stdout,
-                stderr,
-                exit_code,
-                truncated,
-            })
-        })();
-        match &result {
-            Ok(output) => eprintln!(
-                "site_id={} action={} started_at={} ended_at={} duration_ms={} status=complete exit_code={}",
-                site.id,
-                command.action_name,
-                started_at,
-                Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-                started.elapsed().as_millis(),
-                output.exit_code
-            ),
-            Err(error) => eprintln!(
-                "site_id={} action={} started_at={} ended_at={} duration_ms={} status=failed category={}",
-                site.id,
-                command.action_name,
-                started_at,
-                Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-                started.elapsed().as_millis(),
-                error.category
-            ),
-        }
-        result
+        let session = self.verified_session(site, credential, command.timeout)?;
+        execute_on_session(&session, &site.id, command)
+    }
+
+    fn open_connection<'a>(
+        &'a self,
+        site: &'a Site,
+        credential: Option<&'a str>,
+    ) -> Result<Box<dyn SshConnection + 'a>, AppError> {
+        let session = self.verified_session(site, credential, Self::CONNECT_TIMEOUT)?;
+        Ok(Box::new(Ssh2Connection {
+            session,
+            site_id: site.id.clone(),
+        }))
     }
 
     fn download(
