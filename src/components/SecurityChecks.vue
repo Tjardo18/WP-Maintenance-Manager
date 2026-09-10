@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
-import { CheckCircle2, ChevronDown, CircleAlert, Eye, LoaderCircle, Search, Trash2 } from "@lucide/vue";
+import { CheckCircle2, ChevronDown, CircleAlert, Clock3, Eye, EyeOff, LoaderCircle, Search, ShieldCheck, Trash2 } from "@lucide/vue";
 import type { Finding, ScanCheck } from "../types";
-import { filterSecurityFindings, noteworthyFindingCount, paginateSecurityFindings, type SecurityCategory } from "../services/securityResults";
+import { filterSecurityFindings, noteworthyFindingCount, paginateSecurityFindings, type SecurityCategory, type SecurityDisposition } from "../services/securityResults";
 import { formatDate } from "../utils/format";
 import StatusBadge from "./StatusBadge.vue";
 
@@ -20,6 +20,8 @@ const emit = defineEmits<{
   toggleFinding: [id: string];
   preview: [finding: Finding];
   delete: [finding: Finding];
+  ignore: [finding: Finding, temporary: boolean];
+  trust: [finding: Finding];
 }>();
 
 const openKeys = ref<string[]>([]);
@@ -27,6 +29,7 @@ const queries = reactive<Record<string, string>>({});
 const queryInputs = reactive<Record<string, string>>({});
 const queryTimers: Record<string, number | undefined> = {};
 const categories = reactive<Record<string, SecurityCategory>>({});
+const dispositions = reactive<Record<string, SecurityDisposition>>({});
 const pages = reactive<Record<string, number>>({});
 const pageSizes = reactive<Record<string, number>>({});
 const showAllPhp = ref(false);
@@ -36,6 +39,7 @@ watch(() => [props.finishedAt, ...props.checks.map((check) => check.key)], () =>
     queries[check.key] ??= "";
     queryInputs[check.key] ??= "";
     categories[check.key] ??= "all";
+    dispositions[check.key] ??= "active";
     pages[check.key] ??= 1;
     pageSizes[check.key] ??= 25;
   }
@@ -49,12 +53,15 @@ const results = computed(() => Object.fromEntries(props.checks.map((check) => {
   const findings = filterSecurityFindings(check, {
     query: queries[check.key] ?? "",
     category: categories[check.key] ?? "all",
+    disposition: dispositions[check.key] ?? "active",
     showAllPhp: showAllPhp.value,
   });
   return [check.key, paginateSecurityFindings(findings, pages[check.key] ?? 1, pageSizes[check.key] ?? 25)];
 })));
 
 const attentionCount = computed(() => props.checks.reduce((count, check) => count + noteworthyFindingCount(check), 0));
+const ignoredCount = computed(() => props.checks.flatMap((check) => check.findings).filter((finding) => finding.disposition === "ignored").length);
+const trustedCount = computed(() => props.checks.flatMap((check) => check.findings).filter((finding) => ["trusted", "trusted_changed", "trusted_missing"].includes(finding.disposition ?? "")).length);
 
 function isOpen(key: string) {
   return openKeys.value.includes(key);
@@ -78,6 +85,11 @@ function resetPage(key: string) {
   pages[key] = 1;
 }
 
+function setDisposition(key: string, disposition: string) {
+  dispositions[key] = disposition as SecurityDisposition;
+  resetPage(key);
+}
+
 function scheduleQuery(key: string) {
   if (queryTimers[key] !== undefined) globalThis.clearTimeout(queryTimers[key]);
   queryTimers[key] = globalThis.setTimeout(() => {
@@ -94,7 +106,7 @@ function setPage(key: string, page: number) {
 }
 
 function displayCount(check: ScanCheck) {
-  return check.key === "php_files" ? noteworthyFindingCount(check) : check.findings.length;
+  return check.key === "php_files" ? noteworthyFindingCount(check) : check.findings.filter((finding) => ["active", "expired_exception", "trusted_changed"].includes(finding.disposition ?? "active")).length;
 }
 
 function compactSummary(check: ScanCheck) {
@@ -112,6 +124,19 @@ function checksumLabel(finding: Finding) {
   if (finding.checksumStatus === "unexpected") return "Hoort niet aanwezig te zijn";
   if (finding.checksumStatus === "scan_error") return "Scan mislukt";
   return finding.title;
+}
+
+function dispositionLabel(finding: Finding) {
+  if (finding.disposition === "ignored") return "Genegeerd";
+  if (finding.disposition === "trusted") return "Vertrouwd";
+  if (finding.disposition === "trusted_changed") return "Vertrouwd bestand gewijzigd";
+  if (finding.disposition === "trusted_missing") return "Niet meer aanwezig";
+  if (finding.disposition === "expired_exception") return "Uitzondering verlopen";
+  return undefined;
+}
+
+function canTrust(finding: Finding) {
+  return Boolean(finding.id && finding.path && !["missing", "scan_error"].includes(finding.checksumStatus ?? "") && finding.disposition !== "trusted");
 }
 
 function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; label: string }> {
@@ -133,6 +158,7 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
       <div><small>Securitycontrole</small><h3 id="security-overview-title">{{ attentionCount ? `${attentionCount} aandachtspunten` : 'Geen aandachtspunten' }}</h3></div>
       <span>Laatste scan: {{ formatDate(finishedAt) }}</span>
     </header>
+    <div class="security-policy-counts"><span><CircleAlert :size="15" /> {{ attentionCount }} actief</span><span><EyeOff :size="15" /> {{ ignoredCount }} genegeerd</span><span><ShieldCheck :size="15" /> {{ trustedCount }} vertrouwd</span></div>
     <div class="security-summary-grid">
       <button v-for="check in checks" :key="check.key" type="button" @click="openAndScroll(check.key)">
         <span :class="['security-summary-icon', check.status]"><CheckCircle2 v-if="check.status === 'success'" :size="16" /><CircleAlert v-else :size="16" /></span>
@@ -156,6 +182,10 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
         <p class="security-check-description">{{ check.summary }}</p>
         <details v-if="check.status === 'failed' && check.technicalDetails" class="scan-diagnostic"><summary>Technische details</summary><pre>{{ check.technicalDetails }}</pre></details>
 
+        <div class="security-disposition-tabs" aria-label="Meldingstatus">
+          <button v-for="option in [{ value: 'active', label: 'Actief' }, { value: 'ignored', label: 'Genegeerd' }, { value: 'trusted', label: 'Vertrouwd' }, { value: 'all', label: 'Alles' }]" :key="option.value" type="button" :class="{ active: dispositions[check.key] === option.value }" @click="setDisposition(check.key, option.value)">{{ option.label }}</button>
+        </div>
+
         <div v-if="check.key === 'php_files' || check.key === 'modified_files'" class="security-result-toolbar">
           <label class="security-search"><Search :size="14" /><input v-model="queryInputs[check.key]" type="search" placeholder="Zoek op pad of bestandsnaam" :aria-label="`Zoeken in ${check.label}`" @input="scheduleQuery(check.key)" /></label>
           <select v-model="categories[check.key]" :aria-label="`Categorie voor ${check.label}`" @change="resetPage(check.key)"><option v-for="option in categoryOptions(check)" :key="option.value" :value="option.value">{{ option.label }}</option></select>
@@ -170,10 +200,16 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
         </div>
 
         <div v-else class="security-findings" data-testid="security-findings">
-          <div v-for="finding in resultFor(check).items" :key="finding.id ?? finding.path ?? finding.title" :class="['finding', { 'checksum-finding': finding.checksumStatus }]">
+          <div v-for="finding in resultFor(check).items" :key="finding.id ?? finding.path ?? finding.title" :class="['finding', `finding-${finding.disposition ?? 'active'}`, { 'checksum-finding': finding.checksumStatus }]">
             <label v-if="finding.checksumStatus === 'unexpected' && finding.id" class="finding-select"><input type="checkbox" :checked="selectedFindingIds.includes(finding.id)" :disabled="!isLatestScan" :aria-label="`${finding.path} selecteren`" @change="emit('toggleFinding', finding.id)" /></label>
-            <div class="finding-copy"><span v-if="finding.checksumStatus" :class="['checksum-status', finding.checksumStatus]">{{ checksumLabel(finding) }}</span><strong v-else>{{ finding.title }}</strong><p>{{ finding.detail }}</p><code v-if="finding.path">{{ finding.path }}</code></div>
-            <div v-if="finding.checksumStatus === 'unexpected' && finding.id" class="finding-actions"><button class="button small secondary" :disabled="!!busy || !isLatestScan" @click="emit('preview', finding)"><LoaderCircle v-if="busy === `preview-${finding.id}`" class="spin" :size="14" /><Eye v-else :size="14" /> Bekijk bestand</button><button class="button small danger-text" :disabled="!!busy || !isLatestScan" @click="emit('delete', finding)"><Trash2 :size="14" /> Verwijderen</button></div>
+            <div class="finding-copy"><span v-if="finding.checksumStatus" :class="['checksum-status', finding.checksumStatus]">{{ checksumLabel(finding) }}</span><strong v-else>{{ finding.title }}</strong><span v-if="dispositionLabel(finding)" :class="['finding-disposition', finding.disposition]">{{ dispositionLabel(finding) }}</span><p>{{ finding.detail }}</p><small v-if="finding.policyReason" class="finding-policy-reason">{{ finding.policyReason }}</small><code v-if="finding.path">{{ finding.path }}</code></div>
+            <div v-if="finding.id && isLatestScan" class="finding-actions">
+              <button v-if="finding.checksumStatus === 'unexpected'" class="button small secondary" :disabled="!!busy" @click="emit('preview', finding)"><LoaderCircle v-if="busy === `preview-${finding.id}`" class="spin" :size="14" /><Eye v-else :size="14" /> Bekijken</button>
+              <button v-if="(finding.disposition ?? 'active') !== 'ignored' && finding.disposition !== 'trusted'" class="button small ghost" :disabled="!!busy" @click="emit('ignore', finding, false)"><EyeOff :size="14" /> Melding negeren</button>
+              <button v-if="(finding.disposition ?? 'active') !== 'ignored' && finding.disposition !== 'trusted'" class="button small ghost" :disabled="!!busy" @click="emit('ignore', finding, true)"><Clock3 :size="14" /> Tijdelijk negeren</button>
+              <button v-if="canTrust(finding)" class="button small ghost" :disabled="!!busy" @click="emit('trust', finding)"><ShieldCheck :size="14" /> Bestand vertrouwen</button>
+              <button v-if="finding.checksumStatus === 'unexpected'" class="button small danger-text" :disabled="!!busy" @click="emit('delete', finding)"><Trash2 :size="14" /> Verwijderen</button>
+            </div>
           </div>
         </div>
 

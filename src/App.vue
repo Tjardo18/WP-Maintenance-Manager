@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from "vue";
 import { useRoute, RouterLink, RouterView } from "vue-router";
-import { Activity, CircleAlert, Globe2, History, LayoutDashboard, LoaderCircle, LockKeyhole, Settings, ShieldCheck } from "@lucide/vue";
+import { Activity, CircleAlert, Globe2, History, LayoutDashboard, ListChecks, LoaderCircle, LockKeyhole, Settings, ShieldCheck } from "@lucide/vue";
 import { useSitesStore } from "./stores/sites";
 import { useAuthStore } from "./stores/auth";
 import { useScanJobsStore } from "./stores/scanJobs";
@@ -48,6 +48,7 @@ watch(() => scanJobs.active.length, (active, previous) => { if (previous > 0 && 
         <RouterLink to="/websites"><Globe2 :size="19" /> Websites</RouterLink>
         <RouterLink to="/historie"><History :size="19" /> Onderhoudshistorie</RouterLink>
         <RouterLink to="/foutenlog"><CircleAlert :size="19" /> Foutenlog</RouterLink>
+        <RouterLink to="/uitzonderingen"><ListChecks :size="19" /> Uitzonderingen</RouterLink>
         <RouterLink to="/instellingen"><Settings :size="19" /> Instellingen</RouterLink>
       </nav>
       <div class="sidebar-footer">

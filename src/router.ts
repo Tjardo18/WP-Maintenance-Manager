@@ -6,6 +6,7 @@ import SiteDetailView from "./views/SiteDetailView.vue";
 import HistoryView from "./views/HistoryView.vue";
 import SettingsView from "./views/SettingsView.vue";
 import ErrorLogView from "./views/ErrorLogView.vue";
+import ExceptionsView from "./views/ExceptionsView.vue";
 
 export default createRouter({
   history: createWebHashHistory(),
@@ -17,6 +18,7 @@ export default createRouter({
     { path: "/websites/:id", component: SiteDetailView, meta: { title: "Websiteoverzicht" } },
     { path: "/historie", component: HistoryView, meta: { title: "Onderhoudshistorie" } },
     { path: "/foutenlog", component: ErrorLogView, meta: { title: "Foutenlog" } },
+    { path: "/uitzonderingen", component: ExceptionsView, meta: { title: "Uitzonderingen" } },
     { path: "/instellingen", component: SettingsView, meta: { title: "Instellingen" } },
   ],
 });

@@ -61,7 +61,15 @@ export interface ConnectionTestResult {
 
 export interface ScanCheck { key: string; label: string; status: StepStatus; summary: string; technicalDetails?: string; findings: Finding[] }
 export type ChecksumStatus = "modified" | "missing" | "unexpected" | "scan_error";
-export interface Finding { id?: string; category: string; severity: "info" | "attention" | "problem"; title: string; detail: string; path?: string; checksumStatus?: ChecksumStatus; observedAt?: string }
+export type FindingSeverity = "info" | "attention" | "warning" | "critical" | "problem";
+export type FindingDisposition = "active" | "ignored" | "trusted" | "expired_exception" | "trusted_changed" | "trusted_missing";
+export interface Finding { id?: string; category: string; severity: FindingSeverity; title: string; detail: string; path?: string; checksumStatus?: ChecksumStatus; observedAt?: string; disposition?: FindingDisposition; exceptionId?: string; trustedFileId?: string; policyReason?: string }
+export interface FindingException { id: string; siteId: string; siteName: string; checkType: string; findingType: string; target: string; scope: "site"; reason: string; note?: string; createdAt: string; expiresAt?: string; active: boolean }
+export interface FindingExceptionInput { siteId: string; findingId: string; expiresAt?: string; note?: string }
+export type TrustedFileStatus = "trusted" | "changed" | "missing" | "unchecked";
+export interface TrustedFile { id: string; siteId: string; siteName: string; relativePath: string; trustedSha256: string; currentSha256?: string; sizeBytes: number; currentSizeBytes?: number; modifiedAtSnapshot?: string; currentModifiedAt?: string; fileType: string; status: TrustedFileStatus; trustedAt: string; lastCheckedAt?: string; note?: string; active: boolean }
+export interface TrustedFileInput { siteId: string; findingId: string; note?: string }
+export interface SecurityPolicyMutationResult { scan?: ScanResult; findingException?: FindingException; trustedFile?: TrustedFile }
 export interface FilePreview { finding: Finding; fileName: string; relativePath: string; sizeBytes: number; modifiedAt?: string; fileType: string; extension?: string; textContent?: string; binary: boolean; truncated: boolean }
 export interface ChecksumDeleteFailure { findingId: string; path?: string; error: TechnicalError }
 export interface ChecksumDeleteResult { requested: number; deleted: number; deletedPaths: string[]; failures: ChecksumDeleteFailure[]; scan?: ScanResult; rescanError?: TechnicalError }

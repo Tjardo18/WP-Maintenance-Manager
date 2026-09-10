@@ -65,4 +65,15 @@ describe("SecurityChecks", () => {
     expect(wrapper.findAll(".finding").length).toBeLessThanOrEqual(25);
     vi.useRealTimers();
   });
+
+  it("offers exact ignore, temporary ignore and hash trust actions for an existing file", async () => {
+    const actionable: ScanCheck[] = [{ key: "core_checksum", label: "Core", status: "warning", summary: "Afwijking", findings: [{ id: "finding-1", category: "wordpress-core-unexpected", severity: "warning", title: "Onverwacht", detail: "Controleer dit bestand", path: "wp-content/custom-loader.php", checksumStatus: "unexpected", disposition: "active" }] }];
+    const wrapper = mount(SecurityChecks, { props: { checks: actionable, finishedAt: "2026-09-07T11:42:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: true } });
+    const buttons = wrapper.findAll(".finding-actions button");
+    await buttons.find((button) => button.text().includes("Melding negeren"))!.trigger("click");
+    await buttons.find((button) => button.text().includes("Tijdelijk negeren"))!.trigger("click");
+    await buttons.find((button) => button.text().includes("Bestand vertrouwen"))!.trigger("click");
+    expect(wrapper.emitted("ignore")).toEqual([[actionable[0]!.findings[0], false], [actionable[0]!.findings[0], true]]);
+    expect(wrapper.emitted("trust")).toEqual([[actionable[0]!.findings[0]]]);
+  });
 });

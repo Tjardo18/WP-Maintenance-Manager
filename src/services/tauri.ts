@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, Site, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -13,6 +13,22 @@ let browserIdleMinutes = 15;
 const browserTerminalChallenges = new Map<string, { siteId: string; expiresAt: number }>();
 const browserScanJobs = new Map<string, ScanJobState>();
 const browserScanJobListeners = new Set<(job: ScanJobState) => void>();
+const browserExceptions: FindingException[] = [];
+const browserTrustedFiles: TrustedFile[] = [];
+const browserScans = new Map<string, ScanResult>();
+
+function browserScan(siteId: string) {
+  const existing = browserScans.get(siteId);
+  if (existing) return existing;
+  const scan = { ...structuredClone(demoScan), siteId };
+  scan.checks.forEach((check) => check.findings.forEach((finding) => { finding.disposition ??= "active"; }));
+  browserScans.set(siteId, scan);
+  return scan;
+}
+
+function browserFinding(siteId: string, findingId: string) {
+  return browserScan(siteId).checks.flatMap((check) => check.findings).find((finding) => finding.id === findingId);
+}
 
 const demoScanSteps: ScanJobState["steps"] = [
   ["ssh_connect", "SSH-verbinding"], ["wordpress_detection", "WordPress detecteren"],
@@ -162,7 +178,49 @@ export const appApi = {
   async startAllSiteScans(modifiedDays = 30): Promise<BulkScanStart> { if (isTauri()) return call("start_all_site_scans", { modifiedDays }); return { jobs: browserSites.map(startBrowserScanJob) }; },
   async cancelScanJobs(jobIds: string[]): Promise<ScanJobState[]> { if (isTauri()) return call("cancel_scan_jobs", { jobIds }); return Promise.all(jobIds.map((jobId) => appApi.cancelSiteScan(jobId))); },
   async onScanJobUpdated(handler: (job: ScanJobState) => void): Promise<UnlistenFn> { if (isTauri()) return listen("scan-job-updated", (event) => handler(event.payload as ScanJobState)); browserScanJobListeners.add(handler); return () => browserScanJobListeners.delete(handler); },
-  async listScans(siteId: string): Promise<ScanResult[]> { return isTauri() ? call("list_scan_runs", { siteId }) : [{ ...structuredClone(demoScan), siteId }]; },
+  async listScans(siteId: string): Promise<ScanResult[]> { return isTauri() ? call("list_scan_runs", { siteId }) : [structuredClone(browserScan(siteId))]; },
+  async listFindingExceptions(siteId?: string): Promise<FindingException[]> { return isTauri() ? call("list_finding_exceptions", { siteId: siteId ?? null }) : structuredClone(browserExceptions.filter((exception) => !siteId || exception.siteId === siteId)); },
+  async ignoreFinding(input: FindingExceptionInput): Promise<SecurityPolicyMutationResult> {
+    if (isTauri()) return call("ignore_finding", { input });
+    const finding = browserFinding(input.siteId, input.findingId);
+    if (!finding) throw new Error("Actuele beveiligingsmelding niet gevonden.");
+    const check = browserScan(input.siteId).checks.find((item) => item.findings.includes(finding));
+    const site = browserSites.find((item) => item.id === input.siteId);
+    const exception: FindingException = { id: crypto.randomUUID(), siteId: input.siteId, siteName: site?.name ?? input.siteId, checkType: check?.key ?? finding.category, findingType: finding.checksumStatus ?? finding.category, target: finding.path ?? finding.category, scope: "site", reason: input.expiresAt ? "Handmatig tijdelijk genegeerd" : "Handmatig genegeerd", note: input.note, createdAt: new Date().toISOString(), expiresAt: input.expiresAt, active: true };
+    browserExceptions.push(exception); finding.disposition = "ignored"; finding.exceptionId = exception.id; finding.policyReason = "Deze specifieke melding is genegeerd.";
+    return { scan: structuredClone(browserScan(input.siteId)), findingException: structuredClone(exception) };
+  },
+  async removeFindingException(exceptionId: string): Promise<SecurityPolicyMutationResult> {
+    if (isTauri()) return call("remove_finding_exception", { exceptionId });
+    const exception = browserExceptions.find((item) => item.id === exceptionId && item.active);
+    if (!exception) throw new Error("Actieve uitzondering niet gevonden.");
+    exception.active = false;
+    browserScan(exception.siteId).checks.flatMap((check) => check.findings).filter((finding) => finding.exceptionId === exceptionId).forEach((finding) => { finding.disposition = "active"; finding.exceptionId = undefined; finding.policyReason = undefined; });
+    return { scan: structuredClone(browserScan(exception.siteId)) };
+  },
+  async listTrustedFiles(siteId?: string): Promise<TrustedFile[]> { return isTauri() ? call("list_trusted_files", { siteId: siteId ?? null }) : structuredClone(browserTrustedFiles.filter((trusted) => !siteId || trusted.siteId === siteId)); },
+  async trustFindingFile(input: TrustedFileInput): Promise<SecurityPolicyMutationResult> {
+    if (isTauri()) return call("trust_finding_file", { input });
+    const finding = browserFinding(input.siteId, input.findingId);
+    if (!finding?.path || finding.checksumStatus === "missing" || finding.checksumStatus === "scan_error") throw new Error("Dit bestand kan niet worden vertrouwd.");
+    const now = new Date().toISOString(); const hash = await demoHash(`${input.siteId}:${finding.path}`); const site = browserSites.find((item) => item.id === input.siteId);
+    const trusted: TrustedFile = { id: crypto.randomUUID(), siteId: input.siteId, siteName: site?.name ?? input.siteId, relativePath: finding.path, trustedSha256: hash, currentSha256: hash, sizeBytes: 54, currentSizeBytes: 54, fileType: "regular", status: "trusted", trustedAt: now, lastCheckedAt: now, note: input.note, active: true };
+    browserTrustedFiles.push(trusted); finding.disposition = "trusted"; finding.trustedFileId = trusted.id; finding.policyReason = "De huidige SHA-256-fingerprint komt overeen met de vertrouwde versie.";
+    return { scan: structuredClone(browserScan(input.siteId)), trustedFile: structuredClone(trusted) };
+  },
+  async retrustFile(trustedFileId: string): Promise<SecurityPolicyMutationResult> {
+    if (isTauri()) return call("retrust_file", { trustedFileId });
+    const trusted = browserTrustedFiles.find((item) => item.id === trustedFileId && item.active); if (!trusted) throw new Error("Vertrouwd bestand niet gevonden.");
+    trusted.trustedSha256 = trusted.currentSha256 ?? trusted.trustedSha256; trusted.status = "trusted"; trusted.trustedAt = new Date().toISOString(); trusted.lastCheckedAt = trusted.trustedAt;
+    browserScan(trusted.siteId).checks.flatMap((check) => check.findings).filter((finding) => finding.trustedFileId === trusted.id).forEach((finding) => { finding.disposition = "trusted"; finding.policyReason = "De nieuwe fingerprint is vertrouwd."; });
+    return { scan: structuredClone(browserScan(trusted.siteId)), trustedFile: structuredClone(trusted) };
+  },
+  async revokeTrustedFile(trustedFileId: string): Promise<SecurityPolicyMutationResult> {
+    if (isTauri()) return call("revoke_trusted_file", { trustedFileId });
+    const trusted = browserTrustedFiles.find((item) => item.id === trustedFileId && item.active); if (!trusted) throw new Error("Actief vertrouwd bestand niet gevonden."); trusted.active = false;
+    browserScan(trusted.siteId).checks.flatMap((check) => check.findings).filter((finding) => finding.trustedFileId === trusted.id).forEach((finding) => { finding.disposition = "active"; finding.trustedFileId = undefined; finding.policyReason = undefined; });
+    return { scan: structuredClone(browserScan(trusted.siteId)) };
+  },
   async previewChecksumFinding(siteId: string, findingId: string): Promise<FilePreview> { if (isTauri()) return call("preview_checksum_finding", { siteId, findingId }); const finding = demoScan.checks.flatMap((check) => check.findings).find((item) => item.id === findingId); if (!finding?.path) throw new Error("Checksumfinding niet gevonden."); const parts = finding.path.split("/"); return { finding: structuredClone(finding), fileName: parts[parts.length - 1] ?? finding.path, relativePath: finding.path, sizeBytes: 54, modifiedAt: new Date().toISOString(), fileType: "php-bestand", extension: "php", textContent: "<script>alert('preview wordt als tekst getoond')</script>\n<?php // demo ?>", binary: false, truncated: false }; },
   async deleteChecksumFinding(siteId: string, findingId: string): Promise<ChecksumDeleteResult> { if (isTauri()) return call("delete_checksum_finding", { siteId, findingId }); const path = demoScan.checks.flatMap((check) => check.findings).find((item) => item.id === findingId)?.path; return { requested: 1, deleted: path ? 1 : 0, deletedPaths: path ? [path] : [], failures: [], scan: { ...structuredClone(demoScan), siteId } }; },
   async deleteChecksumFindings(siteId: string, findingIds: string[]): Promise<ChecksumDeleteResult> { if (isTauri()) return call("delete_checksum_findings", { siteId, findingIds }); const paths = demoScan.checks.flatMap((check) => check.findings).filter((item) => item.id && findingIds.includes(item.id)).flatMap((item) => item.path ? [item.path] : []); return { requested: findingIds.length, deleted: paths.length, deletedPaths: paths, failures: [], scan: { ...structuredClone(demoScan), siteId } }; },

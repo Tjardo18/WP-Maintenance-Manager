@@ -36,6 +36,19 @@ describe("security result filtering", () => {
     expect(filterSecurityFindings(php, { query: "shop", category: "plugins", showAllPhp: true })).toHaveLength(1);
   });
 
+  it("defaults to active findings while keeping ignored and trusted states discoverable", () => {
+    const active = { ...finding("active.php", "root", "warning"), disposition: "active" as const };
+    const ignored = { ...finding("ignored.php", "root", "critical"), disposition: "ignored" as const };
+    const trusted = { ...finding("trusted.php", "root", "warning"), disposition: "trusted" as const };
+    const changed = { ...finding("changed.php", "root", "warning"), disposition: "trusted_changed" as const };
+    const findings = check("core_checksum", [active, ignored, trusted, changed]);
+
+    expect(filterSecurityFindings(findings, { query: "", category: "all", showAllPhp: true }).map((item) => item.path)).toEqual(["active.php", "changed.php"]);
+    expect(filterSecurityFindings(findings, { query: "", category: "all", disposition: "ignored", showAllPhp: true })).toEqual([ignored]);
+    expect(filterSecurityFindings(findings, { query: "", category: "all", disposition: "trusted", showAllPhp: true })).toEqual([trusted, changed]);
+    expect(noteworthyFindingCount(findings)).toBe(2);
+  });
+
   it("paginates thousands of findings without copying them into the visible page", () => {
     const findings = Array.from({ length: 5_000 }, (_, index) => finding(`wp-content/uploads/${index}.php`, "uploads", "attention"));
     const first = paginateSecurityFindings(findings, 1, 25);
