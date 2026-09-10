@@ -915,3 +915,60 @@ pub struct VulnerabilityRefreshJobState {
     pub automatic: bool,
     pub error: Option<crate::error::AppError>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AffectedVersionRange {
+    pub label: String,
+    pub from_version: String,
+    pub from_inclusive: bool,
+    pub to_version: String,
+    pub to_inclusive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VulnerabilityCandidate {
+    pub provider: String,
+    pub vulnerability_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub informational: bool,
+    pub cve: Option<String>,
+    pub cve_link: Option<String>,
+    pub published: Option<String>,
+    pub updated: Option<String>,
+    pub cvss_vector: Option<String>,
+    pub cvss_score: Option<f64>,
+    pub cvss_rating: Option<String>,
+    pub cwe_id: Option<i64>,
+    pub cwe_name: Option<String>,
+    pub cwe_description: Option<String>,
+    pub researchers: Vec<String>,
+    pub references: Vec<String>,
+    pub copyrights: Option<serde_json::Value>,
+    pub software_type: String,
+    pub software_slug: String,
+    pub software_name: String,
+    pub affected_ranges: Vec<AffectedVersionRange>,
+    pub patched: bool,
+    pub patched_versions: Vec<String>,
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VulnerabilityMatch {
+    #[serde(flatten)]
+    pub vulnerability: VulnerabilityCandidate,
+    pub installed_version: String,
+    pub matched_ranges: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentVulnerabilityResult {
+    pub matches: Vec<VulnerabilityMatch>,
+    pub provider_match_found: bool,
+    pub version_comparison_failed: bool,
+}

@@ -1,12 +1,12 @@
 use crate::{
     error::AppError,
     models::{
-        AuditEvent, AuthConfig, AuthMethod, ChecksumFindingRecord, ChecksumStatus, ErrorCategory,
-        ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity, ExceptionScope, Finding,
-        FindingContext, FindingDisposition, FindingException, FindingSeverity, MaintenanceRun,
-        MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus, StepStatus,
-        StoredSite, TrustedFile, TrustedFileStatus, UpdateItem, UpdateKind, VulnerabilityFeedState,
-        VulnerabilityImportSummary,
+        AffectedVersionRange, AuditEvent, AuthConfig, AuthMethod, ChecksumFindingRecord,
+        ChecksumStatus, ErrorCategory, ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity,
+        ExceptionScope, Finding, FindingContext, FindingDisposition, FindingException,
+        FindingSeverity, MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput,
+        SiteStatus, StepStatus, StoredSite, TrustedFile, TrustedFileStatus, UpdateItem, UpdateKind,
+        VulnerabilityCandidate, VulnerabilityFeedState, VulnerabilityImportSummary,
     },
     wordfence::{WORDFENCE_PROVIDER, WordfenceVulnerability},
 };
@@ -1044,6 +1044,97 @@ impl Database {
         })
     }
 
+    pub fn vulnerability_candidates(
+        &self,
+        provider: &str,
+        software_type: &str,
+        software_slug: &str,
+    ) -> Result<Vec<VulnerabilityCandidate>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT v.provider,v.vulnerability_id,v.title,v.description,v.informational,v.cve,v.cve_link,v.published,v.updated,v.cvss_vector,v.cvss_score,v.cvss_rating,v.cwe_id,v.cwe_name,v.cwe_description,v.researchers_json,v.references_json,v.copyrights_json,s.software_type,s.software_slug,s.software_name,s.affected_ranges_json,s.patched,s.patched_versions_json,s.remediation FROM vulnerability_feed_state f JOIN vulnerable_software s ON s.dataset_id=f.active_dataset_id AND s.provider=f.provider JOIN vulnerabilities v ON v.dataset_id=s.dataset_id AND v.provider=s.provider AND v.vulnerability_id=s.vulnerability_id WHERE f.provider=?1 AND s.software_type=?2 AND s.software_slug=?3 ORDER BY COALESCE(v.cvss_score,-1) DESC,v.title COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map(params![provider, software_type, software_slug], |row| {
+            let affected_json: String = row.get(21)?;
+            let affected: std::collections::BTreeMap<
+                String,
+                crate::wordfence::WordfenceAffectedRange,
+            > = serde_json::from_str(&affected_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    affected_json.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            let json_array = |index: usize| -> rusqlite::Result<Vec<String>> {
+                let value: String = row.get(index)?;
+                serde_json::from_str(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        value.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            };
+            let copyrights = row
+                .get::<_, Option<String>>(17)?
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            value.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                })
+                .transpose()?;
+            Ok(VulnerabilityCandidate {
+                provider: row.get(0)?,
+                vulnerability_id: row.get(1)?,
+                title: row.get(2)?,
+                description: row.get(3)?,
+                informational: row.get(4)?,
+                cve: row.get(5)?,
+                cve_link: row.get(6)?,
+                published: row.get(7)?,
+                updated: row.get(8)?,
+                cvss_vector: row.get(9)?,
+                cvss_score: row.get(10)?,
+                cvss_rating: row.get(11)?,
+                cwe_id: row.get(12)?,
+                cwe_name: row.get(13)?,
+                cwe_description: row.get(14)?,
+                researchers: json_array(15)?,
+                references: json_array(16)?,
+                copyrights,
+                software_type: row.get(18)?,
+                software_slug: row.get(19)?,
+                software_name: row.get(20)?,
+                affected_ranges: affected
+                    .into_iter()
+                    .map(|(label, range)| AffectedVersionRange {
+                        label,
+                        from_version: range.from_version,
+                        from_inclusive: range.from_inclusive,
+                        to_version: range.to_version,
+                        to_inclusive: range.to_inclusive,
+                    })
+                    .collect(),
+                patched: row.get(22)?,
+                patched_versions: json_array(23)?,
+                remediation: row.get(24)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| AppError {
+                error_id: None,
+                category: "vulnerability_match".into(),
+                user_message: "De lokale vulnerability database kon niet worden gelezen.".into(),
+                technical_details: Some(error.to_string()),
+                retryable: true,
+            })
+    }
+
     pub fn auth_config(&self) -> Result<Option<AuthConfig>, AppError> {
         let connection = self.connect()?;
         connection
@@ -1596,6 +1687,25 @@ mod tests {
             Some(first.dataset_id.as_str())
         );
         assert_eq!(state.vulnerability_count, 1);
+        assert_eq!(
+            database
+                .vulnerability_candidates(WORDFENCE_PROVIDER, "plugin", "example-plugin")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            database
+                .vulnerability_candidates(WORDFENCE_PROVIDER, "plugin", "same-display-name")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            database
+                .vulnerability_candidates(WORDFENCE_PROVIDER, "theme", "example-plugin")
+                .unwrap()
+                .is_empty()
+        );
 
         fs::write(&feed_path, "{malformed").unwrap();
         assert!(

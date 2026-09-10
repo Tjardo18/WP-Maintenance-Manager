@@ -21,6 +21,7 @@ mod terminal;
 mod terminal_auth;
 mod validation;
 mod vulnerability_jobs;
+mod vulnerability_matcher;
 mod wordfence;
 mod wordpress_users;
 mod wp_cli;
@@ -106,6 +107,7 @@ pub fn run() {
             commands::test_wordfence_connection,
             commands::start_wordfence_feed_refresh,
             commands::get_wordfence_feed_refresh_job,
+            commands::match_cached_component_vulnerabilities,
             commands::check_updates,
             commands::list_cached_updates,
             commands::list_wordpress_users,

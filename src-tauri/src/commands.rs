@@ -6,10 +6,10 @@ use crate::{
     error_log, maintenance,
     models::{
         AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteFailure,
-        ChecksumDeleteResult, ConnectionStep, ConnectionTestResult, CoreOperationInfo,
-        CoreOperationKind, CoreOperationResult, ErrorLogFilter, ErrorLogPage, ExceptionScope,
-        FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun,
-        MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult,
+        ChecksumDeleteResult, ComponentVulnerabilityResult, ConnectionStep, ConnectionTestResult,
+        CoreOperationInfo, CoreOperationKind, CoreOperationResult, ErrorLogFilter, ErrorLogPage,
+        ExceptionScope, FilePreview, FindingException, FindingExceptionInput, LoginResult,
+        MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult,
         SecurityPolicyMutationResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite,
         TrustedFile, TrustedFileInput, TrustedFileStatus, UpdateItem, VulnerabilityRefreshJobState,
         WordPressUserDeleteInput, WordPressUserUpdateInput, WordPressUsersData,
@@ -20,7 +20,7 @@ use crate::{
     terminal::{TerminalConnectRequest, TerminalConnectionInfo, TerminalOpenInput},
     terminal_auth::TerminalChallengeInfo,
     validation::validate_site,
-    wordfence, wordpress_users, wp_cli, wp_cli_catalog,
+    vulnerability_matcher, wordfence, wordpress_users, wp_cli, wp_cli_catalog,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
@@ -2263,6 +2263,26 @@ pub fn get_wordfence_feed_refresh_job(
 ) -> Result<Option<VulnerabilityRefreshJobState>, AppError> {
     require_auth(&state, &session_token)?;
     state.vulnerability_jobs.current()
+}
+
+#[tauri::command(async)]
+pub fn match_cached_component_vulnerabilities(
+    session_token: String,
+    software_type: String,
+    software_slug: String,
+    installed_version: String,
+    state: State<'_, AppState>,
+) -> Result<ComponentVulnerabilityResult, AppError> {
+    require_auth(&state, &session_token)?;
+    if software_slug.len() > 500 || installed_version.len() > 200 {
+        return Err(AppError::validation("Software-identiteit is te lang."));
+    }
+    vulnerability_matcher::match_component(
+        &state.database,
+        &software_type,
+        &software_slug,
+        &installed_version,
+    )
 }
 
 pub(crate) fn start_wordfence_feed_refresh_internal(
