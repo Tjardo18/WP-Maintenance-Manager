@@ -29,6 +29,16 @@ Preview en verwijdering accepteren geen pad uit de frontend, maar alleen een sit
 
 Een preview is alleen-lezen, maximaal 256 KB en verschijnt als platte tekst; binaire of ongeldige UTF-8-data wordt niet als tekst getoond. Bulkverwijdering valideert ieder item afzonderlijk, rapporteert gedeeltelijke failures en voert na geslaagde deletes precies één nieuwe checksumscan uit. Dit is bewust geen algemene filemanager. Door beperkingen van de gebruikte SFTP-API blijft de dubbele metadata-/padcontrole een best-effort bescherming tegen zeer kleine racevensters; de app claimt geen filesystem-transactie.
 
+## Exceptions and Trusted Files
+
+Een genegeerde finding is technisch niet verdwenen. De backend bewaart de exacte combinatie van site, checktype, findingtype en genormaliseerd target. Daardoor geldt bijvoorbeeld `readme.html + missing` niet voor `readme.html + modified`, een andere file of een andere site. Permanente en tijdelijke uitzonderingen tellen niet mee voor de hoofdstatus zolang ze actief zijn; na de UTC-verlooptijd wordt dezelfde finding automatisch weer actief. Genegeerde en verlopen records blijven via **Uitzonderingen** vindbaar. Voor ontbrekende, niet-uitvoerbare distributiebestanden `readme.html` en `license.txt` is de centrale standaardseverity `info`, zodat zij zonder uitzondering al geen waarschuwing veroorzaken.
+
+Bestandsvertrouwen is uitsluitend expliciet en hash-based. De backend normaliseert het site-relatieve, case-sensitive pad, weigert traversal en symlinks, controleert dat root en doel canoniek binnen dezelfde WordPress-root vallen en streamt een regulier bestand in blokken door SHA-256. Alleen hash, grootte, bestandstype, beschikbare wijzigingstijd en controletijden komen in SQLite; bestandsinhoud wordt niet voor trust opgeslagen of naar de frontend gestuurd. Metadata wordt vóór en na het lezen vergeleken. Een race blijft op filesysteemniveau best-effort, maar een gedetecteerde vervanging of wijziging breekt de hashactie af.
+
+Bij iedere volgende scan worden actieve trustregistraties opnieuw gecontroleerd. Alleen een gelijke SHA-256 en gelijk bestandstype resulteert in `trusted`. Een andere hash of type wordt `trusted_changed` en telt opnieuw als actieve waarschuwing. Een verdwenen bestand blijft als `missing` beheersbaar zonder de site als securityprobleem te markeren. Een mislukte controle wordt `unchecked`, maakt de oorspronkelijke finding niet stil vertrouwd en schrijft een geredigeerde `trust_hash_failed`-fout. Een vertrouwde hash is bewijs van gelijkheid met de expliciet beoordeelde versie, geen malwaregarantie.
+
+Notities zijn optioneel, begrensd en weigeren herkenbare secretmarkers. Auditregels bevatten alleen site, target, findingtype/actie en tijd; nooit bestandsinhoud, credential of volledige remote output.
+
 ## WordPress users en core
 
 Usermutaties laden de actuele users, rollen en Multisite-status vlak vóór uitvoering opnieuw. Remote commands gebruiken numerieke user-id's. De backend blokkeert verwijdering of degradatie van de laatste Administrator, eist exact één contentkeuze en voegt nooit `--network` toe.

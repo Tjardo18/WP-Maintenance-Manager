@@ -50,13 +50,37 @@ Vue/Pinia → start_site_scan → ScanJobManager → begrensde blocking worker
 
 Per site bestaat maximaal één actieve scan. `ScanJobManager` bewaart korte mutexsecties rond statewijzigingen en houdt nooit een lock vast tijdens SSH-, HTTP- of database-I/O. Een cancellation-token wordt vóór iedere nieuwe stap en tijdens wachten op de globale gate gecontroleerd. Een reeds lopend niet-muterend SSH-command rondt veilig af; daarna wordt de job `cancelled` en wordt de RAII-concurrencypermit altijd vrijgegeven.
 
-De globale, instelbare limiet is 1–5 sites tegelijk (standaard 4). Binnen één site is de remote concurrency bewust 1: één geauthenticeerde libssh2-session wordt hergebruikt voor opeenvolgende channels. Daarmee daalt een gewone scan van circa 16 volledige SSH-handshakes/authenticaties naar één, zonder een `Session` onveilig tussen gelijktijdige commands te delen of de server met parallelle filesystemscans te belasten. Bulkscans gebruiken dezelfde jobs, gate en limiet als losse scans.
+De globale, instelbare limiet is 1–5 sites tegelijk (standaard 4). Binnen één site is de remote concurrency bewust 1: één geauthenticeerde libssh2-session wordt hergebruikt voor opeenvolgende commandchannels. Daarmee daalt een gewone scan zonder trustregistraties van circa 16 volledige SSH-handshakes/authenticaties naar één, zonder een `Session` onveilig tussen gelijktijdige commands te delen of de server met parallelle filesystemscans te belasten. Heeft een site vertrouwde bestanden, dan volgt bewust één extra geauthenticeerde SFTP-sessie waarin alle actieve fingerprints gebundeld en streaming worden gecontroleerd. Bulkscans gebruiken dezelfde jobs, gate en limiet als losse scans.
 
 De detailroute toont eerst cached SQLite-data. Updates worden daaruit weergegeven en alleen op de Updates-tab live vernieuwd; WordPress-gebruikers worden pas op de Gebruikers-tab opgehaald. Het Dashboard gebruikt uitsluitend de lokale sitesamenvatting. Pinia bewaart scanjobs centraal en dedupliceert gelijktijdige site-list-requests. Na completion volgt één gecontroleerde refresh; tussenliggende events vervangen alleen de betrokken jobstate.
 
 Elke scan rapporteert afzonderlijke timings voor connectie, WordPress-detectie/informatie, checksum, users, PHP/uploads, modified files, permissions, database, core/plugin/theme-updates, HTTP en persistence. Parserduur wordt zonder payload of secrets apart naar de developmentlog geschreven. De TypeScript IPC-laag logt in development alleen commandonaam, totale IPC-duur, responsgrootte en frontend-verwerkingstijd en waarschuwt boven 1 MiB. De detailpagina toont voor een afgeronde scan development-only de timings per stap.
 
 SQLite blijft bij de duurzame defaults, met `foreign_keys=ON`, WAL en een busy timeout van 5 seconden. WAL past hier omdat achtergrondscans kunnen schrijven terwijl de UI cached data leest. Scan en finding-inserts gebruiken één transactie plus hergebruikte prepared statements. De historiequery gebruikt drie gebonden batchqueries in plaats van queries per scan en per check. Extra indexes dekken scan-checks, findings, maintenance-stappen en cached updates; er is bewust geen `synchronous=OFF`-achtige durabilityverlaging.
+
+### Finding policy, uitzonderingen en trust
+
+De effectieve securitystatus is volledig backend-owned en doorloopt één centrale policyflow:
+
+```text
+Raw scan finding
+        ↓
+Severity policy
+        ↓
+Site exception (exact: site + check + type + target)
+        ↓
+Trusted file fingerprint (SHA-256 + file type)
+        ↓
+Effective FindingDisposition
+        ↓
+Site status en security summary
+        ↓
+Vue-filters en beheeracties
+```
+
+`finding_exceptions` en `trusted_files` zijn sitegebonden SQLite-records met samengestelde lookupindexes. Een scan laadt beide verzamelingen eenmaal; matching doet geen query per finding. `FindingDisposition` onderscheidt actief, genegeerd, vertrouwd, verlopen uitzondering, gewijzigd vertrouwd bestand en verdwenen vertrouwd bestand. `FindingSeverity` bevat info, attention, warning en critical, naast de bestaande problemwaarde voor backwards compatibility. Alleen relevante actieve warning/attention-findings maken de site `attention`; actieve critical/problem-findings maken haar `problem`. Info, ignored, gelijk gebleven trusted en verdwenen trusted records houden de site gezond. Connectiefouten blijven via de bestaande aparte flow `unreachable`.
+
+Een ignore/trust-mutatie haalt de finding uitsluitend uit de nieuwste scan van dezelfde site, berekent target en type backend-side en past de policy direct opnieuw op dat scanresultaat toe. De UI stuurt dus geen vrij exceptiontarget of hash in. Hashing gebruikt SFTP, 64-KB-blokken, canonieke containment, regular-file/typecontrole en metadata vóór/open/na de read. De centrale beheerpagina leest dezelfde typed records; verwijderen deactiveert records zodat oude auditcontext behouden blijft.
 
 De reproduceerbare vóór/na-metingen, performancebudgetten en beperkingen staan in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 

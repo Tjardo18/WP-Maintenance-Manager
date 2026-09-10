@@ -8,6 +8,14 @@ Een lokale, Nederlandstalige Windows-desktopapp voor beheer en onderhoud van mee
 
 Websitecontroles en bulkscans draaien als begrensde achtergrondtaken. Cached pagina's en navigatie blijven daardoor tijdens een scan bruikbaar, terwijl echte stapvoortgang en annulering beschikbaar blijven.
 
+## Uitzonderingen
+
+Bekende of operationeel onbelangrijke meldingen kunnen per website permanent of tijdelijk worden genegeerd. De backend matcht exact op website, controle, meldingstype en target: een genegeerde ontbrekende `readme.html` verbergt dus geen latere gewijzigde `readme.html`. Informatieve ontbrekende distributiebestanden zoals `readme.html` en `license.txt` tellen standaard niet als websitewaarschuwing. De Security-tab toont standaard alleen actieve meldingen; genegeerde, vertrouwde en verlopen records blijven via filters en de centrale pagina **Uitzonderingen** beschikbaar.
+
+## Vertrouwde bestanden
+
+Een bestaand bestand kan na bewuste beoordeling worden vertrouwd. De Rust-backend leest het bestand alleen via veilige SFTP-controles en bewaart uitsluitend een streaming berekende SHA-256-fingerprint en minimale metadata, nooit de inhoud. Bij iedere volgende scan wordt die fingerprint opnieuw berekend. Een gelijke versie telt niet als actief probleem; gewijzigde inhoud wordt als **Vertrouwd bestand is gewijzigd** opnieuw actief, en een verdwenen bestand blijft in het beheeroverzicht staan. Vertrouwen is site- en inhoudsspecifiek en is geen malwaregarantie.
+
 ## Ondersteunde omgeving
 
 - Desktop: Windows 10/11 (architectuur blijft waar mogelijk cross-platform).
@@ -107,6 +115,8 @@ Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.des
 - SSH key/password-authenticatie met time-outs, SHA-256-host-key-pinning en een blokkerende mismatchmelding.
 - Centrale Rust-commandcatalogus met pad-, slug- en dagenvalidatie en begrensde remote output.
 - Securityscan met vanuit de WordPress-root uitgevoerde `--include-root`-corechecksums, getypeerde modified/missing/unexpected-resultaten, accounts, intelligente statische PHP-classificatie, PHP in uploads, recente bestanden, world-writable permissions, geselecteerde configuratie en databasecheck. Normale plugin-/theme-PHP blijft standaard verborgen; opvallende locatie-, naam- en inhoudscombinaties worden met redenen getoond.
+- Centrale severity- en statuspolicy met site-specifieke exacte uitzonderingen, tijdelijke verloopdata en filters voor actief, genegeerd, vertrouwd en alles.
+- Hash-based vertrouwde bestanden via streaming SHA-256/SFTP, met hernieuwde waarschuwing bij gewijzigde inhoud, beheerbare status bij verwijdering en auditbare trustintrekking of -vernieuwing.
 - Preview en individuele/bulkverwijdering van uitsluitend `unexpected` bestanden uit de nieuwste checksumscan. SFTP, finding-id's, canonieke padcontrole, symlinkweigering, 256-KB-previewlimiet en automatische nacontrole begrenzen deze flow.
 - WordPress-gebruikers bekijken, weergavenaam/e-mail/rol wijzigen en verwijderen met expliciete contenttoewijzing of contentverwijdering. De laatste Administrator is backendmatig beschermd en Multisite-acties blijven bij de huidige site.
 - WordPress-, plugin- en thema-updatecontrole via getypeerde JSON-parsers; teruggestuurde slugs worden opnieuw gevalideerd.
@@ -128,6 +138,6 @@ Zie [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md), [docs/PERFOR
 
 ## Bekende beperkingen
 
-Versie 1 ondersteunt alleen WordPress op Linux/POSIX-hosting via SSH. Interactieve Terminaltoegang vereist dat de server gewone SSH-passwordauthenticatie aanbiedt; `PasswordAuthentication no` blokkeert deze specifieke functie zonder fallback naar de opgeslagen key. Backups vóór onderhoud en coreacties zijn databasebackups; er is nog geen volledige bestandsbackup of automatische rollback. De bestandsflow is bewust geen filemanager en kan alleen actuele `unexpected` checksumfindings openen/verwijderen. Een core-reparatie verwijdert onbekende bestanden niet. Userverwijdering op Multisite is alleen voor de huidige site, nooit netwerkbreed. Full-screen interactieve programma's zijn afhankelijk van de remote shell/hosting; de primaire dekking is normale shellinvoer, `cd`, WP-CLI, streaming en interrupts. WP-autocomplete parseert nog geen complexe shell-AST of chained `wp`-commando's.
+Versie 1 ondersteunt alleen WordPress op Linux/POSIX-hosting via SSH. Interactieve Terminaltoegang vereist dat de server gewone SSH-passwordauthenticatie aanbiedt; `PasswordAuthentication no` blokkeert deze specifieke functie zonder fallback naar de opgeslagen key. Backups vóór onderhoud en coreacties zijn databasebackups; er is nog geen volledige bestandsbackup of automatische rollback. De bestandsflow is bewust geen filemanager en kan alleen actuele `unexpected` checksumfindings openen/verwijderen. Trust kan ook andere actuele findings met een bestaand site-relatief bestand hashen, maar biedt geen algemene bestandsbrowser. Een site met actieve trustregistraties gebruikt tijdens een scan één aanvullende gebundelde SFTP-sessie voor fingerprintcontrole. Een core-reparatie verwijdert onbekende bestanden niet. Userverwijdering op Multisite is alleen voor de huidige site, nooit netwerkbreed. Full-screen interactieve programma's zijn afhankelijk van de remote shell/hosting; de primaire dekking is normale shellinvoer, `cd`, WP-CLI, streaming en interrupts. WP-autocomplete parseert nog geen complexe shell-AST of chained `wp`-commando's.
 
 Een geslaagde homepagecheck of securityscan is geen garantie dat een complete website foutloos of volledig veilig is. Een reeds geautoriseerde backendactie mag na een lock veilig afronden; de lock start geen rollback. De applicatielogin beperkt ongewenst gebruik via de app, maar beschermt niet tegen volledige controle over het Windows-account, procesgeheugen of bestandssysteem. Automatische malwareverwijdering, quarantaine, database-optimalisatie en digitaal ondertekende publieke installers vallen buiten versie 1.
