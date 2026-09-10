@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { DatabaseBackup, Gauge, Info, KeyRound, LockKeyhole, Save, ShieldCheck, Trash2 } from "@lucide/vue";
+import { DatabaseBackup, Gauge, Info, KeyRound, LockKeyhole, PlugZap, Save, ShieldCheck, Trash2 } from "@lucide/vue";
 import { appApi } from "../services/tauri";
 import type { WordfenceIntegrationStatus } from "../types";
 import { errorMessage } from "../utils/errors";
@@ -12,7 +12,7 @@ const idleMinutes = ref(15);
 const saved = ref(false);
 const saving = ref(false);
 const passwordBusy = ref(false);
-const integrationBusy = ref<"save" | "remove">();
+const integrationBusy = ref<"save" | "remove" | "test">();
 const currentPassword = ref("");
 const newPassword = ref("");
 const repeatedPassword = ref("");
@@ -36,6 +36,7 @@ async function save() { saving.value = true; error.value = undefined; try { cons
 async function changePassword() { if (newPassword.value !== repeatedPassword.value || newPassword.value.length < 12) return; passwordBusy.value = true; error.value = undefined; try { await auth.changePassword(currentPassword.value, newPassword.value); } catch (cause) { error.value = errorMessage(cause); } finally { passwordBusy.value = false; } }
 async function saveWordfenceKey() { integrationBusy.value = "save"; error.value = undefined; integrationMessage.value = undefined; try { wordfence.value = await appApi.saveWordfenceApiKey(wordfenceApiKey.value); wordfenceApiKey.value = ""; integrationMessage.value = "API-sleutel veilig opgeslagen. Test nu de verbinding."; } catch (cause) { error.value = errorMessage(cause); } finally { integrationBusy.value = undefined; } }
 async function removeWordfenceKey() { integrationBusy.value = "remove"; error.value = undefined; integrationMessage.value = undefined; try { wordfence.value = await appApi.removeWordfenceApiKey(); wordfenceApiKey.value = ""; integrationMessage.value = "API-sleutel verwijderd. Een bestaande lokale database blijft behouden."; } catch (cause) { error.value = errorMessage(cause); } finally { integrationBusy.value = undefined; } }
+async function testWordfenceConnection() { integrationBusy.value = "test"; error.value = undefined; integrationMessage.value = undefined; try { wordfence.value = await appApi.testWordfenceConnection(); integrationMessage.value = "Verbinding geslaagd. Wordfence Intelligence is bereikbaar en de API-sleutel is geldig."; } catch (cause) { error.value = errorMessage(cause); } finally { integrationBusy.value = undefined; } }
 </script>
 
 <template>
@@ -45,7 +46,7 @@ async function removeWordfenceKey() { integrationBusy.value = "remove"; error.va
       <div class="section-heading"><span class="section-icon"><KeyRound /></span><div><small class="section-kicker">Integraties</small><h3>Wordfence Intelligence</h3><p>Controleer WordPress Core, plugins en thema's lokaal op bekende kwetsbaarheden.</p></div><span :class="['integration-status', { configured: wordfence?.configured }]">● {{ wordfenceStatusLabel }}</span></div>
       <div class="integration-body">
         <label><span>API-sleutel</span><input v-model="wordfenceApiKey" type="password" autocomplete="new-password" :placeholder="wordfence?.configured ? 'Nieuwe API-sleutel invoeren' : 'Plak hier je Wordfence API-sleutel'" maxlength="512" /><small>De sleutel gaat rechtstreeks naar de beveiligde opslag van Windows en wordt niet in SQLite of de interface bewaard.</small></label>
-        <div class="integration-actions"><button class="button primary" :disabled="integrationBusy !== undefined || !wordfenceApiKey.trim()" @click="saveWordfenceKey"><Save :size="16" /> {{ integrationBusy === 'save' ? 'Opslaan…' : wordfence?.configured ? 'API-sleutel vervangen' : 'Opslaan' }}</button><button v-if="wordfence?.configured" class="button danger-text" :disabled="integrationBusy !== undefined" @click="removeWordfenceKey"><Trash2 :size="16" /> {{ integrationBusy === 'remove' ? 'Verwijderen…' : 'API-sleutel verwijderen' }}</button></div>
+        <div class="integration-actions"><button class="button primary" :disabled="integrationBusy !== undefined || !wordfenceApiKey.trim()" @click="saveWordfenceKey"><Save :size="16" /> {{ integrationBusy === 'save' ? 'Opslaan…' : wordfence?.configured ? 'API-sleutel vervangen' : 'Opslaan' }}</button><button v-if="wordfence?.configured" class="button secondary" :disabled="integrationBusy !== undefined" @click="testWordfenceConnection"><PlugZap :size="16" /> {{ integrationBusy === 'test' ? 'Testen…' : 'Verbinding testen' }}</button><button v-if="wordfence?.configured" class="button danger-text" :disabled="integrationBusy !== undefined" @click="removeWordfenceKey"><Trash2 :size="16" /> {{ integrationBusy === 'remove' ? 'Verwijderen…' : 'API-sleutel verwijderen' }}</button></div>
         <p v-if="integrationMessage" class="saved-copy integration-message">{{ integrationMessage }}</p>
       </div>
     </section>

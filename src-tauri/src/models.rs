@@ -86,6 +86,10 @@ pub enum ErrorCategory {
     Parse,
     Authentication,
     Application,
+    WordfenceApi,
+    VulnerabilityFeed,
+    VulnerabilityParse,
+    VulnerabilityMatch,
     Unknown,
 }
 
@@ -108,6 +112,10 @@ impl ErrorCategory {
             Self::Parse => "parse",
             Self::Authentication => "authentication",
             Self::Application => "application",
+            Self::WordfenceApi => "wordfence_api",
+            Self::VulnerabilityFeed => "vulnerability_feed",
+            Self::VulnerabilityParse => "vulnerability_parse",
+            Self::VulnerabilityMatch => "vulnerability_match",
             Self::Unknown => "unknown",
         }
     }
@@ -130,6 +138,10 @@ impl ErrorCategory {
             "parse" => Self::Parse,
             "authentication" => Self::Authentication,
             "application" => Self::Application,
+            "wordfence_api" => Self::WordfenceApi,
+            "vulnerability_feed" => Self::VulnerabilityFeed,
+            "vulnerability_parse" => Self::VulnerabilityParse,
+            "vulnerability_match" => Self::VulnerabilityMatch,
             _ => Self::Unknown,
         }
     }

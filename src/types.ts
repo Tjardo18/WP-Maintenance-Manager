@@ -39,7 +39,7 @@ export interface SiteInput {
 
 export interface TechnicalError { errorId?: string; category: string; userMessage: string; technicalDetails?: string; retryable: boolean }
 export type ErrorSeverity = "warning" | "error" | "critical";
-export type ErrorCategory = "network" | "dns" | "connection_timeout" | "ssh_authentication" | "ssh_host_key" | "ssh_channel" | "ssh_command" | "wp_cli" | "database" | "http" | "filesystem" | "backup" | "update" | "parse" | "authentication" | "application" | "unknown";
+export type ErrorCategory = "network" | "dns" | "connection_timeout" | "ssh_authentication" | "ssh_host_key" | "ssh_channel" | "ssh_command" | "wp_cli" | "database" | "http" | "filesystem" | "backup" | "update" | "parse" | "authentication" | "application" | "wordfence_api" | "vulnerability_feed" | "vulnerability_parse" | "vulnerability_match" | "unknown";
 export interface ErrorLogRecord { id: string; createdAt: string; severity: ErrorSeverity; category: ErrorCategory; siteId?: string; siteName?: string; action: string; summary: string; technicalDetails?: string; exitCode?: number; causeChain: string[]; durationMs?: number; retryable: boolean }
 export interface ErrorLogFilter { siteId?: string; category?: ErrorCategory; severity?: ErrorSeverity; from?: string; to?: string; query?: string; limit?: number; offset?: number }
 export interface ErrorLogPage { records: ErrorLogRecord[]; total: number; limit: number; offset: number }

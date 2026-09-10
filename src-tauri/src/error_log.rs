@@ -25,6 +25,12 @@ pub fn classify_error(error: &AppError, action: &str) -> ErrorCategory {
         "storage" | "database" => ErrorCategory::Database,
         "filesystem" | "io" => ErrorCategory::Filesystem,
         "parse" | "json" | "invalid_json" => ErrorCategory::Parse,
+        "wordfence_api" => ErrorCategory::WordfenceApi,
+        "vulnerability_feed" | "vulnerability_feed_rate_limited" => {
+            ErrorCategory::VulnerabilityFeed
+        }
+        "vulnerability_parse" => ErrorCategory::VulnerabilityParse,
+        "vulnerability_match" => ErrorCategory::VulnerabilityMatch,
         "locked"
         | "session_expired"
         | "invalid_session"

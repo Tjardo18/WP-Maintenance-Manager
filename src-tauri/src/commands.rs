@@ -2197,6 +2197,38 @@ pub fn remove_wordfence_api_key(
 }
 
 #[tauri::command(async)]
+pub fn test_wordfence_connection(
+    session_token: String,
+    state: State<'_, AppState>,
+) -> Result<WordfenceIntegrationStatus, AppError> {
+    require_auth(&state, &session_token)?;
+    let api_key = Zeroizing::new(
+        state
+            .credentials
+            .get_optional(wordfence::WORDFENCE_CREDENTIAL_REFERENCE)?
+            .ok_or_else(|| AppError::validation("Sla eerst een Wordfence API-sleutel op."))?,
+    );
+    let started = Instant::now();
+    let result = wordfence::WordfenceIntelligenceProvider::new().and_then(|provider| {
+        wordfence::VulnerabilityProvider::test_connection(&provider, &api_key)
+    });
+    if let Err(error) = result {
+        return Err(error_log::persist_error(
+            &state.database,
+            None,
+            None,
+            "Wordfence verbinding testen",
+            Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+            None,
+            error,
+        ));
+    }
+    let mut status = wordfence::integration_status(&state.credentials)?;
+    status.connection_status = "connected".into();
+    Ok(status)
+}
+
+#[tauri::command(async)]
 pub fn list_cached_updates(
     session_token: String,
     site_id: String,

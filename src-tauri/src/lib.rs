@@ -100,6 +100,7 @@ pub fn run() {
             commands::get_wordfence_status,
             commands::save_wordfence_api_key,
             commands::remove_wordfence_api_key,
+            commands::test_wordfence_connection,
             commands::check_updates,
             commands::list_cached_updates,
             commands::list_wordpress_users,
