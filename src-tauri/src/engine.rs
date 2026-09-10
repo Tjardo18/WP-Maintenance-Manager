@@ -680,6 +680,10 @@ fn failed_checksum_check(error: AppError, observed_at: &str) -> ScanCheck {
             detail: error.user_message,
             path: None,
             checksum_status: Some(ChecksumStatus::ScanError),
+            disposition: crate::models::FindingDisposition::Active,
+            exception_id: None,
+            trusted_file_id: None,
+            policy_reason: None,
             observed_at: Some(observed_at.into()),
         }],
     }

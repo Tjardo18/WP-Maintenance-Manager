@@ -2,7 +2,7 @@ use crate::{
     command_catalog::RemoteCommand,
     error::AppError,
     models::{AuthMethod, Site},
-    validation::validate_checksum_file_action_path,
+    validation::{validate_checksum_file_action_path, validate_checksum_relative_path},
 };
 use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
 use chrono::{SecondsFormat, Utc};
@@ -31,6 +31,22 @@ pub struct RemoteFileRead {
     pub size_bytes: u64,
     pub modified_unix: Option<u64>,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteFileFingerprint {
+    pub relative_path: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub modified_unix: Option<u64>,
+    pub file_type: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteFileFingerprintObservation {
+    pub relative_path: String,
+    pub fingerprint: Option<RemoteFileFingerprint>,
+    pub error: Option<AppError>,
 }
 
 impl ExecOutput {
@@ -97,6 +113,42 @@ pub trait SshExecutor: Send + Sync {
         Err(AppError::validation(
             "Bestandsverwijdering wordt niet ondersteund door deze SSH-uitvoerder.",
         ))
+    }
+
+    fn fingerprint_file(
+        &self,
+        _site: &Site,
+        _credential: Option<&str>,
+        _relative_path: &str,
+    ) -> Result<Option<RemoteFileFingerprint>, AppError> {
+        Err(AppError::validation(
+            "Bestandsvertrouwen wordt niet ondersteund door deze SSH-uitvoerder.",
+        ))
+    }
+
+    fn fingerprint_files(
+        &self,
+        site: &Site,
+        credential: Option<&str>,
+        relative_paths: &[String],
+    ) -> Result<Vec<RemoteFileFingerprintObservation>, AppError> {
+        Ok(relative_paths
+            .iter()
+            .map(
+                |relative_path| match self.fingerprint_file(site, credential, relative_path) {
+                    Ok(fingerprint) => RemoteFileFingerprintObservation {
+                        relative_path: relative_path.clone(),
+                        fingerprint,
+                        error: None,
+                    },
+                    Err(error) => RemoteFileFingerprintObservation {
+                        relative_path: relative_path.clone(),
+                        fingerprint: None,
+                        error: Some(error),
+                    },
+                },
+            )
+            .collect())
     }
 }
 
@@ -381,6 +433,107 @@ impl Ssh2Executor {
             ));
         }
         Ok((canonical_target, final_stat))
+    }
+
+    fn fingerprint_with_sftp(
+        sftp: &ssh2::Sftp,
+        site: &Site,
+        relative_path: &str,
+    ) -> Result<Option<RemoteFileFingerprint>, AppError> {
+        validate_checksum_relative_path(relative_path)?;
+        let canonical_root = sftp
+            .realpath(Path::new(&site.wordpress_path))
+            .map_err(|error| {
+                map_ssh_error(
+                    "sftp_path",
+                    "De WordPress-root kon niet veilig worden bepaald.",
+                    error,
+                )
+            })?
+            .to_string_lossy()
+            .into_owned();
+        let canonical_root = canonical_root.trim_end_matches('/');
+        if canonical_root.is_empty() {
+            return Err(AppError::validation(
+                "De serverroot mag niet als WordPress-root voor bestandsvertrouwen worden gebruikt.",
+            ));
+        }
+        let candidate = format!("{canonical_root}/{relative_path}");
+        let initial = match sftp.lstat(Path::new(&candidate)) {
+            Ok(stat) => stat,
+            Err(error) if is_sftp_missing(&error) => return Ok(None),
+            Err(error) => {
+                return Err(map_ssh_error(
+                    "sftp_file",
+                    "Het te vertrouwen bestand kon niet worden gecontroleerd.",
+                    error,
+                ));
+            }
+        };
+        ensure_regular_file(&initial)?;
+        let canonical_target = sftp
+            .realpath(Path::new(&candidate))
+            .map_err(|error| {
+                map_ssh_error(
+                    "sftp_path",
+                    "Het te vertrouwen bestand kon niet veilig worden bepaald.",
+                    error,
+                )
+            })?
+            .to_string_lossy()
+            .into_owned();
+        ensure_contained_remote_path(canonical_root, &canonical_target)?;
+        let before_open = sftp.lstat(Path::new(&canonical_target)).map_err(|error| {
+            map_ssh_error(
+                "sftp_file",
+                "Het bestand veranderde tijdens de veiligheidscontrole.",
+                error,
+            )
+        })?;
+        ensure_regular_file(&before_open)?;
+        if !same_file_snapshot(&initial, &before_open) {
+            return Err(file_changed_error(relative_path));
+        }
+        let mut file = sftp.open(Path::new(&canonical_target)).map_err(|error| {
+            map_ssh_error(
+                "sftp_file",
+                "Het bestand kon niet alleen-lezen worden geopend voor hashing.",
+                error,
+            )
+        })?;
+        let opened = file.stat().map_err(|error| {
+            map_ssh_error(
+                "sftp_file",
+                "Het geopende bestand kon niet veilig worden gecontroleerd.",
+                error,
+            )
+        })?;
+        ensure_regular_file(&opened)?;
+        if !same_file_snapshot(&before_open, &opened) {
+            return Err(file_changed_error(relative_path));
+        }
+
+        let (sha256, bytes_read) = stream_sha256(&mut file)?;
+        let after_read = sftp.lstat(Path::new(&canonical_target)).map_err(|error| {
+            map_ssh_error(
+                "sftp_file",
+                "Het bestand veranderde tijdens het hashen.",
+                error,
+            )
+        })?;
+        ensure_regular_file(&after_read)?;
+        if !same_file_snapshot(&opened, &after_read)
+            || opened.size.is_some_and(|size| size != bytes_read)
+        {
+            return Err(file_changed_error(relative_path));
+        }
+        Ok(Some(RemoteFileFingerprint {
+            relative_path: relative_path.into(),
+            sha256,
+            size_bytes: bytes_read,
+            modified_unix: after_read.mtime,
+            file_type: "regular".into(),
+        }))
     }
 }
 
@@ -770,6 +923,92 @@ impl SshExecutor for Ssh2Executor {
             )
         })
     }
+
+    fn fingerprint_file(
+        &self,
+        site: &Site,
+        credential: Option<&str>,
+        relative_path: &str,
+    ) -> Result<Option<RemoteFileFingerprint>, AppError> {
+        let session = self.verified_session(site, credential, Duration::from_secs(300))?;
+        let sftp = session
+            .sftp()
+            .map_err(|error| map_ssh_error("sftp", "SFTP kon niet worden gestart.", error))?;
+        Self::fingerprint_with_sftp(&sftp, site, relative_path)
+    }
+
+    fn fingerprint_files(
+        &self,
+        site: &Site,
+        credential: Option<&str>,
+        relative_paths: &[String],
+    ) -> Result<Vec<RemoteFileFingerprintObservation>, AppError> {
+        if relative_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let session = self.verified_session(site, credential, Duration::from_secs(300))?;
+        let sftp = session
+            .sftp()
+            .map_err(|error| map_ssh_error("sftp", "SFTP kon niet worden gestart.", error))?;
+        Ok(relative_paths
+            .iter()
+            .map(
+                |relative_path| match Self::fingerprint_with_sftp(&sftp, site, relative_path) {
+                    Ok(fingerprint) => RemoteFileFingerprintObservation {
+                        relative_path: relative_path.clone(),
+                        fingerprint,
+                        error: None,
+                    },
+                    Err(error) => RemoteFileFingerprintObservation {
+                        relative_path: relative_path.clone(),
+                        fingerprint: None,
+                        error: Some(error),
+                    },
+                },
+            )
+            .collect())
+    }
+}
+
+fn is_sftp_missing(error: &ssh2::Error) -> bool {
+    matches!(error.code(), ssh2::ErrorCode::SFTP(2 | 10))
+}
+
+fn stream_sha256(reader: &mut impl Read) -> Result<(String, u64), AppError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut bytes_read = 0_u64;
+    loop {
+        let count = reader.read(&mut buffer).map_err(|error| {
+            AppError::ssh(
+                "sftp_file",
+                "Het bestand kon niet volledig worden gehasht.",
+                error,
+                true,
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        bytes_read = bytes_read.checked_add(count as u64).ok_or_else(|| {
+            AppError::validation("Het bestand is te groot om veilig te verwerken.")
+        })?;
+    }
+    let digest = hasher.finalize();
+    Ok((
+        digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+        bytes_read,
+    ))
+}
+
+fn file_changed_error(relative_path: &str) -> AppError {
+    AppError::ssh(
+        "sftp_file_changed",
+        "Het bestand veranderde tijdens het hashen. Probeer opnieuw na een nieuwe scan.",
+        relative_path,
+        true,
+    )
 }
 
 fn ensure_regular_file(stat: &ssh2::FileStat) -> Result<(), AppError> {
@@ -843,6 +1082,32 @@ mod tests {
         assert!(ensure_regular_file(&regular).is_ok());
         assert!(ensure_regular_file(&symlink).is_err());
         assert!(ensure_regular_file(&directory).is_err());
+    }
+
+    #[test]
+    fn hashes_large_files_in_bounded_streaming_chunks() {
+        struct BoundedReader {
+            remaining: usize,
+            largest_request: usize,
+        }
+        impl Read for BoundedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.largest_request = self.largest_request.max(buffer.len());
+                let count = self.remaining.min(buffer.len());
+                buffer[..count].fill(b'x');
+                self.remaining -= count;
+                Ok(count)
+            }
+        }
+        let size = 8 * 1024 * 1024 + 13;
+        let mut reader = BoundedReader {
+            remaining: size,
+            largest_request: 0,
+        };
+        let (hash, bytes) = stream_sha256(&mut reader).unwrap();
+        assert_eq!(bytes, size as u64);
+        assert_eq!(hash.len(), 64);
+        assert!(reader.largest_request <= 64 * 1024);
     }
 
     #[test]

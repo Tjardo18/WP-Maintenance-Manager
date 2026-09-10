@@ -2,9 +2,10 @@ use crate::{
     error::AppError,
     models::{
         AuditEvent, AuthConfig, AuthMethod, ChecksumFindingRecord, ChecksumStatus, ErrorCategory,
-        ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity, Finding, FindingSeverity,
-        MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus,
-        StepStatus, StoredSite, UpdateItem, UpdateKind,
+        ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity, ExceptionScope, Finding,
+        FindingContext, FindingDisposition, FindingException, FindingSeverity, MaintenanceRun,
+        MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus, StepStatus,
+        StoredSite, TrustedFile, TrustedFileStatus, UpdateItem, UpdateKind,
     },
 };
 use chrono::{SecondsFormat, Utc};
@@ -124,6 +125,21 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let security_exceptions_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 8)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !security_exceptions_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(include_str!("../migrations/0008_security_exceptions.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(8, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -214,7 +230,7 @@ impl Database {
                 "INSERT INTO scan_checks(id,scan_run_id,check_key,label,status,summary,technical_details) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             )?;
             let mut insert_finding = transaction.prepare_cached(
-                "INSERT INTO findings(id,scan_check_id,category,severity,title,detail,path,checksum_status,observed_at,site_id,scan_run_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                "INSERT INTO findings(id,scan_check_id,category,severity,title,detail,path,checksum_status,observed_at,site_id,scan_run_id,disposition,exception_id,trusted_file_id,policy_reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             )?;
             for check in &scan.checks {
                 let check_id = Uuid::new_v4().to_string();
@@ -243,7 +259,11 @@ impl Database {
                         finding.checksum_status.map(ChecksumStatus::as_db),
                         finding.observed_at,
                         scan.site_id,
-                        scan.id
+                        scan.id,
+                        finding.disposition.as_db(),
+                        finding.exception_id,
+                        finding.trusted_file_id,
+                        finding.policy_reason
                     ])?;
                 }
             }
@@ -268,7 +288,7 @@ impl Database {
         let connection = self.connect()?;
         connection
             .query_row(
-                "SELECT f.id,f.site_id,f.scan_run_id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at
+                "SELECT f.id,f.site_id,f.scan_run_id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason
                  FROM findings f
                  JOIN scan_checks sc ON sc.id=f.scan_check_id
                  WHERE f.id=?1 AND f.site_id=?2 AND f.checksum_status='unexpected' AND sc.check_key='core_checksum'
@@ -295,6 +315,12 @@ impl Database {
                                 .as_deref()
                                 .and_then(ChecksumStatus::from_db),
                             observed_at: row.get(9)?,
+                            disposition: FindingDisposition::from_db(
+                                &row.get::<_, String>(10)?,
+                            ),
+                            exception_id: row.get(11)?,
+                            trusted_file_id: row.get(12)?,
+                            policy_reason: row.get(13)?,
                         },
                     })
                 },
@@ -370,7 +396,7 @@ impl Database {
         }
         {
             let mut statement = connection.prepare(
-                "SELECT f.scan_check_id,f.id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at
+                "SELECT f.scan_check_id,f.id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason
                  FROM findings f
                  JOIN scan_checks sc ON sc.id=f.scan_check_id
                  WHERE sc.scan_run_id IN (SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC LIMIT ?2)
@@ -391,6 +417,10 @@ impl Database {
                             .as_deref()
                             .and_then(ChecksumStatus::from_db),
                         observed_at: row.get(8)?,
+                        disposition: FindingDisposition::from_db(&row.get::<_, String>(9)?),
+                        exception_id: row.get(10)?,
+                        trusted_file_id: row.get(11)?,
+                        policy_reason: row.get(12)?,
                     },
                 ))
             })?;
@@ -402,6 +432,268 @@ impl Database {
             }
         }
         Ok(scans)
+    }
+
+    pub fn latest_scan(&self, site_id: &str) -> Result<Option<ScanResult>, AppError> {
+        Ok(self.list_scans_with_limit(site_id, 1)?.into_iter().next())
+    }
+
+    pub fn get_finding_context(
+        &self,
+        site_id: &str,
+        finding_id: &str,
+    ) -> Result<FindingContext, AppError> {
+        let connection = self.connect()?;
+        connection
+            .query_row(
+                "SELECT f.site_id,f.scan_run_id,sc.check_key,f.id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason
+                 FROM findings f
+                 JOIN scan_checks sc ON sc.id=f.scan_check_id
+                 WHERE f.site_id=?1 AND f.id=?2
+                   AND f.scan_run_id=(SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC,rowid DESC LIMIT 1)",
+                params![site_id, finding_id],
+                |row| {
+                    Ok(FindingContext {
+                        site_id: row.get(0)?,
+                        scan_run_id: row.get(1)?,
+                        check_type: row.get(2)?,
+                        finding: Finding {
+                            id: row.get(3)?,
+                            category: row.get(4)?,
+                            severity: FindingSeverity::from_db(&row.get::<_, String>(5)?),
+                            title: row.get(6)?,
+                            detail: row.get(7)?,
+                            path: row.get(8)?,
+                            checksum_status: row
+                                .get::<_, Option<String>>(9)?
+                                .as_deref()
+                                .and_then(ChecksumStatus::from_db),
+                            observed_at: row.get(10)?,
+                            disposition: FindingDisposition::from_db(
+                                &row.get::<_, String>(11)?,
+                            ),
+                            exception_id: row.get(12)?,
+                            trusted_file_id: row.get(13)?,
+                            policy_reason: row.get(14)?,
+                        },
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Actuele beveiligingsmelding"))
+    }
+
+    pub fn list_finding_exceptions(
+        &self,
+        site_id: Option<&str>,
+    ) -> Result<Vec<FindingException>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT e.id,e.site_id,s.name,e.check_type,e.finding_type,e.target,e.scope,e.reason,e.note,e.created_at,e.expires_at,e.active
+             FROM finding_exceptions e JOIN sites s ON s.id=e.site_id
+             WHERE (?1 IS NULL OR e.site_id=?1)
+             ORDER BY e.active DESC,e.created_at DESC",
+        )?;
+        statement
+            .query_map([site_id], row_to_finding_exception)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(AppError::from)
+    }
+
+    pub fn save_finding_exception(&self, exception: &FindingException) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT INTO finding_exceptions(id,site_id,check_type,finding_type,target,scope,reason,note,created_at,expires_at,active)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(id) DO UPDATE SET reason=excluded.reason,note=excluded.note,created_at=excluded.created_at,expires_at=excluded.expires_at,active=excluded.active",
+            params![
+                exception.id,
+                exception.site_id,
+                exception.check_type,
+                exception.finding_type,
+                exception.target,
+                exception.scope.as_db(),
+                exception.reason,
+                exception.note,
+                exception.created_at,
+                exception.expires_at,
+                exception.active,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn deactivate_finding_exception(&self, id: &str) -> Result<String, AppError> {
+        let connection = self.connect()?;
+        let site_id = connection
+            .query_row(
+                "SELECT site_id FROM finding_exceptions WHERE id=?1 AND active=1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Actieve uitzondering"))?;
+        connection.execute("UPDATE finding_exceptions SET active=0 WHERE id=?1", [id])?;
+        Ok(site_id)
+    }
+
+    pub fn list_trusted_files(&self, site_id: Option<&str>) -> Result<Vec<TrustedFile>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT t.id,t.site_id,s.name,t.relative_path,t.trusted_sha256,t.current_sha256,t.size_bytes,t.current_size_bytes,t.modified_at_snapshot,t.current_modified_at,t.file_type,t.status,t.trusted_at,t.last_checked_at,t.note,t.active
+             FROM trusted_files t JOIN sites s ON s.id=t.site_id
+             WHERE (?1 IS NULL OR t.site_id=?1)
+             ORDER BY t.active DESC,t.trusted_at DESC",
+        )?;
+        statement
+            .query_map([site_id], row_to_trusted_file)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(AppError::from)
+    }
+
+    pub fn get_trusted_file(&self, id: &str) -> Result<TrustedFile, AppError> {
+        let connection = self.connect()?;
+        connection
+            .query_row(
+                "SELECT t.id,t.site_id,s.name,t.relative_path,t.trusted_sha256,t.current_sha256,t.size_bytes,t.current_size_bytes,t.modified_at_snapshot,t.current_modified_at,t.file_type,t.status,t.trusted_at,t.last_checked_at,t.note,t.active
+                 FROM trusted_files t JOIN sites s ON s.id=t.site_id WHERE t.id=?1",
+                [id],
+                row_to_trusted_file,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Vertrouwd bestand"))
+    }
+
+    pub fn active_trusted_file(
+        &self,
+        site_id: &str,
+        relative_path: &str,
+    ) -> Result<Option<TrustedFile>, AppError> {
+        let connection = self.connect()?;
+        connection
+            .query_row(
+                "SELECT t.id,t.site_id,s.name,t.relative_path,t.trusted_sha256,t.current_sha256,t.size_bytes,t.current_size_bytes,t.modified_at_snapshot,t.current_modified_at,t.file_type,t.status,t.trusted_at,t.last_checked_at,t.note,t.active
+                 FROM trusted_files t JOIN sites s ON s.id=t.site_id
+                 WHERE t.site_id=?1 AND t.relative_path=?2 AND t.active=1",
+                params![site_id, relative_path],
+                row_to_trusted_file,
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn save_trusted_file(&self, trusted: &TrustedFile) -> Result<(), AppError> {
+        let size_bytes = i64::try_from(trusted.size_bytes).map_err(AppError::storage)?;
+        let current_size = trusted
+            .current_size_bytes
+            .map(i64::try_from)
+            .transpose()
+            .map_err(AppError::storage)?;
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT INTO trusted_files(id,site_id,relative_path,trusted_sha256,current_sha256,size_bytes,current_size_bytes,modified_at_snapshot,current_modified_at,file_type,status,trusted_at,last_checked_at,note,active)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+             ON CONFLICT(id) DO UPDATE SET trusted_sha256=excluded.trusted_sha256,current_sha256=excluded.current_sha256,size_bytes=excluded.size_bytes,current_size_bytes=excluded.current_size_bytes,modified_at_snapshot=excluded.modified_at_snapshot,current_modified_at=excluded.current_modified_at,file_type=excluded.file_type,status=excluded.status,trusted_at=excluded.trusted_at,last_checked_at=excluded.last_checked_at,note=excluded.note,active=excluded.active",
+            params![
+                trusted.id,
+                trusted.site_id,
+                trusted.relative_path,
+                trusted.trusted_sha256,
+                trusted.current_sha256,
+                size_bytes,
+                current_size,
+                trusted.modified_at_snapshot,
+                trusted.current_modified_at,
+                trusted.file_type,
+                trusted.status.as_db(),
+                trusted.trusted_at,
+                trusted.last_checked_at,
+                trusted.note,
+                trusted.active,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_trusted_observation(
+        &self,
+        id: &str,
+        current_sha256: Option<&str>,
+        current_size_bytes: Option<u64>,
+        current_modified_at: Option<&str>,
+        status: TrustedFileStatus,
+        checked_at: &str,
+    ) -> Result<(), AppError> {
+        let current_size = current_size_bytes
+            .map(i64::try_from)
+            .transpose()
+            .map_err(AppError::storage)?;
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE trusted_files SET current_sha256=?1,current_size_bytes=?2,current_modified_at=?3,status=?4,last_checked_at=?5 WHERE id=?6 AND active=1",
+            params![current_sha256,current_size,current_modified_at,status.as_db(),checked_at,id],
+        )?;
+        Ok(())
+    }
+
+    pub fn deactivate_trusted_file(&self, id: &str) -> Result<String, AppError> {
+        let connection = self.connect()?;
+        let site_id = connection
+            .query_row(
+                "SELECT site_id FROM trusted_files WHERE id=?1 AND active=1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Actief vertrouwd bestand"))?;
+        connection.execute("UPDATE trusted_files SET active=0 WHERE id=?1", [id])?;
+        Ok(site_id)
+    }
+
+    pub fn update_scan_policy(
+        &self,
+        scan: &ScanResult,
+        security_status: &str,
+    ) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE scan_runs SET status=?1 WHERE id=?2 AND site_id=?3",
+            params![scan.status.as_db(), scan.id, scan.site_id],
+        )?;
+        for check in &scan.checks {
+            transaction.execute(
+                "UPDATE scan_checks SET status=?1,summary=?2 WHERE scan_run_id=?3 AND check_key=?4",
+                params![check.status.as_db(), check.summary, scan.id, check.key],
+            )?;
+            for finding in &check.findings {
+                if let Some(finding_id) = finding.id.as_deref() {
+                    transaction.execute(
+                        "UPDATE findings SET severity=?1,disposition=?2,exception_id=?3,trusted_file_id=?4,policy_reason=?5 WHERE id=?6 AND scan_run_id=?7",
+                        params![
+                            finding.severity.as_db(),
+                            finding.disposition.as_db(),
+                            finding.exception_id,
+                            finding.trusted_file_id,
+                            finding.policy_reason,
+                            finding_id,
+                            scan.id,
+                        ],
+                    )?;
+                }
+            }
+        }
+        transaction.execute(
+            "UPDATE sites SET status=?1,security_status=?2,updated_at=?3 WHERE id=?4",
+            params![
+                scan.status.as_db(),
+                security_status,
+                utc_now(),
+                scan.site_id
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn save_updates(&self, site_id: &str, updates: &[UpdateItem]) -> Result<(), AppError> {
@@ -761,6 +1053,46 @@ impl Database {
     }
 }
 
+fn row_to_finding_exception(row: &Row<'_>) -> rusqlite::Result<FindingException> {
+    Ok(FindingException {
+        id: row.get(0)?,
+        site_id: row.get(1)?,
+        site_name: row.get(2)?,
+        check_type: row.get(3)?,
+        finding_type: row.get(4)?,
+        target: row.get(5)?,
+        scope: ExceptionScope::from_db(&row.get::<_, String>(6)?),
+        reason: row.get(7)?,
+        note: row.get(8)?,
+        created_at: row.get(9)?,
+        expires_at: row.get(10)?,
+        active: row.get(11)?,
+    })
+}
+
+fn row_to_trusted_file(row: &Row<'_>) -> rusqlite::Result<TrustedFile> {
+    Ok(TrustedFile {
+        id: row.get(0)?,
+        site_id: row.get(1)?,
+        site_name: row.get(2)?,
+        relative_path: row.get(3)?,
+        trusted_sha256: row.get(4)?,
+        current_sha256: row.get(5)?,
+        size_bytes: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+        current_size_bytes: row
+            .get::<_, Option<i64>>(7)?
+            .and_then(|value| u64::try_from(value).ok()),
+        modified_at_snapshot: row.get(8)?,
+        current_modified_at: row.get(9)?,
+        file_type: row.get(10)?,
+        status: TrustedFileStatus::from_db(&row.get::<_, String>(11)?),
+        trusted_at: row.get(12)?,
+        last_checked_at: row.get(13)?,
+        note: row.get(14)?,
+        active: row.get(15)?,
+    })
+}
+
 fn row_to_error_log(row: &Row<'_>) -> rusqlite::Result<ErrorLogRecord> {
     let cause_chain_json: Option<String> = row.get(10)?;
     Ok(ErrorLogRecord {
@@ -893,6 +1225,80 @@ mod tests {
     }
 
     #[test]
+    fn migration_roundtrips_site_exceptions_and_hash_trust_without_touching_sites() {
+        let path = std::env::temp_dir().join(format!("wpmm-policy-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let site = database.save_site(&input(), None).unwrap();
+        let exception = FindingException {
+            id: Uuid::new_v4().to_string(),
+            site_id: site.id.clone(),
+            site_name: site.name.clone(),
+            check_type: "core_checksum".into(),
+            finding_type: "missing".into(),
+            target: "readme.html".into(),
+            scope: ExceptionScope::Site,
+            reason: "Handmatig genegeerd".into(),
+            note: Some("Niet operationeel relevant".into()),
+            created_at: utc_now(),
+            expires_at: None,
+            active: true,
+        };
+        database.save_finding_exception(&exception).unwrap();
+        database.save_finding_exception(&exception).unwrap();
+        assert_eq!(
+            database.list_finding_exceptions(Some(&site.id)).unwrap(),
+            vec![exception.clone()]
+        );
+
+        let trusted = TrustedFile {
+            id: Uuid::new_v4().to_string(),
+            site_id: site.id.clone(),
+            site_name: site.name.clone(),
+            relative_path: "wp-content/custom-loader.php".into(),
+            trusted_sha256: "a".repeat(64),
+            current_sha256: Some("a".repeat(64)),
+            size_bytes: 123,
+            current_size_bytes: Some(123),
+            modified_at_snapshot: Some(utc_now()),
+            current_modified_at: Some(utc_now()),
+            file_type: "regular".into(),
+            status: TrustedFileStatus::Trusted,
+            trusted_at: utc_now(),
+            last_checked_at: Some(utc_now()),
+            note: None,
+            active: true,
+        };
+        database.save_trusted_file(&trusted).unwrap();
+        database
+            .update_trusted_observation(
+                &trusted.id,
+                Some(&"b".repeat(64)),
+                Some(124),
+                None,
+                TrustedFileStatus::Changed,
+                &utc_now(),
+            )
+            .unwrap();
+        let changed = database.get_trusted_file(&trusted.id).unwrap();
+        assert_eq!(changed.status, TrustedFileStatus::Changed);
+        assert_eq!(changed.current_size_bytes, Some(124));
+        assert_eq!(database.list_sites().unwrap().len(), 1);
+
+        assert_eq!(
+            database
+                .deactivate_finding_exception(&exception.id)
+                .unwrap(),
+            site.id
+        );
+        assert_eq!(
+            database.deactivate_trusted_file(&trusted.id).unwrap(),
+            site.id
+        );
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn restores_latest_scan_with_findings() {
         let path = std::env::temp_dir().join(format!("wpmm-test-{}.sqlite3", Uuid::new_v4()));
         let database = Database::initialize(path.clone()).unwrap();
@@ -917,6 +1323,10 @@ mod tests {
                     detail: "Handmatige beoordeling nodig.".into(),
                     path: Some("unexpected.php".into()),
                     checksum_status: Some(ChecksumStatus::Unexpected),
+                    disposition: crate::models::FindingDisposition::Active,
+                    exception_id: None,
+                    trusted_file_id: None,
+                    policy_reason: None,
                     observed_at: Some("2026-08-25T10:00:00.000Z".into()),
                 }],
             }],
@@ -980,6 +1390,10 @@ mod tests {
                 detail: "Gebonden testfinding".into(),
                 path: Some(format!("wp-content/uploads/file-{index}.php")),
                 checksum_status: None,
+                disposition: crate::models::FindingDisposition::Active,
+                exception_id: None,
+                trusted_file_id: None,
+                policy_reason: None,
                 observed_at: None,
             })
             .collect();

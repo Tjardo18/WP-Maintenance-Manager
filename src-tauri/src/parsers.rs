@@ -51,6 +51,10 @@ pub fn parse_nul_paths(
                 },
                 path: Some(display_path(&path, wordpress_path)),
                 checksum_status: None,
+                disposition: crate::models::FindingDisposition::Active,
+                exception_id: None,
+                trusted_file_id: None,
+                policy_reason: None,
                 observed_at: None,
             }
         })
@@ -217,6 +221,10 @@ fn classify_php_file(
         },
         path: Some(display),
         checksum_status: None,
+        disposition: crate::models::FindingDisposition::Active,
+        exception_id: None,
+        trusted_file_id: None,
+        policy_reason: None,
         observed_at: modified_at.and_then(|timestamp| {
             chrono::DateTime::from_timestamp(timestamp, 0).map(|value| value.to_rfc3339())
         }),
@@ -297,6 +305,10 @@ pub fn parse_modified_files(output: &[u8], wordpress_path: &str) -> (Vec<Finding
             ),
             path: Some(display),
             checksum_status: None,
+            disposition: crate::models::FindingDisposition::Active,
+            exception_id: None,
+            trusted_file_id: None,
+            policy_reason: None,
             observed_at: None,
         });
     }
@@ -439,6 +451,10 @@ fn checksum_finding(path: &str, message: &str, observed_at: &str) -> Result<Find
         detail: message.into(),
         path: Some(path.into()),
         checksum_status: Some(status),
+        disposition: crate::models::FindingDisposition::Active,
+        exception_id: None,
+        trusted_file_id: None,
+        policy_reason: None,
         observed_at: Some(observed_at.into()),
     })
 }
@@ -480,6 +496,10 @@ pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
                 ),
                 path: None,
                 checksum_status: None,
+                disposition: crate::models::FindingDisposition::Active,
+                exception_id: None,
+                trusted_file_id: None,
+                policy_reason: None,
                 observed_at: None,
             }
         })
@@ -602,6 +622,10 @@ pub fn parse_config(output: &str) -> Result<Vec<Finding>, AppError> {
         },
         path: None,
         checksum_status: None,
+        disposition: crate::models::FindingDisposition::Active,
+        exception_id: None,
+        trusted_file_id: None,
+        policy_reason: None,
         observed_at: None,
     });
     Ok(findings)
@@ -778,6 +802,10 @@ fn config_finding(category: &str, title: &str, detail: &str) -> Finding {
         detail: detail.into(),
         path: None,
         checksum_status: None,
+        disposition: crate::models::FindingDisposition::Active,
+        exception_id: None,
+        trusted_file_id: None,
+        policy_reason: None,
         observed_at: None,
     }
 }

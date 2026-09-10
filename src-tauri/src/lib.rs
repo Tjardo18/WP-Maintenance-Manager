@@ -14,6 +14,7 @@ mod maintenance;
 mod models;
 mod parsers;
 mod scan_jobs;
+mod security_policy;
 mod ssh;
 mod state;
 mod terminal;
@@ -83,6 +84,13 @@ pub fn run() {
             commands::start_all_site_scans,
             commands::cancel_scan_jobs,
             commands::list_scan_runs,
+            commands::list_finding_exceptions,
+            commands::ignore_finding,
+            commands::remove_finding_exception,
+            commands::list_trusted_files,
+            commands::trust_finding_file,
+            commands::retrust_file,
+            commands::revoke_trusted_file,
             commands::preview_checksum_finding,
             commands::delete_checksum_finding,
             commands::delete_checksum_findings,

@@ -117,6 +117,10 @@ mod tests {
                 detail: "File should not exist".into(),
                 path: Some("wp-admin/extra.php".into()),
                 checksum_status: Some(ChecksumStatus::Unexpected),
+                disposition: crate::models::FindingDisposition::Active,
+                exception_id: None,
+                trusted_file_id: None,
+                policy_reason: None,
                 observed_at: Some("2026-08-31T10:00:00Z".into()),
             },
         }

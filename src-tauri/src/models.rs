@@ -339,6 +339,8 @@ pub struct ConnectionTestResult {
 pub enum FindingSeverity {
     Info,
     Attention,
+    Warning,
+    Critical,
     Problem,
 }
 
@@ -377,6 +379,8 @@ impl FindingSeverity {
         match self {
             Self::Info => "info",
             Self::Attention => "attention",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
             Self::Problem => "problem",
         }
     }
@@ -384,9 +388,54 @@ impl FindingSeverity {
     pub fn from_db(value: &str) -> Self {
         match value {
             "attention" => Self::Attention,
+            "warning" => Self::Warning,
+            "critical" => Self::Critical,
             "problem" => Self::Problem,
             _ => Self::Info,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingDisposition {
+    #[default]
+    Active,
+    Ignored,
+    Trusted,
+    ExpiredException,
+    TrustedChanged,
+    TrustedMissing,
+}
+
+impl FindingDisposition {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Ignored => "ignored",
+            Self::Trusted => "trusted",
+            Self::ExpiredException => "expired_exception",
+            Self::TrustedChanged => "trusted_changed",
+            Self::TrustedMissing => "trusted_missing",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "ignored" => Self::Ignored,
+            "trusted" => Self::Trusted,
+            "expired_exception" => Self::ExpiredException,
+            "trusted_changed" => Self::TrustedChanged,
+            "trusted_missing" => Self::TrustedMissing,
+            _ => Self::Active,
+        }
+    }
+
+    pub fn counts_as_active(self) -> bool {
+        matches!(
+            self,
+            Self::Active | Self::ExpiredException | Self::TrustedChanged
+        )
     }
 }
 
@@ -404,6 +453,132 @@ pub struct Finding {
     pub checksum_status: Option<ChecksumStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<String>,
+    #[serde(default)]
+    pub disposition: FindingDisposition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exception_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trusted_file_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FindingContext {
+    pub site_id: String,
+    pub scan_run_id: String,
+    pub check_type: String,
+    pub finding: Finding,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExceptionScope {
+    Site,
+}
+
+impl ExceptionScope {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Site => "site",
+        }
+    }
+
+    pub fn from_db(_value: &str) -> Self {
+        Self::Site
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingException {
+    pub id: String,
+    pub site_id: String,
+    pub site_name: String,
+    pub check_type: String,
+    pub finding_type: String,
+    pub target: String,
+    pub scope: ExceptionScope,
+    pub reason: String,
+    pub note: Option<String>,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingExceptionInput {
+    pub site_id: String,
+    pub finding_id: String,
+    pub expires_at: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustedFileStatus {
+    Trusted,
+    Changed,
+    Missing,
+    Unchecked,
+}
+
+impl TrustedFileStatus {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Changed => "changed",
+            Self::Missing => "missing",
+            Self::Unchecked => "unchecked",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "trusted" => Self::Trusted,
+            "changed" => Self::Changed,
+            "missing" => Self::Missing,
+            _ => Self::Unchecked,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedFile {
+    pub id: String,
+    pub site_id: String,
+    pub site_name: String,
+    pub relative_path: String,
+    pub trusted_sha256: String,
+    pub current_sha256: Option<String>,
+    pub size_bytes: u64,
+    pub current_size_bytes: Option<u64>,
+    pub modified_at_snapshot: Option<String>,
+    pub current_modified_at: Option<String>,
+    pub file_type: String,
+    pub status: TrustedFileStatus,
+    pub trusted_at: String,
+    pub last_checked_at: Option<String>,
+    pub note: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedFileInput {
+    pub site_id: String,
+    pub finding_id: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityPolicyMutationResult {
+    pub scan: Option<ScanResult>,
+    pub finding_exception: Option<FindingException>,
+    pub trusted_file: Option<TrustedFile>,
 }
 
 #[derive(Debug, Clone)]

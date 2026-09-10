@@ -7,17 +7,21 @@ use crate::{
     models::{
         AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteFailure,
         ChecksumDeleteResult, ConnectionStep, ConnectionTestResult, CoreOperationInfo,
-        CoreOperationKind, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview,
-        LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState,
-        ScanResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite, UpdateItem,
-        WordPressUserDeleteInput, WordPressUserUpdateInput, WordPressUsersData,
+        CoreOperationKind, CoreOperationResult, ErrorLogFilter, ErrorLogPage, ExceptionScope,
+        FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun,
+        MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult,
+        SecurityPolicyMutationResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite,
+        TrustedFile, TrustedFileInput, TrustedFileStatus, UpdateItem, WordPressUserDeleteInput,
+        WordPressUserUpdateInput, WordPressUsersData,
     },
+    security_policy,
     state::AppState,
     terminal::{TerminalConnectRequest, TerminalConnectionInfo, TerminalOpenInput},
     terminal_auth::TerminalChallengeInfo,
     validation::validate_site,
     wordpress_users, wp_cli, wp_cli_catalog,
 };
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use std::{
     collections::{HashSet, VecDeque},
@@ -1302,6 +1306,307 @@ pub fn list_scan_runs(
 }
 
 #[tauri::command(async)]
+pub fn list_finding_exceptions(
+    session_token: String,
+    site_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<FindingException>, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_optional_site_id(site_id.as_deref())?;
+    state.database.list_finding_exceptions(site_id.as_deref())
+}
+
+#[tauri::command(async)]
+pub fn ignore_finding(
+    session_token: String,
+    input: FindingExceptionInput,
+    state: State<'_, AppState>,
+) -> Result<SecurityPolicyMutationResult, AppError> {
+    require_auth(&state, &session_token)?;
+    let started = Instant::now();
+    let site_id = input.site_id.clone();
+    let result = ignore_finding_internal(&state, input);
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "Securitymelding negeren",
+        started,
+        result,
+    )
+}
+
+fn ignore_finding_internal(
+    state: &AppState,
+    input: FindingExceptionInput,
+) -> Result<SecurityPolicyMutationResult, AppError> {
+    validate_security_ids(&input.site_id, &input.finding_id)?;
+    let note = validate_policy_note(input.note)?;
+    let expires_at = validate_expiration(input.expires_at)?;
+    let context = state
+        .database
+        .get_finding_context(&input.site_id, &input.finding_id)?;
+    let target = security_policy::finding_target(&context.finding)?;
+    let finding_type = security_policy::finding_type(&context.finding);
+    let existing = state
+        .database
+        .list_finding_exceptions(Some(&input.site_id))?
+        .into_iter()
+        .find(|exception| {
+            exception.active
+                && exception.check_type == context.check_type
+                && exception.finding_type == finding_type
+                && exception.target == target
+        });
+    let now = crate::database::utc_now();
+    let exception = FindingException {
+        id: existing
+            .map(|exception| exception.id)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        site_id: input.site_id.clone(),
+        site_name: state.database.get_site(&input.site_id)?.site.name,
+        check_type: context.check_type,
+        finding_type,
+        target: target.clone(),
+        scope: ExceptionScope::Site,
+        reason: if expires_at.is_some() {
+            "Handmatig tijdelijk genegeerd".into()
+        } else {
+            "Handmatig genegeerd".into()
+        },
+        note,
+        created_at: now,
+        expires_at,
+        active: true,
+    };
+    state.database.save_finding_exception(&exception)?;
+    state.database.save_audit_event(
+        Some(&input.site_id),
+        "finding_ignored",
+        &target,
+        "success",
+        Some(&format!(
+            "scan_id={}; check_type={}; finding_type={}; expires_at={}",
+            context.scan_run_id,
+            exception.check_type,
+            exception.finding_type,
+            exception.expires_at.as_deref().unwrap_or("never")
+        )),
+    )?;
+    Ok(SecurityPolicyMutationResult {
+        scan: reapply_latest_policy(state, &input.site_id)?,
+        finding_exception: Some(exception),
+        trusted_file: None,
+    })
+}
+
+#[tauri::command(async)]
+pub fn remove_finding_exception(
+    session_token: String,
+    exception_id: String,
+    state: State<'_, AppState>,
+) -> Result<SecurityPolicyMutationResult, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_uuid(&exception_id, "De uitzondering-id is ongeldig.")?;
+    let site_id = state.database.deactivate_finding_exception(&exception_id)?;
+    state.database.save_audit_event(
+        Some(&site_id),
+        "finding_unignored",
+        &exception_id,
+        "success",
+        None,
+    )?;
+    Ok(SecurityPolicyMutationResult {
+        scan: reapply_latest_policy(&state, &site_id)?,
+        finding_exception: None,
+        trusted_file: None,
+    })
+}
+
+#[tauri::command(async)]
+pub fn list_trusted_files(
+    session_token: String,
+    site_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<TrustedFile>, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_optional_site_id(site_id.as_deref())?;
+    state.database.list_trusted_files(site_id.as_deref())
+}
+
+#[tauri::command(async)]
+pub fn trust_finding_file(
+    session_token: String,
+    input: TrustedFileInput,
+    state: State<'_, AppState>,
+) -> Result<SecurityPolicyMutationResult, AppError> {
+    require_auth(&state, &session_token)?;
+    let started = Instant::now();
+    let site_id = input.site_id.clone();
+    let result = trust_finding_file_internal(&state, input);
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "Bestandsfingerprint vertrouwen",
+        started,
+        result,
+    )
+}
+
+fn trust_finding_file_internal(
+    state: &AppState,
+    input: TrustedFileInput,
+) -> Result<SecurityPolicyMutationResult, AppError> {
+    validate_security_ids(&input.site_id, &input.finding_id)?;
+    let note = validate_policy_note(input.note)?;
+    let context = state
+        .database
+        .get_finding_context(&input.site_id, &input.finding_id)?;
+    if matches!(
+        context.finding.checksum_status,
+        Some(crate::models::ChecksumStatus::Missing | crate::models::ChecksumStatus::ScanError)
+    ) {
+        return Err(AppError::validation(
+            "Een ontbrekend of niet gecontroleerd bestand kan niet worden vertrouwd.",
+        ));
+    }
+    let relative_path = context
+        .finding
+        .path
+        .as_deref()
+        .ok_or_else(|| AppError::validation("Deze melding verwijst niet naar een bestand."))
+        .and_then(security_policy::normalize_relative_path)?;
+    let stored = state.database.get_site(&input.site_id)?;
+    let credential = stored_credential_from_state(state, &stored)?;
+    let fingerprint = state
+        .ssh
+        .fingerprint_file(&stored.site, credential.as_deref(), &relative_path)?
+        .ok_or_else(|| AppError::validation("Het bestand bestaat niet meer op de server."))?;
+    let now = crate::database::utc_now();
+    let existing = state
+        .database
+        .active_trusted_file(&input.site_id, &relative_path)?;
+    let trusted = TrustedFile {
+        id: existing
+            .as_ref()
+            .map(|trusted| trusted.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        site_id: input.site_id.clone(),
+        site_name: stored.site.name,
+        relative_path: fingerprint.relative_path,
+        trusted_sha256: fingerprint.sha256.clone(),
+        current_sha256: Some(fingerprint.sha256),
+        size_bytes: fingerprint.size_bytes,
+        current_size_bytes: Some(fingerprint.size_bytes),
+        modified_at_snapshot: remote_timestamp(fingerprint.modified_unix),
+        current_modified_at: remote_timestamp(fingerprint.modified_unix),
+        file_type: fingerprint.file_type,
+        status: TrustedFileStatus::Trusted,
+        trusted_at: now.clone(),
+        last_checked_at: Some(now),
+        note: note.or_else(|| existing.and_then(|trusted| trusted.note)),
+        active: true,
+    };
+    state.database.save_trusted_file(&trusted)?;
+    state.database.save_audit_event(
+        Some(&context.site_id),
+        "file_trusted",
+        &relative_path,
+        "success",
+        Some(&format!(
+            "scan_id={}; finding_id={}; algorithm=sha256",
+            context.scan_run_id, input.finding_id
+        )),
+    )?;
+    Ok(SecurityPolicyMutationResult {
+        scan: reapply_latest_policy(state, &input.site_id)?,
+        finding_exception: None,
+        trusted_file: Some(trusted),
+    })
+}
+
+#[tauri::command(async)]
+pub fn retrust_file(
+    session_token: String,
+    trusted_file_id: String,
+    state: State<'_, AppState>,
+) -> Result<SecurityPolicyMutationResult, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_uuid(&trusted_file_id, "De trustregistratie-id is ongeldig.")?;
+    let started = Instant::now();
+    let initial = state.database.get_trusted_file(&trusted_file_id)?;
+    let site_id = initial.site_id.clone();
+    let result = (|| {
+        if !initial.active {
+            return Err(AppError::validation(
+                "Deze trustregistratie is al ingetrokken.",
+            ));
+        }
+        let stored = state.database.get_site(&initial.site_id)?;
+        let credential = stored_credential_from_state(&state, &stored)?;
+        let fingerprint = state
+            .ssh
+            .fingerprint_file(&stored.site, credential.as_deref(), &initial.relative_path)?
+            .ok_or_else(|| AppError::validation("Het bestand bestaat niet meer op de server."))?;
+        let now = crate::database::utc_now();
+        let mut trusted = initial;
+        trusted.trusted_sha256 = fingerprint.sha256.clone();
+        trusted.current_sha256 = Some(fingerprint.sha256);
+        trusted.size_bytes = fingerprint.size_bytes;
+        trusted.current_size_bytes = Some(fingerprint.size_bytes);
+        trusted.modified_at_snapshot = remote_timestamp(fingerprint.modified_unix);
+        trusted.current_modified_at = remote_timestamp(fingerprint.modified_unix);
+        trusted.file_type = fingerprint.file_type;
+        trusted.status = TrustedFileStatus::Trusted;
+        trusted.trusted_at = now.clone();
+        trusted.last_checked_at = Some(now);
+        state.database.save_trusted_file(&trusted)?;
+        state.database.save_audit_event(
+            Some(&trusted.site_id),
+            "trusted_fingerprint_updated",
+            &trusted.relative_path,
+            "success",
+            Some("algorithm=sha256"),
+        )?;
+        Ok(SecurityPolicyMutationResult {
+            scan: reapply_latest_policy(&state, &trusted.site_id)?,
+            finding_exception: None,
+            trusted_file: Some(trusted),
+        })
+    })();
+    log_operation_error(
+        &state,
+        Some(&site_id),
+        "Vertrouwde fingerprint vernieuwen",
+        started,
+        result,
+    )
+}
+
+#[tauri::command(async)]
+pub fn revoke_trusted_file(
+    session_token: String,
+    trusted_file_id: String,
+    state: State<'_, AppState>,
+) -> Result<SecurityPolicyMutationResult, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_uuid(&trusted_file_id, "De trustregistratie-id is ongeldig.")?;
+    let trusted = state.database.get_trusted_file(&trusted_file_id)?;
+    let site_id = state.database.deactivate_trusted_file(&trusted_file_id)?;
+    state.database.save_audit_event(
+        Some(&site_id),
+        "trust_revoked",
+        &trusted.relative_path,
+        "success",
+        None,
+    )?;
+    Ok(SecurityPolicyMutationResult {
+        scan: reapply_latest_policy(&state, &site_id)?,
+        finding_exception: None,
+        trusted_file: None,
+    })
+}
+
+#[tauri::command(async)]
 pub fn preview_checksum_finding(
     session_token: String,
     site_id: String,
@@ -1519,6 +1824,212 @@ fn save_checksum_audit(
     }
 }
 
+fn validate_optional_site_id(site_id: Option<&str>) -> Result<(), AppError> {
+    if let Some(site_id) = site_id {
+        validate_uuid(site_id, "De website-id is ongeldig.")?;
+    }
+    Ok(())
+}
+
+fn validate_security_ids(site_id: &str, finding_id: &str) -> Result<(), AppError> {
+    validate_uuid(site_id, "De website-id is ongeldig.")?;
+    validate_uuid(finding_id, "De securitymelding-id is ongeldig.")
+}
+
+fn validate_uuid(value: &str, message: &str) -> Result<(), AppError> {
+    uuid::Uuid::parse_str(value)
+        .map(|_| ())
+        .map_err(|_| AppError::validation(message))
+}
+
+fn validate_expiration(expires_at: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(expires_at) = expires_at else {
+        return Ok(None);
+    };
+    let parsed = DateTime::parse_from_rfc3339(expires_at.trim()).map_err(|_| {
+        AppError::validation("De verloopdatum moet een geldige datum met tijdzone zijn.")
+    })?;
+    if parsed <= Utc::now() {
+        return Err(AppError::validation(
+            "De verloopdatum moet in de toekomst liggen.",
+        ));
+    }
+    Ok(Some(
+        parsed
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
+    ))
+}
+
+fn validate_policy_note(note: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(note) = note else {
+        return Ok(None);
+    };
+    let note = note.trim();
+    if note.is_empty() {
+        return Ok(None);
+    }
+    if note.chars().count() > 500 || note.chars().any(char::is_control) {
+        return Err(AppError::validation(
+            "De notitie mag maximaal 500 geldige tekens bevatten.",
+        ));
+    }
+    let lower = note.to_ascii_lowercase();
+    if [
+        "password",
+        "wachtwoord",
+        "secret",
+        "token",
+        "private key",
+        "api_key",
+        "apikey",
+        "db_password",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return Err(AppError::validation(
+            "Sla geen wachtwoorden, tokens, sleutels of andere geheimen op in een notitie.",
+        ));
+    }
+    Ok(Some(note.to_owned()))
+}
+
+fn remote_timestamp(timestamp: Option<u64>) -> Option<String> {
+    timestamp
+        .and_then(|timestamp| i64::try_from(timestamp).ok())
+        .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+fn reapply_latest_policy(state: &AppState, site_id: &str) -> Result<Option<ScanResult>, AppError> {
+    let Some(mut scan) = state.database.latest_scan(site_id)? else {
+        return Ok(None);
+    };
+    let exceptions = state.database.list_finding_exceptions(Some(site_id))?;
+    let trusted_files = state.database.list_trusted_files(Some(site_id))?;
+    let security_status = security_policy::apply_scan_policy(
+        site_id,
+        &mut scan.checks,
+        &exceptions,
+        &trusted_files,
+        Utc::now(),
+    );
+    scan.status = security_policy::calculate_site_status(&scan.checks);
+    state.database.update_scan_policy(&scan, &security_status)?;
+    Ok(Some(scan))
+}
+
+fn refresh_trusted_file_observations(
+    state: &AppState,
+    stored: &StoredSite,
+    credential: Option<&str>,
+) -> Result<Vec<TrustedFile>, AppError> {
+    let trusted_files: Vec<TrustedFile> = state
+        .database
+        .list_trusted_files(Some(&stored.site.id))?
+        .into_iter()
+        .filter(|trusted| trusted.active)
+        .collect();
+    if trusted_files.is_empty() {
+        return Ok(trusted_files);
+    }
+    let paths: Vec<String> = trusted_files
+        .iter()
+        .map(|trusted| trusted.relative_path.clone())
+        .collect();
+    let checked_at = crate::database::utc_now();
+    match state
+        .ssh
+        .fingerprint_files(&stored.site, credential, &paths)
+    {
+        Ok(observations) => {
+            for observation in observations {
+                let Some(trusted) = trusted_files
+                    .iter()
+                    .find(|trusted| trusted.relative_path == observation.relative_path)
+                else {
+                    continue;
+                };
+                if let Some(error) = observation.error {
+                    state.database.update_trusted_observation(
+                        &trusted.id,
+                        None,
+                        None,
+                        None,
+                        TrustedFileStatus::Unchecked,
+                        &checked_at,
+                    )?;
+                    persist_trust_hash_error(state, stored, trusted, error);
+                } else if let Some(fingerprint) = observation.fingerprint {
+                    let status = if fingerprint.sha256 == trusted.trusted_sha256
+                        && fingerprint.file_type == trusted.file_type
+                    {
+                        TrustedFileStatus::Trusted
+                    } else {
+                        TrustedFileStatus::Changed
+                    };
+                    state.database.update_trusted_observation(
+                        &trusted.id,
+                        Some(&fingerprint.sha256),
+                        Some(fingerprint.size_bytes),
+                        remote_timestamp(fingerprint.modified_unix).as_deref(),
+                        status,
+                        &checked_at,
+                    )?;
+                } else {
+                    state.database.update_trusted_observation(
+                        &trusted.id,
+                        None,
+                        None,
+                        None,
+                        TrustedFileStatus::Missing,
+                        &checked_at,
+                    )?;
+                }
+            }
+        }
+        Err(error) => {
+            for trusted in &trusted_files {
+                state.database.update_trusted_observation(
+                    &trusted.id,
+                    None,
+                    None,
+                    None,
+                    TrustedFileStatus::Unchecked,
+                    &checked_at,
+                )?;
+                persist_trust_hash_error(state, stored, trusted, error.clone());
+            }
+        }
+    }
+    state.database.list_trusted_files(Some(&stored.site.id))
+}
+
+fn persist_trust_hash_error(
+    state: &AppState,
+    stored: &StoredSite,
+    trusted: &TrustedFile,
+    error: AppError,
+) {
+    let _ = error_log::persist_error(
+        &state.database,
+        Some(&stored.site.id),
+        Some(&stored.site.name),
+        "trust_hash_failed",
+        None,
+        None,
+        error,
+    );
+    let _ = state.database.save_audit_event(
+        Some(&stored.site.id),
+        "trust_hash_failed",
+        &trusted.relative_path,
+        "failed",
+        None,
+    );
+}
+
 fn scan_site_internal(
     state: &AppState,
     site_id: &str,
@@ -1538,7 +2049,7 @@ fn scan_site_internal_with_progress(
     crate::validation::validate_days(modified_days)?;
     let stored = state.database.get_site(site_id)?;
     let credential = stored_credential_from_state(state, &stored)?;
-    let outcome = match engine::scan_site_with_progress(
+    let mut outcome = match engine::scan_site_with_progress(
         state.ssh.as_ref(),
         &stored,
         credential.as_deref(),
@@ -1560,6 +2071,16 @@ fn scan_site_internal_with_progress(
             return Err(error);
         }
     };
+    let trusted_files = refresh_trusted_file_observations(state, &stored, credential.as_deref())?;
+    let exceptions = state.database.list_finding_exceptions(Some(site_id))?;
+    outcome.security_status = security_policy::apply_scan_policy(
+        site_id,
+        &mut outcome.result.checks,
+        &exceptions,
+        &trusted_files,
+        Utc::now(),
+    );
+    outcome.result.status = security_policy::calculate_site_status(&outcome.result.checks);
     state
         .database
         .update_versions(site_id, &outcome.wordpress_version, &outcome.php_version)?;
@@ -2578,6 +3099,10 @@ mod tests {
             detail: "File should not exist".into(),
             path: Some(path.into()),
             checksum_status: Some(ChecksumStatus::Unexpected),
+            disposition: crate::models::FindingDisposition::Active,
+            exception_id: None,
+            trusted_file_id: None,
+            policy_reason: None,
             observed_at: Some("2026-08-31T10:00:00Z".into()),
         };
         database
