@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
-import { DatabaseBackup, Gauge, Info, LockKeyhole, Save, ShieldCheck } from "@lucide/vue";
+import { computed, onMounted, ref } from "vue";
+import { DatabaseBackup, Gauge, Info, KeyRound, LockKeyhole, Save, ShieldCheck, Trash2 } from "@lucide/vue";
 import { appApi } from "../services/tauri";
+import type { WordfenceIntegrationStatus } from "../types";
 import { errorMessage } from "../utils/errors";
 import { useAuthStore } from "../stores/auth";
 
@@ -11,23 +12,48 @@ const idleMinutes = ref(15);
 const saved = ref(false);
 const saving = ref(false);
 const passwordBusy = ref(false);
+const integrationBusy = ref<"save" | "remove">();
 const currentPassword = ref("");
 const newPassword = ref("");
 const repeatedPassword = ref("");
+const wordfenceApiKey = ref("");
+const wordfence = ref<WordfenceIntegrationStatus>();
+const integrationMessage = ref<string>();
 const error = ref<string>();
 
-onMounted(async () => { idleMinutes.value = auth.idleTimeoutMinutes; try { const settings = await appApi.getSettings(); concurrency.value = settings.scanConcurrency; } catch (cause) { error.value = errorMessage(cause); } });
+const wordfenceStatusLabel = computed(() => wordfence.value?.configured ? "Ingesteld" : "Niet geconfigureerd");
+
+onMounted(async () => {
+  idleMinutes.value = auth.idleTimeoutMinutes;
+  try {
+    const [settings, status] = await Promise.all([appApi.getSettings(), appApi.getWordfenceStatus()]);
+    concurrency.value = settings.scanConcurrency;
+    wordfence.value = status;
+  } catch (cause) { error.value = errorMessage(cause); }
+});
+
 async function save() { saving.value = true; error.value = undefined; try { const settings = await appApi.saveSettings({ scanConcurrency: concurrency.value }); await auth.updateIdleTimeout(idleMinutes.value); concurrency.value = settings.scanConcurrency; saved.value = true; setTimeout(() => saved.value = false, 2000); } catch (cause) { error.value = errorMessage(cause); } finally { saving.value = false; } }
 async function changePassword() { if (newPassword.value !== repeatedPassword.value || newPassword.value.length < 12) return; passwordBusy.value = true; error.value = undefined; try { await auth.changePassword(currentPassword.value, newPassword.value); } catch (cause) { error.value = errorMessage(cause); } finally { passwordBusy.value = false; } }
+async function saveWordfenceKey() { integrationBusy.value = "save"; error.value = undefined; integrationMessage.value = undefined; try { wordfence.value = await appApi.saveWordfenceApiKey(wordfenceApiKey.value); wordfenceApiKey.value = ""; integrationMessage.value = "API-sleutel veilig opgeslagen. Test nu de verbinding."; } catch (cause) { error.value = errorMessage(cause); } finally { integrationBusy.value = undefined; } }
+async function removeWordfenceKey() { integrationBusy.value = "remove"; error.value = undefined; integrationMessage.value = undefined; try { wordfence.value = await appApi.removeWordfenceApiKey(); wordfenceApiKey.value = ""; integrationMessage.value = "API-sleutel verwijderd. Een bestaande lokale database blijft behouden."; } catch (cause) { error.value = errorMessage(cause); } finally { integrationBusy.value = undefined; } }
 </script>
+
 <template>
-  <section class="page-heading"><div><h2>Instellingen</h2><p>Veilige grenzen voor verbindingen, scans en lokale backups.</p></div></section>
+  <section class="page-heading"><div><h2>Instellingen</h2><p>Veilige grenzen voor verbindingen, scans, integraties en lokale backups.</p></div></section>
   <div class="settings-grid">
+    <section class="card form-card integration-card">
+      <div class="section-heading"><span class="section-icon"><KeyRound /></span><div><small class="section-kicker">Integraties</small><h3>Wordfence Intelligence</h3><p>Controleer WordPress Core, plugins en thema's lokaal op bekende kwetsbaarheden.</p></div><span :class="['integration-status', { configured: wordfence?.configured }]">● {{ wordfenceStatusLabel }}</span></div>
+      <div class="integration-body">
+        <label><span>API-sleutel</span><input v-model="wordfenceApiKey" type="password" autocomplete="new-password" :placeholder="wordfence?.configured ? 'Nieuwe API-sleutel invoeren' : 'Plak hier je Wordfence API-sleutel'" maxlength="512" /><small>De sleutel gaat rechtstreeks naar de beveiligde opslag van Windows en wordt niet in SQLite of de interface bewaard.</small></label>
+        <div class="integration-actions"><button class="button primary" :disabled="integrationBusy !== undefined || !wordfenceApiKey.trim()" @click="saveWordfenceKey"><Save :size="16" /> {{ integrationBusy === 'save' ? 'Opslaan…' : wordfence?.configured ? 'API-sleutel vervangen' : 'Opslaan' }}</button><button v-if="wordfence?.configured" class="button danger-text" :disabled="integrationBusy !== undefined" @click="removeWordfenceKey"><Trash2 :size="16" /> {{ integrationBusy === 'remove' ? 'Verwijderen…' : 'API-sleutel verwijderen' }}</button></div>
+        <p v-if="integrationMessage" class="saved-copy integration-message">{{ integrationMessage }}</p>
+      </div>
+    </section>
     <section class="card form-card"><div class="section-heading"><span class="section-icon"><Gauge /></span><div><h3>Verbindingen</h3><p>Voorkom dat de computer of hostingservers overbelast raken.</p></div></div><div class="form-grid"><label><span>Gelijktijdige scans</span><input v-model.number="concurrency" type="number" min="1" max="5" /><small>Rust dwingt altijd een maximum van 5 SSH-verbindingen af.</small></label><div class="notice"><Info :size="18" /><p>Iedere catalogusactie gebruikt een eigen veilige time-out op basis van het type controle of update.</p></div></div></section>
     <section class="card form-card"><div class="section-heading"><span class="section-icon"><DatabaseBackup /></span><div><h3>Lokale backups</h3><p>Databasebackups staan buiten de website en worden lokaal gecomprimeerd.</p></div></div><div class="notice"><Info :size="18" /><p>De backuplocatie wordt beheerd in de applicatiedatamap. Runtimebackups en databases worden nooit door Git gevolgd.</p></div></section>
-    <section class="card form-card"><div class="section-heading"><span class="section-icon"><LockKeyhole /></span><div><h3>Credentials</h3><p>Wachtwoorden en passphrases staan in de beveiligde opslag van het besturingssysteem.</p></div></div><div class="notice safe"><LockKeyhole :size="18" /><p>De SQLite-database bevat uitsluitend onleesbare verwijzingen. Geheime waarden worden nooit teruggestuurd naar de interface.</p></div></section>
+    <section class="card form-card"><div class="section-heading"><span class="section-icon"><LockKeyhole /></span><div><h3>Credentials</h3><p>Wachtwoorden, passphrases en API-sleutels staan in de beveiligde opslag van het besturingssysteem.</p></div></div><div class="notice safe"><LockKeyhole :size="18" /><p>De SQLite-database bevat geen geheime waarden. Credentials worden nooit teruggestuurd naar de interface.</p></div></section>
     <section class="card form-card"><div class="section-heading"><span class="section-icon"><ShieldCheck /></span><div><h3>Beveiliging</h3><p>De backend blokkeert sitegegevens en beheeracties zonder geldige sessie.</p></div></div><div class="form-grid"><label><span>Automatisch vergrendelen na</span><select v-model.number="idleMinutes"><option :value="5">5 minuten</option><option :value="10">10 minuten</option><option :value="15">15 minuten</option><option :value="30">30 minuten</option><option :value="60">1 uur</option></select></label><div class="notice"><Info :size="18" /><p>Na volledig afsluiten of herstarten moet je altijd opnieuw inloggen. Actieve muterende backendacties mogen bij vergrendeling veilig afronden.</p></div></div><form class="password-change" @submit.prevent="changePassword"><h4>Wachtwoord wijzigen</h4><div class="form-grid three"><label><span>Huidig wachtwoord</span><input v-model="currentPassword" type="password" autocomplete="current-password" required /></label><label><span>Nieuw wachtwoord</span><input v-model="newPassword" type="password" autocomplete="new-password" minlength="12" required /></label><label><span>Herhaal nieuw wachtwoord</span><input v-model="repeatedPassword" type="password" autocomplete="new-password" minlength="12" required /></label></div><p v-if="repeatedPassword && newPassword !== repeatedPassword" class="field-error">De nieuwe wachtwoorden zijn niet gelijk.</p><button class="button secondary" type="submit" :disabled="passwordBusy || newPassword.length < 12 || newPassword !== repeatedPassword">{{ passwordBusy ? 'Wijzigen…' : 'Wachtwoord wijzigen' }}</button></form><div class="security-lock-row"><p>Vergrendel direct en wis gevoelige UI-state.</p><button class="button danger-text" @click="auth.lock"><LockKeyhole :size="16" /> Nu vergrendelen</button></div></section>
   </div>
   <p v-if="error" class="error-banner">{{ error }}</p>
-  <div class="form-actions"><span v-if="saved" class="saved-copy">Instellingen opgeslagen</span><button class="button primary" :disabled="saving || concurrency < 1 || concurrency > 5" @click="save"><Save :size="17" /> {{ saving ? 'Opslaan…' : 'Opslaan' }}</button></div>
+  <div class="form-actions"><span v-if="saved" class="saved-copy">Instellingen opgeslagen</span><button class="button primary" :disabled="saving || concurrency < 1 || concurrency > 5" @click="save"><Save :size="17" /> {{ saving ? 'Opslaan…' : 'Algemene instellingen opslaan' }}</button></div>
 </template>

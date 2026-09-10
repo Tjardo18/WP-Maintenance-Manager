@@ -20,6 +20,7 @@ mod state;
 mod terminal;
 mod terminal_auth;
 mod validation;
+mod wordfence;
 mod wordpress_users;
 mod wp_cli;
 mod wp_cli_catalog;
@@ -96,6 +97,9 @@ pub fn run() {
             commands::delete_checksum_findings,
             commands::get_settings,
             commands::save_settings,
+            commands::get_wordfence_status,
+            commands::save_wordfence_api_key,
+            commands::remove_wordfence_api_key,
             commands::check_updates,
             commands::list_cached_updates,
             commands::list_wordpress_users,

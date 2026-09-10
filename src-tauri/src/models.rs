@@ -838,3 +838,19 @@ pub struct BulkScanStart {
 pub struct AppSettings {
     pub scan_concurrency: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WordfenceIntegrationStatus {
+    pub configured: bool,
+    pub connection_status: String,
+    pub feed_status: String,
+    pub last_successful_update_at: Option<String>,
+    pub next_automatic_update_at: Option<String>,
+    pub vulnerability_count: u64,
+    pub software_record_count: u64,
+    pub refresh_running: bool,
+    pub refresh_phase: Option<String>,
+    pub cooldown_remaining_seconds: u64,
+    pub last_error: Option<String>,
+}

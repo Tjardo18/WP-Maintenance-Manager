@@ -90,6 +90,7 @@ export interface UpdateItem { kind: "core" | "plugin" | "theme" | "language"; sl
 export interface MaintenanceStep { key: string; label: string; status: StepStatus; detail?: string }
 export interface MaintenanceRun { id: string; siteId: string; siteName?: string; startedAt: string; finishedAt?: string; status: StepStatus; durationMs?: number; backupPath?: string; steps: MaintenanceStep[]; beforeVersions?: string; afterVersions?: string }
 export interface AppSettings { scanConcurrency: number }
+export interface WordfenceIntegrationStatus { configured: boolean; connectionStatus: "not_tested" | "connected" | "failed"; feedStatus: "missing" | "current" | "stale" | "refreshing" | "failed"; lastSuccessfulUpdateAt?: string; nextAutomaticUpdateAt?: string; vulnerabilityCount: number; softwareRecordCount: number; refreshRunning: boolean; refreshPhase?: string; cooldownRemainingSeconds: number; lastError?: string }
 export interface AuthStatus { configured: boolean; authenticated: boolean; idleTimeoutMinutes: number; retryAfterSeconds: number }
 export interface LoginResult { sessionToken: string; idleTimeoutMinutes: number }
 export interface PasswordChangeInput { currentPassword: string; newPassword: string }

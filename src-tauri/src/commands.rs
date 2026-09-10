@@ -12,14 +12,14 @@ use crate::{
         MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult,
         SecurityPolicyMutationResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite,
         TrustedFile, TrustedFileInput, TrustedFileStatus, UpdateItem, WordPressUserDeleteInput,
-        WordPressUserUpdateInput, WordPressUsersData,
+        WordPressUserUpdateInput, WordPressUsersData, WordfenceIntegrationStatus,
     },
     security_policy,
     state::AppState,
     terminal::{TerminalConnectRequest, TerminalConnectionInfo, TerminalOpenInput},
     terminal_auth::TerminalChallengeInfo,
     validation::validate_site,
-    wordpress_users, wp_cli, wp_cli_catalog,
+    wordfence, wordpress_users, wp_cli, wp_cli_catalog,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
@@ -2149,6 +2149,51 @@ pub fn save_settings(
         .store(settings.scan_concurrency, Ordering::SeqCst);
     state.scan_jobs.set_concurrency(settings.scan_concurrency);
     Ok(settings)
+}
+
+#[tauri::command(async)]
+pub fn get_wordfence_status(
+    session_token: String,
+    state: State<'_, AppState>,
+) -> Result<WordfenceIntegrationStatus, AppError> {
+    require_auth(&state, &session_token)?;
+    wordfence::integration_status(&state.credentials)
+}
+
+#[tauri::command(async)]
+pub fn save_wordfence_api_key(
+    session_token: String,
+    api_key: String,
+    state: State<'_, AppState>,
+) -> Result<WordfenceIntegrationStatus, AppError> {
+    require_auth(&state, &session_token)?;
+    let api_key = Zeroizing::new(api_key);
+    wordfence::save_api_key(&state.credentials, &api_key)?;
+    state.database.save_audit_event(
+        None,
+        "wordfence_key_saved",
+        "wordfence_intelligence",
+        "success",
+        Some("Wordfence API-sleutel opgeslagen in de beveiligde credentialopslag"),
+    )?;
+    wordfence::integration_status(&state.credentials)
+}
+
+#[tauri::command(async)]
+pub fn remove_wordfence_api_key(
+    session_token: String,
+    state: State<'_, AppState>,
+) -> Result<WordfenceIntegrationStatus, AppError> {
+    require_auth(&state, &session_token)?;
+    wordfence::remove_api_key(&state.credentials)?;
+    state.database.save_audit_event(
+        None,
+        "wordfence_key_removed",
+        "wordfence_intelligence",
+        "success",
+        Some("Wordfence API-sleutel uit de beveiligde credentialopslag verwijderd"),
+    )?;
+    wordfence::integration_status(&state.credentials)
 }
 
 #[tauri::command(async)]

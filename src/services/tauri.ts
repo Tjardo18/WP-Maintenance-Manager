@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import { demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -16,6 +16,7 @@ const browserScanJobListeners = new Set<(job: ScanJobState) => void>();
 const browserExceptions: FindingException[] = [];
 const browserTrustedFiles: TrustedFile[] = [];
 const browserScans = new Map<string, ScanResult>();
+let browserWordfenceConfigured = false;
 
 function browserScan(siteId: string) {
   const existing = browserScans.get(siteId);
@@ -238,6 +239,9 @@ export const appApi = {
   async onMaintenanceProgress(handler: (payload: { siteId: string; runId: string; step: MaintenanceStep }) => void): Promise<UnlistenFn> { if (!isTauri()) return () => undefined; return listen("maintenance-progress", (event) => handler(event.payload as { siteId: string; runId: string; step: MaintenanceStep })); },
   async getSettings(): Promise<AppSettings> { return isTauri() ? call("get_settings") : { scanConcurrency: 4 }; },
   async saveSettings(settings: AppSettings): Promise<AppSettings> { return isTauri() ? call("save_settings", { settings }) : settings; },
+  async getWordfenceStatus(): Promise<WordfenceIntegrationStatus> { return isTauri() ? call("get_wordfence_status") : { configured: browserWordfenceConfigured, connectionStatus: "not_tested", feedStatus: "missing", vulnerabilityCount: 0, softwareRecordCount: 0, refreshRunning: false, cooldownRemainingSeconds: 0 }; },
+  async saveWordfenceApiKey(apiKey: string): Promise<WordfenceIntegrationStatus> { if (isTauri()) return call("save_wordfence_api_key", { apiKey }); browserWordfenceConfigured = Boolean(apiKey.trim()); return appApi.getWordfenceStatus(); },
+  async removeWordfenceApiKey(): Promise<WordfenceIntegrationStatus> { if (isTauri()) return call("remove_wordfence_api_key"); browserWordfenceConfigured = false; return appApi.getWordfenceStatus(); },
   async listAuditEvents(siteId?: string): Promise<AuditEvent[]> { return isTauri() ? call("list_audit_events", { siteId: siteId ?? null }) : []; },
   async listErrorLogs(filter: ErrorLogFilter = {}): Promise<ErrorLogPage> { return isTauri() ? call("list_error_logs", { filter }) : { records: [], total: 0, limit: filter.limit ?? 50, offset: filter.offset ?? 0 }; },
 };
