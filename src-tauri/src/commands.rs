@@ -34,6 +34,7 @@ use std::{
     time::Instant,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
 
 #[tauri::command(async)]
@@ -2333,6 +2334,44 @@ pub fn match_cached_component_vulnerabilities(
     )
 }
 
+#[tauri::command(async)]
+pub fn open_vulnerability_reference(
+    session_token: String,
+    url: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    require_auth(&state, &session_token)?;
+    let reference = validate_external_reference(&url)?;
+    app.opener()
+        .open_url(reference.as_str(), None::<&str>)
+        .map_err(|error| AppError {
+            error_id: None,
+            category: "application".into(),
+            user_message: "De externe referentie kon niet veilig worden geopend.".into(),
+            technical_details: Some(error.to_string()),
+            retryable: true,
+        })
+}
+
+fn validate_external_reference(value: &str) -> Result<url::Url, AppError> {
+    if value.len() > 4_096 || value.chars().any(char::is_control) {
+        return Err(AppError::validation("De externe referentie is ongeldig."));
+    }
+    let parsed = url::Url::parse(value)
+        .map_err(|_| AppError::validation("De externe referentie is ongeldig."))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(AppError::validation(
+            "Alleen veilige HTTP- en HTTPS-referenties kunnen worden geopend.",
+        ));
+    }
+    Ok(parsed)
+}
+
 pub(crate) fn start_wordfence_feed_refresh_internal(
     app: AppHandle,
     automatic: bool,
@@ -3210,6 +3249,24 @@ mod tests {
             assert!(
                 function_prefix.contains("require_auth("),
                 "Tauri command {name} mist backend-authenticatie"
+            );
+        }
+    }
+
+    #[test]
+    fn vulnerability_references_only_allow_safe_web_urls() {
+        assert!(validate_external_reference("https://www.wordfence.com/threat-intel/test").is_ok());
+        assert!(validate_external_reference("http://legacy.example.test/advisory").is_ok());
+        for unsafe_url in [
+            "javascript:alert(1)",
+            "file:///C:/Windows/System32/calc.exe",
+            "custom://execute",
+            "https://user:password@example.test/private",
+            "https://example.test/path\nnext",
+        ] {
+            assert!(
+                validate_external_reference(unsafe_url).is_err(),
+                "{unsafe_url}"
             );
         }
     }

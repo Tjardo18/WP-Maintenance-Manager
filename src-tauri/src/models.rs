@@ -978,7 +978,15 @@ pub struct VulnerabilityMatch {
     #[serde(flatten)]
     pub vulnerability: VulnerabilityCandidate,
     pub installed_version: String,
+    #[serde(default = "unknown_software_status")]
+    pub installed_status: String,
+    #[serde(default)]
+    pub update_version: Option<String>,
     pub matched_ranges: Vec<String>,
+}
+
+fn unknown_software_status() -> String {
+    "unknown".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

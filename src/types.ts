@@ -63,7 +63,10 @@ export interface ScanCheck { key: string; label: string; status: StepStatus; sum
 export type ChecksumStatus = "modified" | "missing" | "unexpected" | "scan_error";
 export type FindingSeverity = "info" | "attention" | "warning" | "critical" | "problem";
 export type FindingDisposition = "active" | "ignored" | "trusted" | "expired_exception" | "trusted_changed" | "trusted_missing";
-export interface Finding { id?: string; category: string; severity: FindingSeverity; title: string; detail: string; path?: string; checksumStatus?: ChecksumStatus; observedAt?: string; disposition?: FindingDisposition; exceptionId?: string; trustedFileId?: string; policyReason?: string }
+export interface AffectedVersionRange { label: string; fromVersion: string; fromInclusive: boolean; toVersion: string; toInclusive: boolean }
+export interface VulnerabilityCandidate { provider: string; vulnerabilityId: string; title: string; description?: string; informational: boolean; cve?: string; cveLink?: string; published?: string; updated?: string; cvssVector?: string; cvssScore?: number; cvssRating?: string; cweId?: number; cweName?: string; cweDescription?: string; researchers: string[]; references: string[]; copyrights?: unknown; softwareType: "core" | "plugin" | "theme"; softwareSlug: string; softwareName: string; affectedRanges: AffectedVersionRange[]; patched: boolean; patchedVersions: string[]; remediation?: string }
+export interface VulnerabilityMatch extends VulnerabilityCandidate { installedVersion: string; installedStatus: string; updateVersion?: string; matchedRanges: string[] }
+export interface Finding { id?: string; category: string; severity: FindingSeverity; title: string; detail: string; path?: string; checksumStatus?: ChecksumStatus; observedAt?: string; disposition?: FindingDisposition; exceptionId?: string; trustedFileId?: string; policyReason?: string; policyTarget?: string; vulnerability?: VulnerabilityMatch }
 export interface FindingException { id: string; siteId: string; siteName: string; checkType: string; findingType: string; target: string; scope: "site"; reason: string; note?: string; createdAt: string; expiresAt?: string; active: boolean }
 export interface FindingExceptionInput { siteId: string; findingId: string; expiresAt?: string; note?: string }
 export type TrustedFileStatus = "trusted" | "changed" | "missing" | "unchecked";

@@ -35,6 +35,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let database = Database::initialize(data_dir.join("wp-maintenance-manager.sqlite3"))
@@ -108,6 +109,7 @@ pub fn run() {
             commands::start_wordfence_feed_refresh,
             commands::get_wordfence_feed_refresh_job,
             commands::match_cached_component_vulnerabilities,
+            commands::open_vulnerability_reference,
             commands::check_updates,
             commands::list_cached_updates,
             commands::list_wordpress_users,

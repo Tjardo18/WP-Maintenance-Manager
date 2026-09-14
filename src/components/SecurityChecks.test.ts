@@ -76,4 +76,31 @@ describe("SecurityChecks", () => {
     expect(wrapper.emitted("ignore")).toEqual([[actionable[0]!.findings[0], false], [actionable[0]!.findings[0], true]]);
     expect(wrapper.emitted("trust")).toEqual([[actionable[0]!.findings[0]]]);
   });
+
+  it("shows vulnerability context and uses the existing typed update action", async () => {
+    const vulnerability: Finding = {
+      id: "vulnerability-finding",
+      category: "vulnerability",
+      severity: "warning",
+      title: "Example Plugin: issue",
+      detail: "Geïnstalleerde versie is kwetsbaar.",
+      vulnerability: {
+        provider: "wordfence", vulnerabilityId: "vulnerability-1", title: "Stored XSS", informational: false,
+        cvssScore: 8.1, cvssRating: "High", cve: "CVE-2026-1234", researchers: [], references: [],
+        softwareType: "plugin", softwareSlug: "example-plugin", softwareName: "Example Plugin",
+        affectedRanges: [], patched: true, patchedVersions: ["1.2.4"], installedVersion: "1.2.3",
+        installedStatus: "inactive", updateVersion: "1.2.4", matchedRanges: ["1.0 - 1.2.3"],
+      },
+    };
+    const update = { kind: "plugin" as const, slug: "example-plugin", name: "Example Plugin", currentVersion: "1.2.3", newVersion: "1.2.4", status: "available" };
+    const vulnerabilityChecks: ScanCheck[] = [{ key: "vulnerabilities", label: "Kwetsbaarheden", status: "warning", summary: "1 bekende kwetsbaarheid", findings: [vulnerability] }];
+    const wrapper = mount(SecurityChecks, { props: { checks: vulnerabilityChecks, updates: [update], finishedAt: "2026-09-07T11:42:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: true } });
+    expect(wrapper.text()).toContain("1 hoog");
+    expect(wrapper.text()).toContain("Inactief");
+    const buttons = wrapper.findAll("button");
+    await buttons.find((button) => button.text().includes("Details"))?.trigger("click");
+    await buttons.find((button) => button.text().trim() === "Bijwerken")?.trigger("click");
+    expect(wrapper.emitted("details")).toEqual([[vulnerability]]);
+    expect(wrapper.emitted("update")).toEqual([[update]]);
+  });
 });

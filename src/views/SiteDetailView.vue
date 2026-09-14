@@ -6,6 +6,7 @@ import StatusBadge from "../components/StatusBadge.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import ChecksumFilePreview from "../components/ChecksumFilePreview.vue";
 import SecurityChecks from "../components/SecurityChecks.vue";
+import VulnerabilityDetails from "../components/VulnerabilityDetails.vue";
 import { useSitesStore } from "../stores/sites";
 import { useScanJobsStore } from "../stores/scanJobs";
 import { appApi } from "../services/tauri";
@@ -19,6 +20,7 @@ const site = computed(() => store.byId.get(String(route.params.id)));
 const tabs = ["Overzicht", "Updates", "Security", "Gebruikers", "Bestanden", "Database", "Onderhoud", "Historie", "Terminal"];
 const activeTab = ref("Overzicht"); const scan = ref<ScanResult>(); const scanHistory = ref<ScanResult[]>([]); const updates = ref<UpdateItem[]>([]); const history = ref<MaintenanceRun[]>([]); const liveSteps = ref<MaintenanceStep[]>([]); const busy = ref<string>(); const confirmUpdate = ref<UpdateItem | "all" | "maintenance">(); const error = ref<string>(); let stopProgress: (() => void) | undefined;
 const selectedFindingIds = ref<string[]>([]); const preview = ref<FilePreview>(); const pendingDelete = ref<Finding[]>([]); const deleteResult = ref<ChecksumDeleteResult>();
+const selectedVulnerability = ref<Finding>();
 const pendingPolicyAction = ref<{ kind: "ignore" | "trust"; finding: Finding; temporary: boolean }>(); const policyNote = ref(""); const policyExpiry = ref<"7" | "30" | "date">("7"); const policyExpiryDate = ref("");
 const usersData = ref<WordPressUsersData>(); const editUser = ref<WordPressUser>(); const editUserInput = ref<WordPressUserUpdateInput>(); const deleteUser = ref<WordPressUser>(); const deleteMode = ref<"reassign" | "delete">("reassign"); const reassignUserId = ref<number>(); const adminPromotionConfirmed = ref(false);
 const pendingCoreOperation = ref<{ kind: CoreOperationKind; info: CoreOperationInfo }>();
@@ -46,6 +48,9 @@ function selectAllUnexpected() { selectedFindingIds.value = unexpectedFindings.v
 async function openPreview(finding: Finding) { if (!site.value || !finding.id) return; busy.value = `preview-${finding.id}`; error.value = undefined; try { preview.value = await appApi.previewChecksumFinding(site.value.id, finding.id); } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
 function startIgnore(finding: Finding, temporary: boolean) { pendingPolicyAction.value = { kind: "ignore", finding, temporary }; policyNote.value = ""; policyExpiry.value = "7"; policyExpiryDate.value = ""; }
 function startTrust(finding: Finding) { pendingPolicyAction.value = { kind: "trust", finding, temporary: false }; policyNote.value = ""; }
+function startVulnerabilityUpdate(item: UpdateItem) { if (item.kind === "core") void openCoreOperation("update"); else confirmUpdate.value = item; }
+function isHighRiskVulnerability(finding: Finding) { return Boolean(finding.vulnerability && ["critical", "high"].includes(finding.vulnerability.cvssRating?.toLowerCase() ?? "")); }
+async function openVulnerabilityReference(url: string) { error.value = undefined; try { await appApi.openVulnerabilityReference(url); } catch (cause) { error.value = errorMessage(cause); } }
 function temporaryExpiration() { if (!pendingPolicyAction.value?.temporary) return undefined; if (policyExpiry.value === "date") { const parsed = new Date(policyExpiryDate.value); return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString(); } const expires = new Date(); expires.setUTCDate(expires.getUTCDate() + Number(policyExpiry.value)); return expires.toISOString(); }
 async function executePolicyAction() { if (!site.value || !pendingPolicyAction.value?.finding.id) return; const action = pendingPolicyAction.value; const findingId = action.finding.id; const siteId = site.value.id; if (!findingId) return; if (action.temporary && policyExpiry.value === "date" && !temporaryExpiration()) { error.value = "Kies een geldige verloopdatum."; return; } busy.value = "security-policy"; error.value = undefined; try { const result = action.kind === "trust" ? await appApi.trustFindingFile({ siteId, findingId, note: policyNote.value || undefined }) : await appApi.ignoreFinding({ siteId, findingId, note: policyNote.value || undefined, expiresAt: temporaryExpiration() }); if (result.scan) { scan.value = result.scan; scanHistory.value = [result.scan, ...scanHistory.value.filter((item) => item.id !== result.scan?.id)]; } pendingPolicyAction.value = undefined; await store.load(); } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
 async function executeFileDelete() { if (!site.value || !pendingDelete.value.length) return; const ids = pendingDelete.value.flatMap((finding) => finding.id ? [finding.id] : []); busy.value = "file-delete"; error.value = undefined; try { const result = ids.length === 1 ? await appApi.deleteChecksumFinding(site.value.id, ids[0]) : await appApi.deleteChecksumFindings(site.value.id, ids); deleteResult.value = result; if (result.scan) { scan.value = result.scan; scanHistory.value = [result.scan, ...scanHistory.value.filter((item) => item.id !== result.scan?.id)]; } selectedFindingIds.value = []; pendingDelete.value = []; if (result.rescanError) error.value = `De bestanden zijn verwerkt, maar de nacontrole mislukte: ${result.rescanError.userMessage}`; await store.load(); } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
@@ -57,7 +62,33 @@ async function executeUserUpdate() { if (!site.value || !editUserInput.value || 
 async function executeUserDelete() { if (!site.value || !deleteUser.value) return; busy.value = "user-delete"; error.value = undefined; try { usersData.value = await appApi.deleteWordPressUser(site.value.id, { userId: deleteUser.value.id, reassignTo: deleteMode.value === "reassign" ? reassignUserId.value : undefined, deleteContent: deleteMode.value === "delete" }); deleteUser.value = undefined; } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
 async function openCoreOperation(kind: CoreOperationKind) { if (!site.value) return; busy.value = "core-inspect"; error.value = undefined; try { pendingCoreOperation.value = { kind, info: await appApi.inspectCoreOperation(site.value.id) }; } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
 async function executeCoreOperation() { if (!site.value || !pendingCoreOperation.value) return; const kind = pendingCoreOperation.value.kind; busy.value = "core-operation"; error.value = undefined; activeTab.value = "Onderhoud"; liveSteps.value = (kind === "repair" ? [["preflight", "Preflight"], ["backup", "Databasebackup"], ["repair", "Officiële corebestanden opnieuw installeren"], ["checksum", "Core checksum"], ["version", "WordPress-versie"], ["database_check", "Databasecontrole"], ["homepage", "Homepage bereikbaar"], ["updates", "Updatecontrole"]] : [["preflight", "Preflight"], ["backup", "Databasebackup"], ["core", "WordPress core bijwerken"], ["database_update", "WordPress database bijwerken"], ["languages", "Corevertalingen bijwerken"], ["checksum", "Core checksum"], ["version", "WordPress-versie"], ["database_check", "Databasecontrole"], ["homepage", "Homepage bereikbaar"], ["updates", "Updatecontrole"]]).map(([key, label]) => ({ key, label, status: "pending" })); try { const result = kind === "repair" ? await appApi.repairWordPressCore(site.value.id) : await appApi.updateWordPressCore(site.value.id); history.value = [result.run, ...history.value.filter((run) => run.id !== result.run.id)]; updates.value = result.updatesAfter; if (result.scan) { scan.value = result.scan; scanHistory.value = [result.scan, ...scanHistory.value.filter((item) => item.id !== result.scan?.id)]; } if (result.run.status === "failed") error.value = `${kind === "repair" ? "Core-herstel" : "WordPress-update"} is veilig gestopt. Bekijk de onderhoudsstappen voor de oorzaak.`; pendingCoreOperation.value = undefined; await store.load(); } catch (cause) { error.value = errorMessage(cause); } finally { liveSteps.value = []; busy.value = undefined; } }
-async function executeConfirmed() { if (!site.value || !confirmUpdate.value) return; const action = confirmUpdate.value; busy.value = "action"; try { if (action === "maintenance") { activeTab.value = "Onderhoud"; liveSteps.value = [["preflight", "Preflight"], ["precheck", "Voorcontrole"], ["backup", "Databasebackup"], ["core", "WordPress bijwerken"], ["plugins", "Plugins bijwerken"], ["themes", "Thema's bijwerken"], ["languages", "Vertalingen bijwerken"], ["database", "WordPress database bijwerken"], ["postcheck", "Nacontrole"], ["homepage", "Homepage bereikbaar"]].map(([key, label]) => ({ key, label, status: "pending" })); const run = await appApi.runMaintenance(site.value.id); history.value.unshift(run); liveSteps.value = []; } else if (action === "all") await appApi.runUpdate(site.value.id, "all"); else await appApi.runUpdate(site.value.id, action.kind, action.slug); updates.value = await appApi.checkUpdates(site.value.id); confirmUpdate.value = undefined; } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
+async function executeConfirmed() {
+  if (!site.value || !confirmUpdate.value) return;
+  const action = confirmUpdate.value;
+  let rescanAfterUpdate = false;
+  busy.value = "action";
+  try {
+    if (action === "maintenance") {
+      activeTab.value = "Onderhoud";
+      liveSteps.value = [["preflight", "Preflight"], ["precheck", "Voorcontrole"], ["backup", "Databasebackup"], ["core", "WordPress bijwerken"], ["plugins", "Plugins bijwerken"], ["themes", "Thema's bijwerken"], ["languages", "Vertalingen bijwerken"], ["database", "WordPress database bijwerken"], ["postcheck", "Nacontrole"], ["homepage", "Homepage bereikbaar"]].map(([key, label]) => ({ key, label, status: "pending" }));
+      const run = await appApi.runMaintenance(site.value.id);
+      history.value.unshift(run);
+      liveSteps.value = [];
+    } else if (action === "all") {
+      await appApi.runUpdate(site.value.id, "all");
+    } else {
+      await appApi.runUpdate(site.value.id, action.kind, action.slug);
+      rescanAfterUpdate = true;
+    }
+    updates.value = await appApi.checkUpdates(site.value.id);
+    if (rescanAfterUpdate) await scanJobs.start(site.value.id);
+    confirmUpdate.value = undefined;
+  } catch (cause) {
+    error.value = errorMessage(cause);
+  } finally {
+    busy.value = undefined;
+  }
+}
 onMounted(async () => { await load(); stopProgress = await appApi.onMaintenanceProgress((payload) => { if (payload.siteId !== site.value?.id) return; const existing = liveSteps.value.findIndex((step) => step.key === payload.step.key); if (existing >= 0) liveSteps.value.splice(existing, 1, payload.step); else liveSteps.value.push(payload.step); }); });
 onUnmounted(() => { stopProgress?.(); if (scanClockTimer !== undefined) globalThis.clearInterval(scanClockTimer); });
 watch(activeTab, (tab) => { if (tab === "Updates") void loadUpdates(); if (tab === "Gebruikers") void loadUsers(); });
@@ -118,7 +149,7 @@ watch(() => scanJob.value?.status, async (status) => {
           <button class="button small danger" :disabled="!isLatestScan || !selectedFindingIds.length" @click="pendingDelete = unexpectedFindings.filter((finding) => finding.id && selectedFindingIds.includes(finding.id))"><Trash2 :size="14" /> {{ selectedFindingIds.length }} bestanden verwijderen</button>
         </div>
         <div v-if="!scan" class="empty-state compact"><component :is="activeTab === 'Bestanden' ? FileCode2 : activeTab === 'Database' ? Database : ShieldCheck" :size="38" /><h3>Nog geen scanresultaten</h3><p>Voer een scan uit om de resultaten op te slaan en hier te tonen.</p></div>
-        <SecurityChecks v-else :checks="visibleChecks" :finished-at="scan.finishedAt" :truncated="scan.truncated" :is-latest-scan="isLatestScan" :selected-finding-ids="selectedFindingIds" :busy="busy" :show-summary="activeTab === 'Security'" @toggle-finding="toggleFinding" @preview="openPreview" @delete="pendingDelete = [$event]" @ignore="startIgnore" @trust="startTrust" />
+        <SecurityChecks v-else :checks="visibleChecks" :finished-at="scan.finishedAt" :truncated="scan.truncated" :is-latest-scan="isLatestScan" :selected-finding-ids="selectedFindingIds" :busy="busy" :show-summary="activeTab === 'Security'" :updates="updates" @toggle-finding="toggleFinding" @preview="openPreview" @delete="pendingDelete = [$event]" @ignore="startIgnore" @trust="startTrust" @details="selectedVulnerability = $event" @update="startVulnerabilityUpdate" />
       </section>
     </template>
 
@@ -130,18 +161,20 @@ watch(() => scanJob.value?.status, async (status) => {
 
   <ConfirmDialog v-if="confirmUpdate" :title="confirmUpdate === 'maintenance' ? 'Onderhoud uitvoeren?' : confirmUpdate === 'all' ? `${updates.length} updates uitvoeren?` : `${confirmUpdate.name} bijwerken?`" :confirm-label="confirmUpdate === 'maintenance' ? 'Onderhoud starten' : 'Bijwerken'" :busy="busy === 'action'" @cancel="confirmUpdate = undefined" @confirm="executeConfirmed"><template v-if="confirmUpdate === 'maintenance'"><p>De app maakt eerst een databasebackup. Als die mislukt, worden er geen updates gestart.</p><ul><li>Voorcontrole en securitychecks</li><li>Lokale databasebackup</li><li>Core, plugins, thema's en vertalingen</li><li>Database- en homepagecontrole</li></ul></template><template v-else-if="confirmUpdate === 'all'"><ul><li v-for="item in updates" :key="item.slug">{{ item.name }}: {{ item.currentVersion }} → {{ item.newVersion }}</li></ul></template><p v-else>{{ confirmUpdate.name }} wordt bijgewerkt van {{ confirmUpdate.currentVersion }} naar {{ confirmUpdate.newVersion }}.</p></ConfirmDialog>
   <ChecksumFilePreview v-if="preview" :preview="preview" @close="preview = undefined" @delete="pendingDelete = [preview.finding]; preview = undefined" />
+  <VulnerabilityDetails v-if="selectedVulnerability" :finding="selectedVulnerability" @close="selectedVulnerability = undefined" @open-reference="openVulnerabilityReference" />
   <ConfirmDialog v-if="pendingDelete.length" :title="pendingDelete.length === 1 ? 'Bestand permanent verwijderen?' : `${pendingDelete.length} bestanden permanent verwijderen?`" :confirm-label="pendingDelete.length === 1 ? 'Bestand verwijderen' : `${pendingDelete.length} bestanden verwijderen`" :busy="busy === 'file-delete'" danger @cancel="pendingDelete = []" @confirm="executeFileDelete">
     <p>Deze actie verwijdert de geselecteerde bestanden permanent van de server en kan niet automatisch ongedaan worden gemaakt.</p>
     <ul class="delete-file-list"><li v-for="finding in pendingDelete" :key="finding.id"><code>{{ finding.path }}</code></li></ul>
   </ConfirmDialog>
   <div v-if="pendingPolicyAction" class="modal-backdrop" role="presentation" @click.self="pendingPolicyAction = undefined">
     <form class="modal policy-action-modal" role="dialog" aria-modal="true" :aria-label="pendingPolicyAction.kind === 'trust' ? 'Bestand vertrouwen' : 'Melding negeren'" @submit.prevent="executePolicyAction">
-      <h2>{{ pendingPolicyAction.kind === 'trust' ? 'Bestand vertrouwen?' : ['critical', 'problem'].includes(pendingPolicyAction.finding.severity) ? 'Belangrijke beveiligingsmelding negeren?' : pendingPolicyAction.temporary ? 'Melding tijdelijk negeren?' : 'Deze melding negeren?' }}</h2>
+      <h2>{{ pendingPolicyAction.kind === 'trust' ? 'Bestand vertrouwen?' : isHighRiskVulnerability(pendingPolicyAction.finding) ? 'Beveiligingskwetsbaarheid negeren?' : ['critical', 'problem'].includes(pendingPolicyAction.finding.severity) ? 'Belangrijke beveiligingsmelding negeren?' : pendingPolicyAction.temporary ? 'Melding tijdelijk negeren?' : 'Deze melding negeren?' }}</h2>
       <code v-if="pendingPolicyAction.finding.path">{{ pendingPolicyAction.finding.path }}</code>
       <p v-else>{{ pendingPolicyAction.finding.title }}</p>
       <p v-if="pendingPolicyAction.kind === 'trust'">De backend bewaart alleen de SHA-256-fingerprint van de huidige versie. Als de inhoud later verandert, wordt opnieuw een waarschuwing getoond.</p>
       <p v-else>Alleen deze combinatie van website, controle, meldingstype en target telt niet meer mee. Andere afwijkingen blijven zichtbaar.</p>
-      <p v-if="pendingPolicyAction.kind === 'ignore' && ['critical', 'problem'].includes(pendingPolicyAction.finding.severity)" class="danger-notice"><CircleAlert :size="17" /> Deze melding kan op een ernstige of gewijzigde corefile wijzen. Negeer haar alleen na bewuste controle.</p>
+      <p v-if="pendingPolicyAction.kind === 'ignore' && !pendingPolicyAction.finding.vulnerability && ['critical', 'problem'].includes(pendingPolicyAction.finding.severity)" class="danger-notice"><CircleAlert :size="17" /> Deze melding kan op een ernstige of gewijzigde corefile wijzen. Negeer haar alleen na bewuste controle.</p>
+      <p v-if="pendingPolicyAction.kind === 'ignore' && isHighRiskVulnerability(pendingPolicyAction.finding)" class="danger-notice"><CircleAlert :size="17" /> Deze specifieke softwareversie heeft volgens Wordfence een bekende kwetsbaarheid. Negeer haar alleen als je dit risico bewust accepteert.</p>
       <label v-if="pendingPolicyAction.temporary" class="policy-field"><span>Verloopt</span><select v-model="policyExpiry"><option value="7">Over 7 dagen</option><option value="30">Over 30 dagen</option><option value="date">Op specifieke datum</option></select></label>
       <label v-if="pendingPolicyAction.temporary && policyExpiry === 'date'" class="policy-field"><span>Datum en tijd</span><input v-model="policyExpiryDate" type="datetime-local" required /></label>
       <label class="policy-field"><span>Notitie (optioneel)</span><textarea v-model="policyNote" maxlength="500" rows="3" placeholder="Waarom is dit beoordeeld? Sla hier geen geheimen op."></textarea></label>
