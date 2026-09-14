@@ -309,7 +309,7 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         RemoteAction::ListPluginUpdates => (
             "ListPluginUpdates",
             format!(
-                "{wp} plugin list --update=available --fields=name,title,status,version,update_version --format=json"
+                "{wp} plugin list --fields=name,title,status,version,update,update_version --format=json"
             ),
             false,
             normal,
@@ -318,7 +318,7 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         RemoteAction::ListThemeUpdates => (
             "ListThemeUpdates",
             format!(
-                "{wp} theme list --update=available --fields=name,title,status,version,update_version --format=json"
+                "{wp} theme list --fields=name,title,status,version,update,update_version --format=json"
             ),
             false,
             normal,

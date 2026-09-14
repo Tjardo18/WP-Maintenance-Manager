@@ -2,8 +2,8 @@ use crate::{
     command_catalog::MAX_SCAN_RESULTS,
     error::AppError,
     models::{
-        ChecksumStatus, Finding, FindingSeverity, UpdateItem, UpdateKind, WordPressRole,
-        WordPressUser,
+        ChecksumStatus, Finding, FindingSeverity, InstalledSoftware, UpdateItem, UpdateKind,
+        WordPressRole, WordPressUser,
     },
     validation::{validate_checksum_relative_path, validate_role, validate_slug, validate_user_id},
 };
@@ -55,6 +55,8 @@ pub fn parse_nul_paths(
                 exception_id: None,
                 trusted_file_id: None,
                 policy_reason: None,
+                policy_target: None,
+                vulnerability: None,
                 observed_at: None,
             }
         })
@@ -225,6 +227,8 @@ fn classify_php_file(
         exception_id: None,
         trusted_file_id: None,
         policy_reason: None,
+        policy_target: None,
+        vulnerability: None,
         observed_at: modified_at.and_then(|timestamp| {
             chrono::DateTime::from_timestamp(timestamp, 0).map(|value| value.to_rfc3339())
         }),
@@ -309,6 +313,8 @@ pub fn parse_modified_files(output: &[u8], wordpress_path: &str) -> (Vec<Finding
             exception_id: None,
             trusted_file_id: None,
             policy_reason: None,
+            policy_target: None,
+            vulnerability: None,
             observed_at: None,
         });
     }
@@ -455,6 +461,8 @@ fn checksum_finding(path: &str, message: &str, observed_at: &str) -> Result<Find
         exception_id: None,
         trusted_file_id: None,
         policy_reason: None,
+        policy_target: None,
+        vulnerability: None,
         observed_at: Some(observed_at.into()),
     })
 }
@@ -500,6 +508,8 @@ pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
                 exception_id: None,
                 trusted_file_id: None,
                 policy_reason: None,
+                policy_target: None,
+                vulnerability: None,
                 observed_at: None,
             }
         })
@@ -626,6 +636,8 @@ pub fn parse_config(output: &str) -> Result<Vec<Finding>, AppError> {
         exception_id: None,
         trusted_file_id: None,
         policy_reason: None,
+        policy_target: None,
+        vulnerability: None,
         observed_at: None,
     });
     Ok(findings)
@@ -648,16 +660,75 @@ pub fn parse_update_list(output: &str, kind: UpdateKind) -> Result<Vec<UpdateIte
     for row in rows {
         let slug = string_field(&row, "name", "");
         validate_slug(&slug)?;
+        let update_version = string_field(&row, "update_version", "");
+        let update_state = string_field(&row, "update", "");
+        if update_version.is_empty()
+            || update_version == "none"
+            || (!update_state.is_empty() && update_state != "available")
+        {
+            continue;
+        }
         updates.push(UpdateItem {
             kind: kind.clone(),
             name: string_field(&row, "title", &slug),
             slug,
             current_version: string_field(&row, "version", "onbekend"),
-            new_version: string_field(&row, "update_version", "onbekend"),
+            new_version: update_version,
             status: "available".into(),
         });
     }
     Ok(updates)
+}
+
+pub fn parse_software_inventory(
+    output: &str,
+    kind: UpdateKind,
+    observed_at: &str,
+) -> Result<Vec<InstalledSoftware>, AppError> {
+    let rows: Vec<Value> = if output.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(output).map_err(|error| {
+            AppError::ssh(
+                "parse_failed",
+                "De geïnstalleerde software kon niet worden gelezen.",
+                error,
+                false,
+            )
+        })?
+    };
+    let software_type = match kind {
+        UpdateKind::Plugin => "plugin",
+        UpdateKind::Theme => "theme",
+        _ => {
+            return Err(AppError::validation(
+                "Alleen plugin- en thema-inventory kan uit deze lijst worden gelezen.",
+            ));
+        }
+    };
+    rows.into_iter()
+        .map(|row| {
+            let slug = string_field(&row, "name", "");
+            validate_slug(&slug)?;
+            let version = string_field(&row, "version", "");
+            if version.is_empty() || version.len() > 200 {
+                return Err(AppError::validation(
+                    "WP-CLI gaf een ongeldige softwareversie terug.",
+                ));
+            }
+            let update_version = string_field(&row, "update_version", "");
+            Ok(InstalledSoftware {
+                software_type: software_type.into(),
+                name: string_field(&row, "title", &slug),
+                slug,
+                version,
+                status: string_field(&row, "status", "unknown"),
+                update_version: (!update_version.is_empty() && update_version != "none")
+                    .then_some(update_version),
+                observed_at: observed_at.into(),
+            })
+        })
+        .collect()
 }
 
 pub fn parse_core_updates(
@@ -806,6 +877,8 @@ fn config_finding(category: &str, title: &str, detail: &str) -> Finding {
         exception_id: None,
         trusted_file_id: None,
         policy_reason: None,
+        policy_target: None,
+        vulnerability: None,
         observed_at: None,
     }
 }
@@ -967,6 +1040,23 @@ mod tests {
     fn rejects_untrusted_slug_returned_by_wp_cli() {
         let json = r#"[{"name":"safe;id","title":"Bad","version":"1","update_version":"2"}]"#;
         assert!(parse_update_list(json, UpdateKind::Plugin).is_err());
+    }
+
+    #[test]
+    fn full_wp_cli_list_yields_inventory_but_only_available_updates() {
+        let json = r#"[
+            {"name":"safe-plugin","title":"Safe Plugin","status":"active","version":"2.0.0","update":"none","update_version":""},
+            {"name":"needs-update","title":"Needs Update","status":"inactive","version":"1.2.3","update":"available","update_version":"1.2.4"}
+        ]"#;
+        let updates = parse_update_list(json, UpdateKind::Plugin).unwrap();
+        let inventory =
+            parse_software_inventory(json, UpdateKind::Plugin, "2026-09-10T08:00:00Z").unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].slug, "needs-update");
+        assert_eq!(inventory.len(), 2);
+        assert_eq!(inventory[0].status, "active");
+        assert_eq!(inventory[1].status, "inactive");
+        assert_eq!(inventory[1].update_version.as_deref(), Some("1.2.4"));
     }
 
     #[test]

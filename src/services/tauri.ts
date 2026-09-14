@@ -41,7 +41,8 @@ const demoScanSteps: ScanJobState["steps"] = [
   ["modified", "Gewijzigde bestanden"], ["permissions", "Bestandsrechten"],
   ["configuration", "WordPress-configuratie"], ["database", "Database"],
   ["core_updates", "WordPress-updates"], ["plugin_list", "Plugin-updates"],
-  ["theme_list", "Thema-updates"], ["homepage", "Homepage"], ["persist", "Resultaat opslaan"],
+  ["theme_list", "Thema-updates"], ["homepage", "Homepage"],
+  ["vulnerabilities", "Kwetsbaarheden"], ["persist", "Resultaat opslaan"],
 ].map(([key, label]) => ({ key, label, status: "pending" }));
 
 function emitBrowserScanJob(job: ScanJobState) {

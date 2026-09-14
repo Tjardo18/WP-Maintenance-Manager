@@ -451,7 +451,7 @@ impl FindingDisposition {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -473,6 +473,10 @@ pub struct Finding {
     pub trusted_file_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vulnerability: Option<VulnerabilityMatch>,
 }
 
 #[derive(Debug, Clone)]
@@ -600,7 +604,7 @@ pub struct ChecksumFindingRecord {
     pub finding: Finding,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FilePreview {
     pub finding: Finding,
@@ -765,6 +769,18 @@ pub struct UpdateItem {
     pub current_version: String,
     pub new_version: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledSoftware {
+    pub software_type: String,
+    pub slug: String,
+    pub name: String,
+    pub version: String,
+    pub status: String,
+    pub update_version: Option<String>,
+    pub observed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

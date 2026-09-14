@@ -4,9 +4,10 @@ use crate::{
         AffectedVersionRange, AuditEvent, AuthConfig, AuthMethod, ChecksumFindingRecord,
         ChecksumStatus, ErrorCategory, ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity,
         ExceptionScope, Finding, FindingContext, FindingDisposition, FindingException,
-        FindingSeverity, MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput,
-        SiteStatus, StepStatus, StoredSite, TrustedFile, TrustedFileStatus, UpdateItem, UpdateKind,
-        VulnerabilityCandidate, VulnerabilityFeedState, VulnerabilityImportSummary,
+        FindingSeverity, InstalledSoftware, MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult,
+        Site, SiteInput, SiteStatus, StepStatus, StoredSite, TrustedFile, TrustedFileStatus,
+        UpdateItem, UpdateKind, VulnerabilityCandidate, VulnerabilityFeedState,
+        VulnerabilityImportSummary, VulnerabilityMatch,
     },
     wordfence::{WORDFENCE_PROVIDER, WordfenceVulnerability},
 };
@@ -164,6 +165,21 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let vulnerability_scans_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 10)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !vulnerability_scans_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(include_str!("../migrations/0010_vulnerability_scans.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(10, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -245,16 +261,29 @@ impl Database {
     pub fn save_scan(&self, scan: &ScanResult, security_status: &str) -> Result<(), AppError> {
         let connection = self.connect()?;
         let transaction = connection.unchecked_transaction()?;
+        let vulnerability_feed_updated_at: Option<String> = transaction
+            .query_row(
+                "SELECT last_successful_update_at FROM vulnerability_feed_state WHERE provider=?1",
+                [WORDFENCE_PROVIDER],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let inventory_observed_at: Option<String> = transaction.query_row(
+            "SELECT MAX(observed_at) FROM software_inventory WHERE site_id=?1",
+            [&scan.site_id],
+            |row| row.get(0),
+        )?;
         transaction.execute(
-            "INSERT INTO scan_runs(id,site_id,started_at,finished_at,status,truncated) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![scan.id, scan.site_id, scan.started_at, scan.finished_at, scan.status.as_db(), scan.truncated],
+            "INSERT INTO scan_runs(id,site_id,started_at,finished_at,status,truncated,vulnerability_feed_updated_at,software_inventory_observed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![scan.id, scan.site_id, scan.started_at, scan.finished_at, scan.status.as_db(), scan.truncated, vulnerability_feed_updated_at, inventory_observed_at],
         )?;
         {
             let mut insert_check = transaction.prepare_cached(
                 "INSERT INTO scan_checks(id,scan_run_id,check_key,label,status,summary,technical_details) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             )?;
             let mut insert_finding = transaction.prepare_cached(
-                "INSERT INTO findings(id,scan_check_id,category,severity,title,detail,path,checksum_status,observed_at,site_id,scan_run_id,disposition,exception_id,trusted_file_id,policy_reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                "INSERT INTO findings(id,scan_check_id,category,severity,title,detail,path,checksum_status,observed_at,site_id,scan_run_id,disposition,exception_id,trusted_file_id,policy_reason,policy_target,vulnerability_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             )?;
             for check in &scan.checks {
                 let check_id = Uuid::new_v4().to_string();
@@ -272,6 +301,12 @@ impl Database {
                         .id
                         .clone()
                         .unwrap_or_else(|| Uuid::new_v4().to_string());
+                    let vulnerability_json = finding
+                        .vulnerability
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(AppError::storage)?;
                     insert_finding.execute(params![
                         finding_id,
                         check_id,
@@ -287,7 +322,9 @@ impl Database {
                         finding.disposition.as_db(),
                         finding.exception_id,
                         finding.trusted_file_id,
-                        finding.policy_reason
+                        finding.policy_reason,
+                        finding.policy_target,
+                        vulnerability_json
                     ])?;
                 }
             }
@@ -298,6 +335,59 @@ impl Database {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn save_software_inventory(
+        &self,
+        site_id: &str,
+        inventory: &[InstalledSoftware],
+    ) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute("DELETE FROM software_inventory WHERE site_id=?1", [site_id])?;
+        {
+            let mut insert = transaction.prepare_cached(
+                "INSERT INTO software_inventory(site_id,software_type,slug,name,version,status,update_version,observed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            )?;
+            for item in inventory {
+                if !matches!(item.software_type.as_str(), "core" | "plugin" | "theme") {
+                    return Err(AppError::validation("Ongeldig inventory-softwaretype."));
+                }
+                insert.execute(params![
+                    site_id,
+                    item.software_type,
+                    item.slug,
+                    item.name,
+                    item.version,
+                    item.status,
+                    item.update_version,
+                    item.observed_at,
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn software_inventory(&self, site_id: &str) -> Result<Vec<InstalledSoftware>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT software_type,slug,name,version,status,update_version,observed_at FROM software_inventory WHERE site_id=?1 ORDER BY software_type,slug",
+        )?;
+        statement
+            .query_map([site_id], |row| {
+                Ok(InstalledSoftware {
+                    software_type: row.get(0)?,
+                    slug: row.get(1)?,
+                    name: row.get(2)?,
+                    version: row.get(3)?,
+                    status: row.get(4)?,
+                    update_version: row.get(5)?,
+                    observed_at: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(AppError::from)
     }
 
     pub fn list_scans(&self, site_id: &str) -> Result<Vec<ScanResult>, AppError> {
@@ -312,7 +402,7 @@ impl Database {
         let connection = self.connect()?;
         connection
             .query_row(
-                "SELECT f.id,f.site_id,f.scan_run_id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason
+                "SELECT f.id,f.site_id,f.scan_run_id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason,f.policy_target,f.vulnerability_json
                  FROM findings f
                  JOIN scan_checks sc ON sc.id=f.scan_check_id
                  WHERE f.id=?1 AND f.site_id=?2 AND f.checksum_status='unexpected' AND sc.check_key='core_checksum'
@@ -345,6 +435,8 @@ impl Database {
                             exception_id: row.get(11)?,
                             trusted_file_id: row.get(12)?,
                             policy_reason: row.get(13)?,
+                            policy_target: row.get(14)?,
+                            vulnerability: deserialize_vulnerability(row.get(15)?)?,
                         },
                     })
                 },
@@ -420,7 +512,7 @@ impl Database {
         }
         {
             let mut statement = connection.prepare(
-                "SELECT f.scan_check_id,f.id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason
+                "SELECT f.scan_check_id,f.id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason,f.policy_target,f.vulnerability_json
                  FROM findings f
                  JOIN scan_checks sc ON sc.id=f.scan_check_id
                  WHERE sc.scan_run_id IN (SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC LIMIT ?2)
@@ -445,6 +537,8 @@ impl Database {
                         exception_id: row.get(10)?,
                         trusted_file_id: row.get(11)?,
                         policy_reason: row.get(12)?,
+                        policy_target: row.get(13)?,
+                        vulnerability: deserialize_vulnerability(row.get(14)?)?,
                     },
                 ))
             })?;
@@ -470,7 +564,7 @@ impl Database {
         let connection = self.connect()?;
         connection
             .query_row(
-                "SELECT f.site_id,f.scan_run_id,sc.check_key,f.id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason
+                "SELECT f.site_id,f.scan_run_id,sc.check_key,f.id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason,f.policy_target,f.vulnerability_json
                  FROM findings f
                  JOIN scan_checks sc ON sc.id=f.scan_check_id
                  WHERE f.site_id=?1 AND f.id=?2
@@ -499,6 +593,8 @@ impl Database {
                             exception_id: row.get(12)?,
                             trusted_file_id: row.get(13)?,
                             policy_reason: row.get(14)?,
+                            policy_target: row.get(15)?,
+                            vulnerability: deserialize_vulnerability(row.get(16)?)?,
                         },
                     })
                 },
@@ -1044,95 +1140,37 @@ impl Database {
         })
     }
 
-    pub fn vulnerability_candidates(
+    pub fn vulnerability_candidates_for_inventory(
         &self,
         provider: &str,
-        software_type: &str,
-        software_slug: &str,
-    ) -> Result<Vec<VulnerabilityCandidate>, AppError> {
+        inventory: &[InstalledSoftware],
+    ) -> Result<Vec<Vec<VulnerabilityCandidate>>, AppError> {
         let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT v.provider,v.vulnerability_id,v.title,v.description,v.informational,v.cve,v.cve_link,v.published,v.updated,v.cvss_vector,v.cvss_score,v.cvss_rating,v.cwe_id,v.cwe_name,v.cwe_description,v.researchers_json,v.references_json,v.copyrights_json,s.software_type,s.software_slug,s.software_name,s.affected_ranges_json,s.patched,s.patched_versions_json,s.remediation FROM vulnerability_feed_state f JOIN vulnerable_software s ON s.dataset_id=f.active_dataset_id AND s.provider=f.provider JOIN vulnerabilities v ON v.dataset_id=s.dataset_id AND v.provider=s.provider AND v.vulnerability_id=s.vulnerability_id WHERE f.provider=?1 AND s.software_type=?2 AND s.software_slug=?3 ORDER BY COALESCE(v.cvss_score,-1) DESC,v.title COLLATE NOCASE",
-        )?;
-        let rows = statement.query_map(params![provider, software_type, software_slug], |row| {
-            let affected_json: String = row.get(21)?;
-            let affected: std::collections::BTreeMap<
-                String,
-                crate::wordfence::WordfenceAffectedRange,
-            > = serde_json::from_str(&affected_json).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    affected_json.len(),
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?;
-            let json_array = |index: usize| -> rusqlite::Result<Vec<String>> {
-                let value: String = row.get(index)?;
-                serde_json::from_str(&value).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        value.len(),
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })
-            };
-            let copyrights = row
-                .get::<_, Option<String>>(17)?
-                .map(|value| {
-                    serde_json::from_str(&value).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            value.len(),
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })
-                })
-                .transpose()?;
-            Ok(VulnerabilityCandidate {
-                provider: row.get(0)?,
-                vulnerability_id: row.get(1)?,
-                title: row.get(2)?,
-                description: row.get(3)?,
-                informational: row.get(4)?,
-                cve: row.get(5)?,
-                cve_link: row.get(6)?,
-                published: row.get(7)?,
-                updated: row.get(8)?,
-                cvss_vector: row.get(9)?,
-                cvss_score: row.get(10)?,
-                cvss_rating: row.get(11)?,
-                cwe_id: row.get(12)?,
-                cwe_name: row.get(13)?,
-                cwe_description: row.get(14)?,
-                researchers: json_array(15)?,
-                references: json_array(16)?,
-                copyrights,
-                software_type: row.get(18)?,
-                software_slug: row.get(19)?,
-                software_name: row.get(20)?,
-                affected_ranges: affected
-                    .into_iter()
-                    .map(|(label, range)| AffectedVersionRange {
-                        label,
-                        from_version: range.from_version,
-                        from_inclusive: range.from_inclusive,
-                        to_version: range.to_version,
-                        to_inclusive: range.to_inclusive,
-                    })
-                    .collect(),
-                patched: row.get(22)?,
-                patched_versions: json_array(23)?,
-                remediation: row.get(24)?,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| AppError {
-                error_id: None,
-                category: "vulnerability_match".into(),
-                user_message: "De lokale vulnerability database kon niet worden gelezen.".into(),
-                technical_details: Some(error.to_string()),
-                retryable: true,
-            })
+        let select = "SELECT v.provider,v.vulnerability_id,v.title,v.description,v.informational,v.cve,v.cve_link,v.published,v.updated,v.cvss_vector,v.cvss_score,v.cvss_rating,v.cwe_id,v.cwe_name,v.cwe_description,v.researchers_json,v.references_json,v.copyrights_json,s.software_type,s.software_slug,s.software_name,s.affected_ranges_json,s.patched,s.patched_versions_json,s.remediation FROM vulnerability_feed_state f JOIN vulnerable_software s ON s.dataset_id=f.active_dataset_id AND s.provider=f.provider JOIN vulnerabilities v ON v.dataset_id=s.dataset_id AND v.provider=s.provider AND v.vulnerability_id=s.vulnerability_id";
+        let mut exact_statement = connection.prepare(&format!(
+            "{select} WHERE f.provider=?1 AND s.software_type=?2 AND s.software_slug=?3 ORDER BY COALESCE(v.cvss_score,-1) DESC,v.title COLLATE NOCASE"
+        ))?;
+        let mut core_statement = connection.prepare(&format!(
+            "{select} WHERE f.provider=?1 AND s.software_type='core' ORDER BY COALESCE(v.cvss_score,-1) DESC,v.title COLLATE NOCASE"
+        ))?;
+        let mut candidates_by_component = Vec::with_capacity(inventory.len());
+        for installed in inventory {
+            let candidates = if installed.software_type == "core" {
+                core_statement
+                    .query_map([provider], row_to_vulnerability_candidate)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            } else {
+                exact_statement
+                    .query_map(
+                        params![provider, installed.software_type, installed.slug],
+                        row_to_vulnerability_candidate,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            }
+            .map_err(vulnerability_read_error)?;
+            candidates_by_component.push(candidates);
+        }
+        Ok(candidates_by_component)
     }
 
     pub fn auth_config(&self) -> Result<Option<AuthConfig>, AppError> {
@@ -1489,6 +1527,22 @@ fn bound_text(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+fn deserialize_vulnerability(
+    value: Option<String>,
+) -> rusqlite::Result<Option<VulnerabilityMatch>> {
+    value
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    json.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
+}
+
 fn row_to_finding_exception(row: &Row<'_>) -> rusqlite::Result<FindingException> {
     Ok(FindingException {
         id: row.get(0)?,
@@ -1551,6 +1605,86 @@ fn row_to_error_log(row: &Row<'_>) -> rusqlite::Result<ErrorLogRecord> {
             .and_then(|value| u64::try_from(value).ok()),
         retryable: row.get(12)?,
     })
+}
+
+fn row_to_vulnerability_candidate(row: &Row<'_>) -> rusqlite::Result<VulnerabilityCandidate> {
+    let affected_json: String = row.get(21)?;
+    let affected: std::collections::BTreeMap<String, crate::wordfence::WordfenceAffectedRange> =
+        serde_json::from_str(&affected_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                affected_json.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let json_array = |index: usize| -> rusqlite::Result<Vec<String>> {
+        let value: String = row.get(index)?;
+        serde_json::from_str(&value).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                value.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+    };
+    let copyrights = row
+        .get::<_, Option<String>>(17)?
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    value.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()?;
+    Ok(VulnerabilityCandidate {
+        provider: row.get(0)?,
+        vulnerability_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        informational: row.get(4)?,
+        cve: row.get(5)?,
+        cve_link: row.get(6)?,
+        published: row.get(7)?,
+        updated: row.get(8)?,
+        cvss_vector: row.get(9)?,
+        cvss_score: row.get(10)?,
+        cvss_rating: row.get(11)?,
+        cwe_id: row.get(12)?,
+        cwe_name: row.get(13)?,
+        cwe_description: row.get(14)?,
+        researchers: json_array(15)?,
+        references: json_array(16)?,
+        copyrights,
+        software_type: row.get(18)?,
+        software_slug: row.get(19)?,
+        software_name: row.get(20)?,
+        affected_ranges: affected
+            .into_iter()
+            .map(|(label, range)| AffectedVersionRange {
+                label,
+                from_version: range.from_version,
+                from_inclusive: range.from_inclusive,
+                to_version: range.to_version,
+                to_inclusive: range.to_inclusive,
+            })
+            .collect(),
+        patched: row.get(22)?,
+        patched_versions: json_array(23)?,
+        remediation: row.get(24)?,
+    })
+}
+
+fn vulnerability_read_error(error: rusqlite::Error) -> AppError {
+    AppError {
+        error_id: None,
+        category: "vulnerability_match".into(),
+        user_message: "De lokale vulnerability database kon niet worden gelezen.".into(),
+        technical_details: Some(error.to_string()),
+        retryable: true,
+    }
 }
 
 fn row_to_stored_site(row: &Row<'_>) -> rusqlite::Result<StoredSite> {
@@ -1687,25 +1821,41 @@ mod tests {
             Some(first.dataset_id.as_str())
         );
         assert_eq!(state.vulnerability_count, 1);
-        assert_eq!(
-            database
-                .vulnerability_candidates(WORDFENCE_PROVIDER, "plugin", "example-plugin")
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(
-            database
-                .vulnerability_candidates(WORDFENCE_PROVIDER, "plugin", "same-display-name")
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            database
-                .vulnerability_candidates(WORDFENCE_PROVIDER, "theme", "example-plugin")
-                .unwrap()
-                .is_empty()
-        );
+        let inventory = [
+            InstalledSoftware {
+                software_type: "plugin".into(),
+                slug: "example-plugin".into(),
+                name: "Example Plugin".into(),
+                version: "1.2.3".into(),
+                status: "active".into(),
+                update_version: Some("1.2.4".into()),
+                observed_at: utc_now(),
+            },
+            InstalledSoftware {
+                software_type: "plugin".into(),
+                slug: "same-display-name".into(),
+                name: "Example Plugin".into(),
+                version: "1.2.3".into(),
+                status: "active".into(),
+                update_version: None,
+                observed_at: utc_now(),
+            },
+            InstalledSoftware {
+                software_type: "theme".into(),
+                slug: "example-plugin".into(),
+                name: "Example Plugin".into(),
+                version: "1.2.3".into(),
+                status: "inactive".into(),
+                update_version: None,
+                observed_at: utc_now(),
+            },
+        ];
+        let candidates = database
+            .vulnerability_candidates_for_inventory(WORDFENCE_PROVIDER, &inventory)
+            .unwrap();
+        assert_eq!(candidates[0].len(), 1);
+        assert!(candidates[1].is_empty());
+        assert!(candidates[2].is_empty());
 
         fs::write(&feed_path, "{malformed").unwrap();
         assert!(
@@ -1893,6 +2043,8 @@ mod tests {
                     exception_id: None,
                     trusted_file_id: None,
                     policy_reason: None,
+                    policy_target: None,
+                    vulnerability: None,
                     observed_at: Some("2026-08-25T10:00:00.000Z".into()),
                 }],
             }],
@@ -1960,6 +2112,8 @@ mod tests {
                 exception_id: None,
                 trusted_file_id: None,
                 policy_reason: None,
+                policy_target: None,
+                vulnerability: None,
                 observed_at: None,
             })
             .collect();

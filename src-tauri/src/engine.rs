@@ -3,8 +3,8 @@ use crate::{
     database::utc_now,
     error::AppError,
     models::{
-        ChecksumStatus, Finding, FindingSeverity, ScanCheck, ScanResult, SiteStatus, StepStatus,
-        StoredSite, UpdateItem, UpdateKind,
+        ChecksumStatus, Finding, FindingSeverity, InstalledSoftware, ScanCheck, ScanResult,
+        SiteStatus, StepStatus, StoredSite, UpdateItem, UpdateKind,
     },
     parsers,
     ssh::{ExecOutput, SshConnection, SshExecutor},
@@ -18,6 +18,13 @@ pub struct ScanOutcome {
     pub wordpress_version: String,
     pub php_version: String,
     pub updates: Option<Vec<UpdateItem>>,
+    pub inventory: Vec<InstalledSoftware>,
+}
+
+struct ScannedUpdates {
+    updates: Vec<UpdateItem>,
+    errors: Vec<AppError>,
+    inventory: Vec<InstalledSoftware>,
 }
 
 pub trait ScanProgress {
@@ -244,8 +251,26 @@ pub fn scan_site_with_progress(
         },
     )?);
 
-    let (detected_updates, update_errors) =
-        scan_updates_with_progress(connection.as_mut(), stored, &wordpress_version, progress)?;
+    let ScannedUpdates {
+        updates: detected_updates,
+        errors: update_errors,
+        mut inventory,
+    } = scan_updates_with_progress(connection.as_mut(), stored, &wordpress_version, progress)?;
+    inventory.insert(
+        0,
+        InstalledSoftware {
+            software_type: "core".into(),
+            slug: "wordpress".into(),
+            name: "WordPress".into(),
+            version: wordpress_version.clone(),
+            status: "active".into(),
+            update_version: detected_updates
+                .iter()
+                .find(|update| update.kind == UpdateKind::Core)
+                .map(|update| update.new_version.clone()),
+            observed_at: utc_now(),
+        },
+    );
     let updates = update_errors.is_empty().then_some(detected_updates.clone());
     checks.push(if update_errors.is_empty() {
         ScanCheck {
@@ -313,6 +338,7 @@ pub fn scan_site_with_progress(
         wordpress_version,
         php_version,
         updates,
+        inventory,
     })
 }
 
@@ -355,9 +381,11 @@ fn scan_updates_with_progress(
     stored: &StoredSite,
     current_version: &str,
     progress: &mut dyn ScanProgress,
-) -> Result<(Vec<UpdateItem>, Vec<AppError>), AppError> {
+) -> Result<ScannedUpdates, AppError> {
     let mut updates = Vec::new();
     let mut errors = Vec::new();
+    let mut inventory = Vec::new();
+    let observed_at = utc_now();
 
     let core = measured_result(progress, "core_updates", || {
         let output = connection_text_action(connection, stored, RemoteAction::CheckCoreUpdates)?;
@@ -373,29 +401,47 @@ fn scan_updates_with_progress(
 
     let plugins = measured_result(progress, "plugin_list", || {
         let output = connection_text_action(connection, stored, RemoteAction::ListPluginUpdates)?;
-        measured_parse(&stored.site.id, "plugin_updates", || {
+        let updates = measured_parse(&stored.site.id, "plugin_updates", || {
             parsers::parse_update_list(&output, UpdateKind::Plugin)
-        })
+        })?;
+        let installed = measured_parse(&stored.site.id, "plugin_inventory", || {
+            parsers::parse_software_inventory(&output, UpdateKind::Plugin, &observed_at)
+        })?;
+        Ok((updates, installed))
     });
     match plugins {
-        Ok(items) => updates.extend(items),
+        Ok((items, installed)) => {
+            updates.extend(items);
+            inventory.extend(installed);
+        }
         Err(error) if error.category == "scan_cancelled" => return Err(error),
         Err(error) => errors.push(error),
     }
 
     let themes = measured_result(progress, "theme_list", || {
         let output = connection_text_action(connection, stored, RemoteAction::ListThemeUpdates)?;
-        measured_parse(&stored.site.id, "theme_updates", || {
+        let updates = measured_parse(&stored.site.id, "theme_updates", || {
             parsers::parse_update_list(&output, UpdateKind::Theme)
-        })
+        })?;
+        let installed = measured_parse(&stored.site.id, "theme_inventory", || {
+            parsers::parse_software_inventory(&output, UpdateKind::Theme, &observed_at)
+        })?;
+        Ok((updates, installed))
     });
     match themes {
-        Ok(items) => updates.extend(items),
+        Ok((items, installed)) => {
+            updates.extend(items);
+            inventory.extend(installed);
+        }
         Err(error) if error.category == "scan_cancelled" => return Err(error),
         Err(error) => errors.push(error),
     }
 
-    Ok((updates, errors))
+    Ok(ScannedUpdates {
+        updates,
+        errors,
+        inventory,
+    })
 }
 
 fn cancelled_error() -> AppError {
@@ -684,6 +730,8 @@ fn failed_checksum_check(error: AppError, observed_at: &str) -> ScanCheck {
             exception_id: None,
             trusted_file_id: None,
             policy_reason: None,
+            policy_target: None,
+            vulnerability: None,
             observed_at: Some(observed_at.into()),
         }],
     }

@@ -966,6 +966,7 @@ const SITE_SCAN_STEPS: &[(&str, &str)] = &[
     ("plugin_list", "Plugin-updates"),
     ("theme_list", "Thema-updates"),
     ("homepage", "Homepagecontrole"),
+    ("vulnerabilities", "Kwetsbaarheden"),
     ("persist", "Resultaten opslaan"),
 ];
 
@@ -2073,6 +2074,53 @@ fn scan_site_internal_with_progress(
             return Err(error);
         }
     };
+    progress.step_started("vulnerabilities");
+    let vulnerability_started = Instant::now();
+    let vulnerability_check = state
+        .database
+        .save_software_inventory(site_id, &outcome.inventory)
+        .and_then(|()| state.database.software_inventory(site_id))
+        .and_then(|inventory| vulnerability_matcher::scan_inventory(&state.database, &inventory));
+    let vulnerability_check = match vulnerability_check {
+        Ok(check) => {
+            progress.step_finished(
+                "vulnerabilities",
+                check.status,
+                u64::try_from(vulnerability_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                Some(check.summary.clone()),
+            );
+            check
+        }
+        Err(error) => {
+            let logged = error_log::persist_error(
+                &state.database,
+                Some(site_id),
+                Some(&stored.site.name),
+                "Lokale vulnerability controle",
+                Some(
+                    u64::try_from(vulnerability_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ),
+                None,
+                error,
+            );
+            progress.step_finished(
+                "vulnerabilities",
+                StepStatus::Skipped,
+                u64::try_from(vulnerability_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                Some("Kwetsbaarheidscontrole is overgeslagen; overige scans gaan door.".into()),
+            );
+            crate::models::ScanCheck {
+                key: "vulnerabilities".into(),
+                label: "Kwetsbaarheden".into(),
+                status: StepStatus::Skipped,
+                summary: "Kwetsbaarheidscontrole niet beschikbaar; overige controles zijn normaal uitgevoerd."
+                    .into(),
+                technical_details: logged.safe_diagnostic(),
+                findings: Vec::new(),
+            }
+        }
+    };
+    outcome.result.checks.push(vulnerability_check);
     let trusted_files = refresh_trusted_file_observations(state, &stored, credential.as_deref())?;
     let exceptions = state.database.list_finding_exceptions(Some(site_id))?;
     outcome.security_status = security_policy::apply_scan_policy(
@@ -3361,6 +3409,8 @@ mod tests {
             exception_id: None,
             trusted_file_id: None,
             policy_reason: None,
+            policy_target: None,
+            vulnerability: None,
             observed_at: Some("2026-08-31T10:00:00Z".into()),
         };
         database

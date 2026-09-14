@@ -121,6 +121,8 @@ mod tests {
                 exception_id: None,
                 trusted_file_id: None,
                 policy_reason: None,
+                policy_target: None,
+                vulnerability: None,
                 observed_at: Some("2026-08-31T10:00:00Z".into()),
             },
         }

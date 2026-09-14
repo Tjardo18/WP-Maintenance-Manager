@@ -25,6 +25,12 @@ pub fn finding_type(finding: &Finding) -> String {
 }
 
 pub fn finding_target(finding: &Finding) -> Result<String, AppError> {
+    if let Some(target) = finding.policy_target.as_deref() {
+        if target.is_empty() || target.len() > 2_000 || target.chars().any(char::is_control) {
+            return Err(AppError::validation("Ongeldige finding-identiteit."));
+        }
+        return Ok(target.to_owned());
+    }
     finding
         .path
         .as_deref()
@@ -150,6 +156,8 @@ pub fn apply_scan_policy(
             exception_id: None,
             trusted_file_id: Some(trusted.id.clone()),
             policy_reason: Some(detail.into()),
+            policy_target: None,
+            vulnerability: None,
         });
     }
     if !trust_findings.is_empty() {
@@ -303,6 +311,8 @@ mod tests {
             exception_id: None,
             trusted_file_id: None,
             policy_reason: None,
+            policy_target: None,
+            vulnerability: None,
         }
     }
 
