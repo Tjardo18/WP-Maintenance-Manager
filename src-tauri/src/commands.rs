@@ -3003,6 +3003,8 @@ fn site_from_input(input: &SiteInput, existing: Option<&StoredSite>) -> Site {
         last_maintenance_at: None,
         created_at: now.clone(),
         updated_at: now,
+        vulnerability_summary: existing
+            .and_then(|stored| stored.site.vulnerability_summary.clone()),
     }
 }
 

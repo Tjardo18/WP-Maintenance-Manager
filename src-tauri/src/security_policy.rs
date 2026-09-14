@@ -404,6 +404,53 @@ mod tests {
     }
 
     #[test]
+    fn vulnerability_exception_identity_includes_the_installed_version() {
+        let now = Utc::now();
+        let mut vulnerable = finding("unused", ChecksumStatus::Unexpected);
+        vulnerable.category = "vulnerability".into();
+        vulnerable.checksum_status = None;
+        vulnerable.path = None;
+        vulnerable.policy_target = Some("wordfence:vulnerability-a:plugin:example:1.2.3".into());
+        let mut ignored = exception(
+            "site-a",
+            "wordfence:vulnerability-a:plugin:example:1.2.3",
+            "vulnerability",
+            None,
+        );
+        ignored.check_type = "vulnerabilities".into();
+        let make_checks = |finding: Finding| {
+            vec![ScanCheck {
+                key: "vulnerabilities".into(),
+                label: "Kwetsbaarheden".into(),
+                status: StepStatus::Warning,
+                summary: "Test".into(),
+                technical_details: None,
+                findings: vec![finding],
+            }]
+        };
+        let mut same_version = make_checks(vulnerable.clone());
+        apply_scan_policy(
+            "site-a",
+            &mut same_version,
+            std::slice::from_ref(&ignored),
+            &[],
+            now,
+        );
+        assert_eq!(
+            same_version[0].findings[0].disposition,
+            FindingDisposition::Ignored
+        );
+
+        vulnerable.policy_target = Some("wordfence:vulnerability-a:plugin:example:1.2.4".into());
+        let mut new_version = make_checks(vulnerable);
+        apply_scan_policy("site-a", &mut new_version, &[ignored], &[], now);
+        assert_eq!(
+            new_version[0].findings[0].disposition,
+            FindingDisposition::Active
+        );
+    }
+
+    #[test]
     fn informational_ignored_and_trusted_findings_do_not_degrade_site_status() {
         let mut info = finding("readme.html", ChecksumStatus::Missing);
         info.severity = FindingSeverity::Info;

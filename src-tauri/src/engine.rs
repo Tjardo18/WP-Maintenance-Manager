@@ -922,6 +922,7 @@ mod tests {
                 last_maintenance_at: None,
                 created_at: utc_now(),
                 updated_at: utc_now(),
+                vulnerability_summary: None,
             },
             credential_ref: None,
         }

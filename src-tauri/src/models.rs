@@ -264,6 +264,23 @@ pub struct Site {
     pub last_maintenance_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vulnerability_summary: Option<SiteVulnerabilitySummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteVulnerabilitySummary {
+    pub critical_count: i64,
+    pub high_count: i64,
+    pub medium_count: i64,
+    pub low_count: i64,
+    pub info_count: i64,
+    pub unknown_count: i64,
+    pub last_checked_at: String,
+    pub feed_updated_at: Option<String>,
+    pub inventory_observed_at: Option<String>,
+    pub inventory_stale: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

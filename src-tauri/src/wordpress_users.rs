@@ -238,6 +238,7 @@ mod tests {
                 last_maintenance_at: None,
                 created_at: "now".into(),
                 updated_at: "now".into(),
+                vulnerability_summary: None,
             },
             credential_ref: None,
         }

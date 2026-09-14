@@ -22,7 +22,10 @@ export interface Site {
   lastMaintenanceAt?: string | null;
   createdAt: string;
   updatedAt: string;
+  vulnerabilitySummary?: SiteVulnerabilitySummary;
 }
+
+export interface SiteVulnerabilitySummary { criticalCount: number; highCount: number; mediumCount: number; lowCount: number; infoCount: number; unknownCount: number; lastCheckedAt: string; feedUpdatedAt?: string; inventoryObservedAt?: string; inventoryStale: boolean }
 
 export interface SiteInput {
   id?: string;

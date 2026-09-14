@@ -5,8 +5,8 @@ use crate::{
         ChecksumStatus, ErrorCategory, ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity,
         ExceptionScope, Finding, FindingContext, FindingDisposition, FindingException,
         FindingSeverity, InstalledSoftware, MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult,
-        Site, SiteInput, SiteStatus, StepStatus, StoredSite, TrustedFile, TrustedFileStatus,
-        UpdateItem, UpdateKind, VulnerabilityCandidate, VulnerabilityFeedState,
+        Site, SiteInput, SiteStatus, SiteVulnerabilitySummary, StepStatus, StoredSite, TrustedFile,
+        TrustedFileStatus, UpdateItem, UpdateKind, VulnerabilityCandidate, VulnerabilityFeedState,
         VulnerabilityImportSummary, VulnerabilityMatch,
     },
     wordfence::{WORDFENCE_PROVIDER, WordfenceVulnerability},
@@ -180,6 +180,22 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let vulnerability_site_summary_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 11)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !vulnerability_site_summary_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!(
+                "../migrations/0011_vulnerability_site_summary.sql"
+            ))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(11, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -193,7 +209,7 @@ impl Database {
 
     pub fn list_sites(&self) -> Result<Vec<Site>, AppError> {
         let connection = self.connect()?;
-        let mut statement = connection.prepare("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at FROM sites ORDER BY name COLLATE NOCASE")?;
+        let mut statement = connection.prepare("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,vulnerability_critical_count,vulnerability_high_count,vulnerability_medium_count,vulnerability_low_count,vulnerability_info_count,vulnerability_unknown_count,vulnerability_last_checked_at,vulnerability_feed_updated_at,vulnerability_inventory_observed_at,vulnerability_inventory_stale FROM sites ORDER BY name COLLATE NOCASE")?;
         let rows = statement.query_map([], row_to_stored_site)?;
         rows.map(|row| row.map(|stored| stored.site).map_err(AppError::from))
             .collect()
@@ -201,7 +217,7 @@ impl Database {
 
     pub fn get_site(&self, id: &str) -> Result<StoredSite, AppError> {
         let connection = self.connect()?;
-        connection.query_row("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at FROM sites WHERE id = ?1", [id], row_to_stored_site).optional()?.ok_or_else(|| AppError::not_found("Website"))
+        connection.query_row("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,vulnerability_critical_count,vulnerability_high_count,vulnerability_medium_count,vulnerability_low_count,vulnerability_info_count,vulnerability_unknown_count,vulnerability_last_checked_at,vulnerability_feed_updated_at,vulnerability_inventory_observed_at,vulnerability_inventory_stale FROM sites WHERE id = ?1", [id], row_to_stored_site).optional()?.ok_or_else(|| AppError::not_found("Website"))
     }
 
     pub fn save_site(
@@ -261,6 +277,7 @@ impl Database {
     pub fn save_scan(&self, scan: &ScanResult, security_status: &str) -> Result<(), AppError> {
         let connection = self.connect()?;
         let transaction = connection.unchecked_transaction()?;
+        let vulnerability_counts = active_vulnerability_counts(scan);
         let vulnerability_feed_updated_at: Option<String> = transaction
             .query_row(
                 "SELECT last_successful_update_at FROM vulnerability_feed_state WHERE provider=?1",
@@ -329,10 +346,17 @@ impl Database {
                 }
             }
         }
-        transaction.execute(
-            "UPDATE sites SET status=?1,security_status=?2,last_scan_at=?3,updated_at=?3 WHERE id=?4",
-            params![scan.status.as_db(), security_status, scan.finished_at, scan.site_id],
-        )?;
+        if let Some(counts) = vulnerability_counts {
+            transaction.execute(
+                "UPDATE sites SET status=?1,security_status=?2,last_scan_at=?3,updated_at=?3,vulnerability_critical_count=?5,vulnerability_high_count=?6,vulnerability_medium_count=?7,vulnerability_low_count=?8,vulnerability_info_count=?9,vulnerability_unknown_count=?10,vulnerability_last_checked_at=?3,vulnerability_feed_updated_at=?11,vulnerability_inventory_observed_at=?12,vulnerability_inventory_stale=0 WHERE id=?4",
+                params![scan.status.as_db(), security_status, scan.finished_at, scan.site_id, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], vulnerability_feed_updated_at, inventory_observed_at],
+            )?;
+        } else {
+            transaction.execute(
+                "UPDATE sites SET status=?1,security_status=?2,last_scan_at=?3,updated_at=?3 WHERE id=?4",
+                params![scan.status.as_db(), security_status, scan.finished_at, scan.site_id],
+            )?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -1688,6 +1712,25 @@ fn vulnerability_read_error(error: rusqlite::Error) -> AppError {
 }
 
 fn row_to_stored_site(row: &Row<'_>) -> rusqlite::Result<StoredSite> {
+    let vulnerability_last_checked_at: Option<String> = row.get(26)?;
+    let vulnerability_summary = vulnerability_last_checked_at
+        .map(
+            |last_checked_at| -> rusqlite::Result<SiteVulnerabilitySummary> {
+                Ok(SiteVulnerabilitySummary {
+                    critical_count: row.get(20)?,
+                    high_count: row.get(21)?,
+                    medium_count: row.get(22)?,
+                    low_count: row.get(23)?,
+                    info_count: row.get(24)?,
+                    unknown_count: row.get(25)?,
+                    last_checked_at,
+                    feed_updated_at: row.get(27)?,
+                    inventory_observed_at: row.get(28)?,
+                    inventory_stale: row.get(29)?,
+                })
+            },
+        )
+        .transpose()?;
     Ok(StoredSite {
         site: Site {
             id: row.get(0)?,
@@ -1709,9 +1752,45 @@ fn row_to_stored_site(row: &Row<'_>) -> rusqlite::Result<StoredSite> {
             last_maintenance_at: row.get(17)?,
             created_at: row.get(18)?,
             updated_at: row.get(19)?,
+            vulnerability_summary,
         },
         credential_ref: row.get(9)?,
     })
+}
+
+fn active_vulnerability_counts(scan: &ScanResult) -> Option<[i64; 6]> {
+    let check = scan
+        .checks
+        .iter()
+        .find(|check| check.key == "vulnerabilities")?;
+    let mut counts = [0_i64; 6];
+    for finding in check
+        .findings
+        .iter()
+        .filter(|finding| finding.disposition.counts_as_active() && finding.vulnerability.is_some())
+    {
+        let vulnerability = finding.vulnerability.as_ref().expect("filtered above");
+        let index = if vulnerability.vulnerability.informational {
+            4
+        } else {
+            match vulnerability
+                .vulnerability
+                .cvss_rating
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("critical") => 0,
+                Some("high") => 1,
+                Some("medium") => 2,
+                Some("low") => 3,
+                Some("none") => 4,
+                _ => 5,
+            }
+        };
+        counts[index] += 1;
+    }
+    Some(counts)
 }
 
 pub fn utc_now() -> String {
@@ -1938,6 +2017,81 @@ mod tests {
         );
         drop(database);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn site_summary_caches_only_active_vulnerability_counts() {
+        let path = std::env::temp_dir().join(format!("wpmm-summary-{}.sqlite3", Uuid::new_v4()));
+        let feed_path = path.with_extension("json");
+        let database = Database::initialize(path.clone()).unwrap();
+        let site = database.save_site(&input(), None).unwrap();
+        let vulnerability_id = Uuid::new_v4().to_string();
+        let plugin = r#"{"type":"plugin","name":"Example Plugin","slug":"example-plugin","affected_versions":{"<= 1.2.3":{"from_version":"*","from_inclusive":true,"to_version":"1.2.3","to_inclusive":true}},"patched":true,"patched_versions":["1.2.4"],"remediation":"Update to 1.2.4"}"#;
+        fs::write(&feed_path, wordfence_fixture(&vulnerability_id, plugin)).unwrap();
+        database
+            .import_wordfence_feed(&feed_path, &utc_now())
+            .unwrap();
+        let inventory = [InstalledSoftware {
+            software_type: "plugin".into(),
+            slug: "example-plugin".into(),
+            name: "Example Plugin".into(),
+            version: "1.2.3".into(),
+            status: "inactive".into(),
+            update_version: Some("1.2.4".into()),
+            observed_at: utc_now(),
+        }];
+        database
+            .save_software_inventory(&site.id, &inventory)
+            .unwrap();
+        let check = crate::vulnerability_matcher::scan_inventory(&database, &inventory).unwrap();
+        let scan = |id: String, check: ScanCheck| ScanResult {
+            id,
+            site_id: site.id.clone(),
+            started_at: utc_now(),
+            finished_at: utc_now(),
+            status: SiteStatus::Attention,
+            checks: vec![check],
+            truncated: false,
+        };
+        database
+            .save_scan(
+                &scan(Uuid::new_v4().to_string(), check.clone()),
+                "Aandacht nodig",
+            )
+            .unwrap();
+        let summary = database
+            .get_site(&site.id)
+            .unwrap()
+            .site
+            .vulnerability_summary
+            .unwrap();
+        assert_eq!(summary.medium_count, 1);
+        assert_eq!(summary.critical_count, 0);
+        assert_eq!(
+            summary.inventory_observed_at,
+            Some(inventory[0].observed_at.clone())
+        );
+
+        let mut ignored = check;
+        ignored.findings[0].disposition = FindingDisposition::Ignored;
+        ignored.findings[0].id = Some(Uuid::new_v4().to_string());
+        database
+            .save_scan(
+                &scan(Uuid::new_v4().to_string(), ignored),
+                "Geen actieve aandachtspunten",
+            )
+            .unwrap();
+        let summary = database
+            .get_site(&site.id)
+            .unwrap()
+            .site
+            .vulnerability_summary
+            .unwrap();
+        assert_eq!(summary.medium_count, 0);
+
+        drop(database);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(feed_path);
     }
 
     #[test]
