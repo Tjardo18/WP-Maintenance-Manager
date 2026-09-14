@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from "vue";
+import { computed, onMounted, onUnmounted, watch } from "vue";
 import { useRoute, RouterLink, RouterView } from "vue-router";
 import { Activity, CircleAlert, Globe2, History, LayoutDashboard, ListChecks, LoaderCircle, LockKeyhole, Settings, ShieldCheck } from "@lucide/vue";
 import { useSitesStore } from "./stores/sites";
 import { useAuthStore } from "./stores/auth";
 import { useScanJobsStore } from "./stores/scanJobs";
+import { appApi } from "./services/tauri";
 import AuthView from "./views/AuthView.vue";
 
 const route = useRoute();
@@ -12,9 +13,13 @@ const sites = useSitesStore();
 const auth = useAuthStore();
 const scanJobs = useScanJobsStore();
 const pageTitle = computed(() => String(route.meta.title ?? "WP Maintenance Manager"));
+let unlistenWordfenceRefresh: (() => void) | undefined;
 
 onMounted(() => {
   void auth.initialize();
+  void appApi.onWordfenceFeedRefreshUpdated((job) => {
+    if (job.status === "completed" && auth.authenticated) void sites.load();
+  }).then((unlisten) => { unlistenWordfenceRefresh = unlisten; });
   window.addEventListener("keydown", (event) => {
     if (event.ctrlKey && event.key.toLowerCase() === "l" && auth.authenticated) {
       event.preventDefault();
@@ -22,6 +27,7 @@ onMounted(() => {
     }
   });
 });
+onUnmounted(() => unlistenWordfenceRefresh?.());
 watch(() => auth.authenticated, (unlocked) => {
   if (unlocked) {
     void sites.load();

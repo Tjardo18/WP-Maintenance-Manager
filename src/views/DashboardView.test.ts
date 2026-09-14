@@ -59,4 +59,14 @@ describe("dashboard background scans", () => {
     expect(wrapper.findAll(".table-card tbody tr")).toHaveLength(1);
     expect(wrapper.get(".table-card tbody").text()).toContain("Site A");
   });
+
+  it("labels findings based on stale cached versions as possible and asks for a rescan", () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useSitesStore().sites = [{ ...site, vulnerabilitySummary: { ...site.vulnerabilitySummary!, inventoryStale: true } }];
+    const wrapper = mount(DashboardView, { global: { plugins: [pinia], stubs: { RouterLink: { template: "<a><slot /></a>" } } } });
+
+    expect(wrapper.get(".vulnerability-priority").text()).toContain("Mogelijk · laatst bekende versies · scan opnieuw");
+    expect(wrapper.get(".table-card tbody").text()).toContain("Mogelijk · scan opnieuw");
+  });
 });

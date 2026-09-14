@@ -37,6 +37,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
 
+const INVENTORY_STALE_SECONDS: i64 = 7 * 24 * 60 * 60;
+
 #[tauri::command(async)]
 pub fn get_auth_status(
     session_token: Option<String>,
@@ -2420,6 +2422,27 @@ pub(crate) fn start_wordfence_feed_refresh_internal(
     Ok(job)
 }
 
+pub(crate) fn start_due_wordfence_feed_refresh(
+    app: AppHandle,
+) -> Result<Option<VulnerabilityRefreshJobState>, AppError> {
+    let should_refresh = {
+        let state = app.state::<AppState>();
+        let configured = state
+            .credentials
+            .get_optional(wordfence::WORDFENCE_CREDENTIAL_REFERENCE)?
+            .is_some();
+        let feed = state
+            .database
+            .vulnerability_feed_state(wordfence::WORDFENCE_PROVIDER)?;
+        configured
+            && wordfence::feed_refresh_due(feed.last_successful_update_at.as_deref(), Utc::now())
+    };
+    if !should_refresh {
+        return Ok(None);
+    }
+    start_wordfence_feed_refresh_internal(app, true).map(Some)
+}
+
 fn run_wordfence_feed_refresh(app: AppHandle, job_id: String) {
     let state = app.state::<AppState>();
     if let Ok(job) = state.vulnerability_jobs.mark_running(&job_id) {
@@ -2458,6 +2481,7 @@ fn run_wordfence_feed_refresh(app: AppHandle, job_id: String) {
         if let Ok(job) = state.vulnerability_jobs.phase(&job_id, "database", None) {
             emit_wordfence_refresh_job(&app, &job);
         }
+        recalculate_cached_vulnerability_sites(&state)?;
         Ok(summary)
     })();
     let _ = fs::remove_file(&temp_path);
@@ -2486,6 +2510,110 @@ fn run_wordfence_feed_refresh(app: AppHandle, job_id: String) {
             }
         }
     }
+}
+
+fn recalculate_cached_vulnerability_sites(state: &AppState) -> Result<usize, AppError> {
+    let sites = state.database.list_sites()?;
+    let feed = state
+        .database
+        .vulnerability_feed_state(wordfence::WORDFENCE_PROVIDER)?;
+    let mut recalculated = 0;
+    for site in sites {
+        match recalculate_cached_vulnerability_site(
+            state,
+            &site.id,
+            feed.last_successful_update_at.as_deref(),
+            Utc::now(),
+        ) {
+            Ok(true) => recalculated += 1,
+            Ok(false) => {}
+            Err(error) => {
+                let _ = error_log::persist_error(
+                    &state.database,
+                    Some(&site.id),
+                    Some(&site.name),
+                    "Vulnerability-status lokaal herberekenen",
+                    None,
+                    None,
+                    error,
+                );
+            }
+        }
+    }
+    Ok(recalculated)
+}
+
+fn recalculate_cached_vulnerability_site(
+    state: &AppState,
+    site_id: &str,
+    feed_updated_at: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<bool, AppError> {
+    let inventory = state.database.software_inventory(site_id)?;
+    if inventory.is_empty() {
+        return Ok(false);
+    }
+    let inventory_observed_at = inventory
+        .iter()
+        .filter_map(|item| {
+            DateTime::parse_from_rfc3339(&item.observed_at)
+                .ok()
+                .map(|timestamp| (timestamp.timestamp(), item.observed_at.as_str()))
+        })
+        .max_by_key(|(timestamp, _)| *timestamp)
+        .map(|(_, value)| value);
+    let inventory_stale = inventory_snapshot_is_stale(inventory_observed_at, now);
+    let mut vulnerability_check =
+        vulnerability_matcher::scan_inventory(&state.database, &inventory)?;
+    if inventory_stale {
+        vulnerability_check.summary = format!(
+            "Mogelijk verouderd op basis van de laatst bekende softwareversies. {} Scan de website opnieuw voor actuele versies.",
+            vulnerability_check.summary
+        );
+        let stale_details = "De opgeslagen software-inventaris is ouder dan zeven dagen; voor deze lokale herberekening is geen SSH-verbinding gemaakt.";
+        vulnerability_check.technical_details = Some(match vulnerability_check.technical_details {
+            Some(details) => format!("{details} · {stale_details}"),
+            None => stale_details.into(),
+        });
+    }
+    let exceptions = state.database.list_finding_exceptions(Some(site_id))?;
+    let mut vulnerability_checks = vec![vulnerability_check];
+    security_policy::apply_scan_policy(site_id, &mut vulnerability_checks, &exceptions, &[], now);
+    let vulnerability_check = vulnerability_checks
+        .pop()
+        .ok_or_else(|| AppError::storage("Vulnerability-check ontbreekt na policytoepassing"))?;
+    let Some(mut latest_scan) = state.database.latest_scan(site_id)? else {
+        return Ok(false);
+    };
+    if let Some(index) = latest_scan
+        .checks
+        .iter()
+        .position(|check| check.key == "vulnerabilities")
+    {
+        latest_scan.checks[index] = vulnerability_check.clone();
+    } else {
+        latest_scan.checks.push(vulnerability_check.clone());
+    }
+    latest_scan.status = security_policy::calculate_site_status(&latest_scan.checks);
+    let security_status = security_policy::security_summary(&latest_scan.checks);
+    state.database.save_current_vulnerability_state(
+        site_id,
+        &vulnerability_check,
+        latest_scan.status,
+        &security_status,
+        feed_updated_at,
+        inventory_observed_at,
+        inventory_stale,
+    )?;
+    Ok(true)
+}
+
+fn inventory_snapshot_is_stale(observed_at: Option<&str>, now: DateTime<Utc>) -> bool {
+    let Some(observed_at) = observed_at.and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+    else {
+        return true;
+    };
+    now.timestamp() - observed_at.timestamp() > INVENTORY_STALE_SECONDS
 }
 
 fn emit_wordfence_refresh_job(app: &AppHandle, job: &VulnerabilityRefreshJobState) {
@@ -3271,6 +3399,21 @@ mod tests {
                 "{unsafe_url}"
             );
         }
+    }
+
+    #[test]
+    fn cached_inventory_becomes_stale_only_after_seven_days() {
+        let now = Utc::now();
+        assert!(!inventory_snapshot_is_stale(
+            Some(&(now - chrono::Duration::days(7)).to_rfc3339()),
+            now
+        ));
+        assert!(inventory_snapshot_is_stale(
+            Some(&(now - chrono::Duration::days(7) - chrono::Duration::seconds(1)).to_rfc3339()),
+            now
+        ));
+        assert!(inventory_snapshot_is_stale(None, now));
+        assert!(inventory_snapshot_is_stale(Some("invalid"), now));
     }
 
     #[test]

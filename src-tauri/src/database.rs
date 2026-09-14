@@ -196,6 +196,22 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let vulnerability_current_state_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 12)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !vulnerability_current_state_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!(
+                "../migrations/0012_vulnerability_current_state.sql"
+            ))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(12, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -346,6 +362,17 @@ impl Database {
                 }
             }
         }
+        if let Some(check) = scan
+            .checks
+            .iter()
+            .find(|check| check.key == "vulnerabilities")
+        {
+            let check_json = serde_json::to_string(check).map_err(AppError::storage)?;
+            transaction.execute(
+                "INSERT INTO site_vulnerability_state(site_id,scan_run_id,check_json,site_status,security_status,recalculated_at,feed_updated_at,inventory_observed_at,inventory_stale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0) ON CONFLICT(site_id) DO UPDATE SET scan_run_id=excluded.scan_run_id,check_json=excluded.check_json,site_status=excluded.site_status,security_status=excluded.security_status,recalculated_at=excluded.recalculated_at,feed_updated_at=excluded.feed_updated_at,inventory_observed_at=excluded.inventory_observed_at,inventory_stale=0",
+                params![scan.site_id, scan.id, check_json, scan.status.as_db(), security_status, scan.finished_at, vulnerability_feed_updated_at, inventory_observed_at],
+            )?;
+        }
         if let Some(counts) = vulnerability_counts {
             transaction.execute(
                 "UPDATE sites SET status=?1,security_status=?2,last_scan_at=?3,updated_at=?3,vulnerability_critical_count=?5,vulnerability_high_count=?6,vulnerability_medium_count=?7,vulnerability_low_count=?8,vulnerability_info_count=?9,vulnerability_unknown_count=?10,vulnerability_last_checked_at=?3,vulnerability_feed_updated_at=?11,vulnerability_inventory_observed_at=?12,vulnerability_inventory_stale=0 WHERE id=?4",
@@ -414,6 +441,41 @@ impl Database {
             .map_err(AppError::from)
     }
 
+    pub fn save_current_vulnerability_state(
+        &self,
+        site_id: &str,
+        check: &ScanCheck,
+        site_status: SiteStatus,
+        security_status: &str,
+        feed_updated_at: Option<&str>,
+        inventory_observed_at: Option<&str>,
+        inventory_stale: bool,
+    ) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        let scan_run_id: String = transaction
+            .query_row(
+                "SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC,rowid DESC LIMIT 1",
+                [site_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Laatste scan"))?;
+        let check_json = serde_json::to_string(check).map_err(AppError::storage)?;
+        let recalculated_at = utc_now();
+        let counts = active_vulnerability_counts_for_check(check);
+        transaction.execute(
+            "INSERT INTO site_vulnerability_state(site_id,scan_run_id,check_json,site_status,security_status,recalculated_at,feed_updated_at,inventory_observed_at,inventory_stale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(site_id) DO UPDATE SET scan_run_id=excluded.scan_run_id,check_json=excluded.check_json,site_status=excluded.site_status,security_status=excluded.security_status,recalculated_at=excluded.recalculated_at,feed_updated_at=excluded.feed_updated_at,inventory_observed_at=excluded.inventory_observed_at,inventory_stale=excluded.inventory_stale",
+            params![site_id, scan_run_id, check_json, site_status.as_db(), security_status, recalculated_at, feed_updated_at, inventory_observed_at, inventory_stale],
+        )?;
+        transaction.execute(
+            "UPDATE sites SET status=?1,security_status=?2,updated_at=?3,vulnerability_critical_count=?4,vulnerability_high_count=?5,vulnerability_medium_count=?6,vulnerability_low_count=?7,vulnerability_info_count=?8,vulnerability_unknown_count=?9,vulnerability_last_checked_at=?3,vulnerability_feed_updated_at=?10,vulnerability_inventory_observed_at=?11,vulnerability_inventory_stale=?12 WHERE id=?13",
+            params![site_status.as_db(), security_status, recalculated_at, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], feed_updated_at, inventory_observed_at, inventory_stale, site_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn list_scans(&self, site_id: &str) -> Result<Vec<ScanResult>, AppError> {
         self.list_scans_with_limit(site_id, 20)
     }
@@ -478,7 +540,7 @@ impl Database {
         let row_limit = i64::try_from(limit).map_err(AppError::storage)?;
         let mut scans: Vec<ScanResult> = {
             let mut statement = connection.prepare(
-                "SELECT id,site_id,started_at,COALESCE(finished_at,started_at),status,truncated FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC LIMIT ?2",
+                "SELECT id,site_id,started_at,COALESCE(finished_at,started_at),status,truncated FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC,rowid DESC LIMIT ?2",
             )?;
             statement
                 .query_map(params![site_id, row_limit], |row| {
@@ -508,7 +570,7 @@ impl Database {
             let mut statement = connection.prepare(
                 "SELECT sc.id,sc.scan_run_id,sc.check_key,sc.label,sc.status,sc.summary,sc.technical_details
                  FROM scan_checks sc
-                 WHERE sc.scan_run_id IN (SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC LIMIT ?2)
+                 WHERE sc.scan_run_id IN (SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC,rowid DESC LIMIT ?2)
                  ORDER BY sc.rowid",
             )?;
             let rows = statement.query_map(params![site_id, row_limit], |row| {
@@ -539,7 +601,7 @@ impl Database {
                 "SELECT f.scan_check_id,f.id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason,f.policy_target,f.vulnerability_json
                  FROM findings f
                  JOIN scan_checks sc ON sc.id=f.scan_check_id
-                 WHERE sc.scan_run_id IN (SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC LIMIT ?2)
+                 WHERE sc.scan_run_id IN (SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC,rowid DESC LIMIT ?2)
                  ORDER BY f.rowid",
             )?;
             let rows = statement.query_map(params![site_id, row_limit], |row| {
@@ -573,6 +635,27 @@ impl Database {
                 }
             }
         }
+        if let Some((check_json, current_status)) = connection
+            .query_row(
+                "SELECT check_json,site_status FROM site_vulnerability_state WHERE site_id=?1 AND scan_run_id=?2",
+                params![site_id, scans[0].id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            let current_check: ScanCheck =
+                serde_json::from_str(&check_json).map_err(AppError::storage)?;
+            if let Some(index) = scans[0]
+                .checks
+                .iter()
+                .position(|check| check.key == "vulnerabilities")
+            {
+                scans[0].checks[index] = current_check;
+            } else {
+                scans[0].checks.push(current_check);
+            }
+            scans[0].status = SiteStatus::from_db(&current_status);
+        }
         Ok(scans)
     }
 
@@ -586,7 +669,7 @@ impl Database {
         finding_id: &str,
     ) -> Result<FindingContext, AppError> {
         let connection = self.connect()?;
-        connection
+        let stored = connection
             .query_row(
                 "SELECT f.site_id,f.scan_run_id,sc.check_key,f.id,f.category,f.severity,f.title,f.detail,f.path,f.checksum_status,f.observed_at,f.disposition,f.exception_id,f.trusted_file_id,f.policy_reason,f.policy_target,f.vulnerability_json
                  FROM findings f
@@ -623,8 +706,32 @@ impl Database {
                     })
                 },
             )
-            .optional()?
-            .ok_or_else(|| AppError::not_found("Actuele beveiligingsmelding"))
+            .optional()?;
+        if let Some(context) = stored {
+            return Ok(context);
+        }
+        let current = connection
+            .query_row(
+                "SELECT scan_run_id,check_json FROM site_vulnerability_state WHERE site_id=?1",
+                [site_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((scan_run_id, check_json)) = current else {
+            return Err(AppError::not_found("Actuele beveiligingsmelding"));
+        };
+        let check: ScanCheck = serde_json::from_str(&check_json).map_err(AppError::storage)?;
+        let finding = check
+            .findings
+            .into_iter()
+            .find(|finding| finding.id.as_deref() == Some(finding_id))
+            .ok_or_else(|| AppError::not_found("Actuele beveiligingsmelding"))?;
+        Ok(FindingContext {
+            site_id: site_id.to_owned(),
+            scan_run_id,
+            check_type: check.key,
+            finding,
+        })
     }
 
     pub fn list_finding_exceptions(
@@ -826,6 +933,22 @@ impl Database {
                     )?;
                 }
             }
+        }
+        if let Some(check) = scan
+            .checks
+            .iter()
+            .find(|check| check.key == "vulnerabilities")
+        {
+            let check_json = serde_json::to_string(check).map_err(AppError::storage)?;
+            let counts = active_vulnerability_counts_for_check(check);
+            transaction.execute(
+                "UPDATE site_vulnerability_state SET check_json=?1,site_status=?2,security_status=?3,recalculated_at=?4 WHERE site_id=?5 AND scan_run_id=?6",
+                params![check_json, scan.status.as_db(), security_status, utc_now(), scan.site_id, scan.id],
+            )?;
+            transaction.execute(
+                "UPDATE sites SET vulnerability_critical_count=?1,vulnerability_high_count=?2,vulnerability_medium_count=?3,vulnerability_low_count=?4,vulnerability_info_count=?5,vulnerability_unknown_count=?6 WHERE id=?7",
+                params![counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], scan.site_id],
+            )?;
         }
         transaction.execute(
             "UPDATE sites SET status=?1,security_status=?2,updated_at=?3 WHERE id=?4",
@@ -1763,6 +1886,10 @@ fn active_vulnerability_counts(scan: &ScanResult) -> Option<[i64; 6]> {
         .checks
         .iter()
         .find(|check| check.key == "vulnerabilities")?;
+    Some(active_vulnerability_counts_for_check(check))
+}
+
+fn active_vulnerability_counts_for_check(check: &ScanCheck) -> [i64; 6] {
     let mut counts = [0_i64; 6];
     for finding in check
         .findings
@@ -1790,7 +1917,7 @@ fn active_vulnerability_counts(scan: &ScanResult) -> Option<[i64; 6]> {
         };
         counts[index] += 1;
     }
-    Some(counts)
+    counts
 }
 
 pub fn utc_now() -> String {
@@ -2088,6 +2215,145 @@ mod tests {
             .vulnerability_summary
             .unwrap();
         assert_eq!(summary.medium_count, 0);
+
+        drop(database);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(feed_path);
+    }
+
+    #[test]
+    fn refreshed_feed_overlays_only_the_latest_scan_and_keeps_current_findings_actionable() {
+        let path =
+            std::env::temp_dir().join(format!("wpmm-current-vuln-{}.sqlite3", Uuid::new_v4()));
+        let feed_path = path.with_extension("json");
+        let database = Database::initialize(path.clone()).unwrap();
+        let site = database.save_site(&input(), None).unwrap();
+        let vulnerability_id = Uuid::new_v4().to_string();
+        let safe_plugin = r#"{"type":"plugin","name":"Example Plugin","slug":"example-plugin","affected_versions":{"<= 1.0.0":{"from_version":"*","from_inclusive":true,"to_version":"1.0.0","to_inclusive":true}},"patched":true,"patched_versions":["2.0.1"],"remediation":"Update"}"#;
+        fs::write(
+            &feed_path,
+            wordfence_fixture(&vulnerability_id, safe_plugin),
+        )
+        .unwrap();
+        database
+            .import_wordfence_feed(&feed_path, "2026-09-01T07:00:00Z")
+            .unwrap();
+        let inventory = [InstalledSoftware {
+            software_type: "plugin".into(),
+            slug: "example-plugin".into(),
+            name: "Example Plugin".into(),
+            version: "2.0.0".into(),
+            status: "active".into(),
+            update_version: Some("2.0.1".into()),
+            observed_at: "2026-09-01T09:00:00Z".into(),
+        }];
+        database
+            .save_software_inventory(&site.id, &inventory)
+            .unwrap();
+        let initial_check =
+            crate::vulnerability_matcher::scan_inventory(&database, &inventory).unwrap();
+        assert!(initial_check.findings.is_empty());
+        let scan = |id: String, started_at: &str, summary: &str| ScanResult {
+            id,
+            site_id: site.id.clone(),
+            started_at: started_at.into(),
+            finished_at: started_at.into(),
+            status: SiteStatus::Healthy,
+            checks: vec![ScanCheck {
+                summary: summary.into(),
+                ..initial_check.clone()
+            }],
+            truncated: false,
+        };
+        let old_id = Uuid::new_v4().to_string();
+        let current_id = Uuid::new_v4().to_string();
+        database
+            .save_scan(
+                &scan(
+                    old_id.clone(),
+                    "2026-09-01T08:00:00Z",
+                    "Historische snapshot",
+                ),
+                "Geen actieve aandachtspunten",
+            )
+            .unwrap();
+        database
+            .save_scan(
+                &scan(
+                    current_id.clone(),
+                    "2026-09-01T09:00:00Z",
+                    "Actuele snapshot",
+                ),
+                "Geen actieve aandachtspunten",
+            )
+            .unwrap();
+
+        let vulnerable_plugin = r#"{"type":"plugin","name":"Example Plugin","slug":"example-plugin","affected_versions":{"<= 2.0.0":{"from_version":"*","from_inclusive":true,"to_version":"2.0.0","to_inclusive":true}},"patched":true,"patched_versions":["2.0.1"],"remediation":"Update"}"#;
+        fs::write(
+            &feed_path,
+            wordfence_fixture(&vulnerability_id, vulnerable_plugin),
+        )
+        .unwrap();
+        database
+            .import_wordfence_feed(&feed_path, "2026-09-02T07:00:00Z")
+            .unwrap();
+        let refreshed =
+            crate::vulnerability_matcher::scan_inventory(&database, &inventory).unwrap();
+        let current_finding_id = refreshed.findings[0].id.clone().unwrap();
+        database
+            .save_current_vulnerability_state(
+                &site.id,
+                &refreshed,
+                SiteStatus::Attention,
+                "Aandacht nodig",
+                Some("2026-09-02T07:00:00Z"),
+                Some("2026-09-01T09:00:00Z"),
+                false,
+            )
+            .unwrap();
+
+        let scans = database.list_scans(&site.id).unwrap();
+        assert_eq!(scans[0].id, current_id);
+        assert_eq!(scans[0].checks[0].findings.len(), 1);
+        assert_eq!(scans[1].id, old_id);
+        assert_eq!(scans[1].checks[0].summary, "Historische snapshot");
+        assert!(scans[1].checks[0].findings.is_empty());
+        assert_eq!(
+            database
+                .get_finding_context(&site.id, &current_finding_id)
+                .unwrap()
+                .check_type,
+            "vulnerabilities"
+        );
+        let summary = database
+            .get_site(&site.id)
+            .unwrap()
+            .site
+            .vulnerability_summary
+            .unwrap();
+        assert_eq!(summary.medium_count, 1);
+
+        let mut current = scans[0].clone();
+        current.checks[0].findings[0].disposition = FindingDisposition::Ignored;
+        current.checks[0].status = StepStatus::Success;
+        current.status = SiteStatus::Healthy;
+        database
+            .update_scan_policy(&current, "Geen actieve aandachtspunten · 1 genegeerd")
+            .unwrap();
+        assert_eq!(
+            database
+                .get_site(&site.id)
+                .unwrap()
+                .site
+                .vulnerability_summary
+                .unwrap()
+                .medium_count,
+            0
+        );
+        assert_eq!(
+            database.list_scans(&site.id).unwrap()[0].checks[0].findings[0].disposition,
+            FindingDisposition::Ignored
+        );
 
         drop(database);
         let _ = fs::remove_file(path);

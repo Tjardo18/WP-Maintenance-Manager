@@ -2,6 +2,7 @@ use crate::{
     credentials::CredentialVault, database::Database, error::AppError,
     models::WordfenceIntegrationStatus, vulnerability_jobs::VulnerabilityRefreshManager,
 };
+use chrono::{DateTime, Utc};
 use reqwest::{StatusCode, blocking::Client, header::RETRY_AFTER};
 use serde::Deserialize;
 use serde_json::Value;
@@ -20,6 +21,15 @@ pub const WORDFENCE_PROVIDER: &str = "wordfence";
 pub const FEED_REFRESH_SECONDS: i64 = 24 * 60 * 60;
 pub const FEED_COOLDOWN_SECONDS: i64 = 30 * 60;
 const MAX_FEED_BYTES: u64 = 512 * 1024 * 1024;
+
+pub fn feed_refresh_due(last_successful_update_at: Option<&str>, now: DateTime<Utc>) -> bool {
+    let Some(updated_at) =
+        last_successful_update_at.and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+    else {
+        return true;
+    };
+    now.timestamp() - updated_at.timestamp() >= FEED_REFRESH_SECONDS
+}
 
 pub trait VulnerabilityProvider: Send + Sync {
     fn test_connection(&self, api_key: &str) -> Result<(), AppError>;
@@ -369,6 +379,21 @@ mod tests {
         assert!(validate_api_key("   ").is_err());
         assert!(validate_api_key("key\nvalue").is_err());
         assert!(validate_api_key(&"x".repeat(513)).is_err());
+    }
+
+    #[test]
+    fn automatic_refresh_is_due_only_when_the_feed_is_missing_or_at_least_a_day_old() {
+        let now = Utc::now();
+        assert!(feed_refresh_due(None, now));
+        assert!(feed_refresh_due(Some("not-a-timestamp"), now));
+        assert!(!feed_refresh_due(
+            Some(&(now - chrono::Duration::hours(23)).to_rfc3339()),
+            now
+        ));
+        assert!(feed_refresh_due(
+            Some(&(now - chrono::Duration::hours(24)).to_rfc3339()),
+            now
+        ));
     }
 
     #[test]

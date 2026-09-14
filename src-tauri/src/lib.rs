@@ -56,6 +56,12 @@ pub fn run() {
                 scan_jobs: scan_jobs::ScanJobManager::new(scan_concurrency),
                 vulnerability_jobs: vulnerability_jobs::VulnerabilityRefreshManager::default(),
             });
+            if let Err(error) = commands::start_due_wordfence_feed_refresh(app.handle().clone()) {
+                eprintln!(
+                    "automatic Wordfence refresh not started category={}",
+                    error.category
+                );
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
