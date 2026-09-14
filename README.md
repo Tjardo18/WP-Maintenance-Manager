@@ -4,7 +4,7 @@
 
 Een lokale, Nederlandstalige Windows-desktopapp voor beheer en onderhoud van meerdere WordPress-websites via SSH en WP-CLI. Dagelijks beheer gebruikt vooraf gedefinieerde acties; voor beheerders is per website daarnaast een geavanceerde interactieve SSH-terminal beschikbaar.
 
-> Status: functionele MVP. Applicatielogin, secure SSH, root-checksums, intelligente PHP-classificatie, begrensd checksum-bestandsbeheer, WordPress-gebruikersbeheer, core-reparatie, updates, lokale databasebackups, foutenlog, historie en de interactieve SSH-terminal zijn aangesloten. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan of remote command rapporteren.
+> Status: functionele bèta (`0.11.0-beta.1`). Applicatielogin, secure SSH, root-checksums, intelligente PHP-classificatie, begrensd checksum-bestandsbeheer, WordPress-gebruikersbeheer, core-reparatie, updates, lokale databasebackups, foutenlog, historie, Wordfence Intelligence en de interactieve SSH-terminal zijn aangesloten. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan of remote command rapporteren.
 
 Websitecontroles en bulkscans draaien als begrensde achtergrondtaken. Cached pagina's en navigatie blijven daardoor tijdens een scan bruikbaar, terwijl echte stapvoortgang en annulering beschikbaar blijven.
 
@@ -57,7 +57,57 @@ Een productie-installatiepakket maken:
 npm run tauri build
 ```
 
-Op Windows verschijnen daarna een MSI en NSIS-installer onder `src-tauri/target/release/bundle/`. De app- en pakketversie is `0.10.0-beta.1`; omdat Windows Installer geen tekstuele prerelease-identifiers accepteert, gebruikt uitsluitend de interne WiX/MSI-productversie de equivalente numerieke waarde `0.10.0.1`. Lokale builds zijn niet digitaal ondertekend; voor publieke distributie hoort daar een vertrouwd code-signingcertificaat bij.
+Op Windows verschijnen daarna een MSI en NSIS-installer onder `src-tauri/target/release/bundle/`. De app- en pakketversie is `0.11.0-beta.1`; omdat Windows Installer geen tekstuele prerelease-identifiers accepteert, gebruikt uitsluitend de interne WiX/MSI-productversie de equivalente numerieke waarde `0.11.0.1`. Lokale builds zijn niet digitaal ondertekend; voor publieke distributie hoort daar een vertrouwd code-signingcertificaat bij.
+
+## Wordfence Intelligence instellen
+
+De app gebruikt de officiële Wordfence Intelligence V3 Production Feed om WordPress Core, plugins en thema's lokaal op bekende kwetsbaarheden te controleren. De plek voor de sleutel is:
+
+`WP Maintenance Manager → Instellingen → Integraties → Wordfence Intelligence → API-sleutel`
+
+Volg deze stappen:
+
+1. Maak een Wordfence.com-account of log in op je bestaande account.
+2. Open in je Wordfence-account de sectie **Integrations**.
+3. Maak daar een API key voor de **Vulnerability Data Feed**.
+4. Kopieer de key wanneer Wordfence hem toont; Wordfence toont hem maar één keer.
+5. Open WP Maintenance Manager.
+6. Ga naar **Instellingen → Integraties → Wordfence Intelligence**.
+7. Plak de key in het veld **API-sleutel**.
+8. Klik op **Opslaan**.
+9. Klik op **Verbinding testen**.
+10. Klik daarna op **Database nu vernieuwen** om de stap **Vulnerability database bijwerken** te starten.
+
+**Plaats de API key NIET in de repository, sourcecode of SQLite database.** Gebruik geen `.env`-bestand of configuratiebestand voor de normale productflow. De app stuurt de ingevoerde sleutel rechtstreeks naar de beveiligde credentialopslag van Windows en geeft hem na opslag niet terug aan de interface.
+
+De verbindingstest haalt de complete Production Feed al gestreamd op. De eerstvolgende database-update hergebruikt die tijdelijke download en veroorzaakt dus geen tweede Wordfence-request. Daarna vernieuwt de app een ontbrekende of minstens 24 uur oude feed bij het opstarten op de achtergrond. Een lokale cooldown voorkomt meer dan één feedrequest binnen 30 minuten. Normale websitescans doen nooit een Wordfence-request: type-, slug- en versiecontrole gebruikt uitsluitend de genormaliseerde lokale SQLite-cache.
+
+De gebruikte endpoint is:
+
+```text
+GET https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production
+Authorization: Bearer YOUR_API_KEY
+```
+
+Zie de [officiële V3-documentatie](https://www.wordfence.com/help/wordfence-intelligence/v3-accessing-and-consuming-the-vulnerability-data-feed/) en de [Wordfence Intelligence Terms and Conditions](https://www.wordfence.com/wordfence-intelligence-terms-and-conditions/). Door de feed te gebruiken erken je de toepasselijke voorwaarden. Copyright- en licentiegegevens uit een record blijven bewaard en zijn in **Details → Bronnen en licenties** beschikbaar.
+
+## Wordfence werkt niet
+
+### API-sleutel ongeldig
+
+Controleer of je de juiste Wordfence Intelligence API key voor de Vulnerability Data Feed hebt ingevoerd. Vervang hem via **Instellingen → Integraties → Wordfence Intelligence** en test opnieuw.
+
+### Rate limit
+
+Wacht tot de in de app aangegeven refreshperiode is verstreken. De app probeert niet agressief opnieuw en blijft de vorige geldige lokale database gebruiken.
+
+### Database niet beschikbaar
+
+Klik op **Database nu vernieuwen**. Als een vernieuwing mislukt, blijft een eerder geldige lokale database actief. Zonder eerdere database wordt alleen de vulnerabilitystap overgeslagen; SSH-scans, updates en onderhoud blijven werken.
+
+### Geen kwetsbaarheden gevonden
+
+Dit betekent alleen dat voor de exact gematchte softwareversies geen bekende kwetsbaarheid in de huidige lokale Wordfence-database is gevonden. Het is geen bewijs dat de website of niet-gematchte custom/premiumsoftware veilig is.
 
 ## WP-CLI autocomplete database
 
@@ -112,6 +162,9 @@ Productiedata komt in de app-datamap die Tauri voor `nl.wpmaintenancemanager.des
 - Website toevoegen/bewerken/verwijderen en veilige authenticatiekeuze.
 - Persistente SQLite-siteopslag met UUID's, UTC-timestamps en cascading historie-tabellen.
 - OS-credentialopslag voor wachtwoorden/passphrases; secrets komen nooit in SQLite of IPC-responses.
+- Wordfence Intelligence V3 Production Feed met beveiligde API-keyopslag, streaming achtergrondimport, atomisch vervangbare genormaliseerde SQLite-cache en lokale 24-uursrefresh.
+- Exacte type-/slugmatching en numerieke versie-rangecontrole voor WordPress Core, alle plugins en thema's, inclusief CVSS, CVE, CWE, remediation, patched versions, referenties en recordattributie.
+- Gecachete vulnerabilitytellingen op het Dashboard en lokale herberekening na een feedupdate zonder SSH; inventaris ouder dan zeven dagen wordt expliciet als mogelijk verouderd gemarkeerd.
 - SSH key/password-authenticatie met time-outs, SHA-256-host-key-pinning en een blokkerende mismatchmelding.
 - Centrale Rust-commandcatalogus met pad-, slug- en dagenvalidatie en begrensde remote output.
 - Securityscan met vanuit de WordPress-root uitgevoerde `--include-root`-corechecksums, getypeerde modified/missing/unexpected-resultaten, accounts, intelligente statische PHP-classificatie, PHP in uploads, recente bestanden, world-writable permissions, geselecteerde configuratie en databasecheck. Normale plugin-/theme-PHP blijft standaard verborgen; opvallende locatie-, naam- en inhoudscombinaties worden met redenen getoond.
@@ -140,4 +193,4 @@ Zie [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md), [docs/PERFOR
 
 Versie 1 ondersteunt alleen WordPress op Linux/POSIX-hosting via SSH. Interactieve Terminaltoegang vereist dat de server gewone SSH-passwordauthenticatie aanbiedt; `PasswordAuthentication no` blokkeert deze specifieke functie zonder fallback naar de opgeslagen key. Backups vóór onderhoud en coreacties zijn databasebackups; er is nog geen volledige bestandsbackup of automatische rollback. De bestandsflow is bewust geen filemanager en kan alleen actuele `unexpected` checksumfindings openen/verwijderen. Trust kan ook andere actuele findings met een bestaand site-relatief bestand hashen, maar biedt geen algemene bestandsbrowser. Een site met actieve trustregistraties gebruikt tijdens een scan één aanvullende gebundelde SFTP-sessie voor fingerprintcontrole. Een core-reparatie verwijdert onbekende bestanden niet. Userverwijdering op Multisite is alleen voor de huidige site, nooit netwerkbreed. Full-screen interactieve programma's zijn afhankelijk van de remote shell/hosting; de primaire dekking is normale shellinvoer, `cd`, WP-CLI, streaming en interrupts. WP-autocomplete parseert nog geen complexe shell-AST of chained `wp`-commando's.
 
-Een geslaagde homepagecheck of securityscan is geen garantie dat een complete website foutloos of volledig veilig is. Een reeds geautoriseerde backendactie mag na een lock veilig afronden; de lock start geen rollback. De applicatielogin beperkt ongewenst gebruik via de app, maar beschermt niet tegen volledige controle over het Windows-account, procesgeheugen of bestandssysteem. Automatische malwareverwijdering, quarantaine, database-optimalisatie en digitaal ondertekende publieke installers vallen buiten versie 1.
+Een geslaagde homepagecheck, checksumscan of Wordfence-match is geen garantie dat een complete website foutloos of volledig veilig is. Wordfence-resultaten zijn afhankelijk van de huidige feed, een exacte software-identiteit en de laatst waargenomen geïnstalleerde versie; custom of premiumsoftware zonder match is niet bewezen veilig. Een reeds geautoriseerde backendactie mag na een lock veilig afronden; de lock start geen rollback. De applicatielogin beperkt ongewenst gebruik via de app, maar beschermt niet tegen volledige controle over het Windows-account, procesgeheugen of bestandssysteem. Automatische malwareverwijdering, quarantaine, database-optimalisatie en digitaal ondertekende publieke installers vallen buiten deze bèta.

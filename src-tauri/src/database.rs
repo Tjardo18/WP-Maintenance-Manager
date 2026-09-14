@@ -2118,6 +2118,77 @@ mod tests {
     }
 
     #[test]
+    fn production_feed_import_handles_all_software_types_nullable_details_and_attribution() {
+        let path = std::env::temp_dir().join(format!("wpmm-feed-shape-{}.sqlite3", Uuid::new_v4()));
+        let feed_path = path.with_extension("json");
+        let database = Database::initialize(path.clone()).unwrap();
+        let vulnerability_id = Uuid::new_v4().to_string();
+        let range = r#""affected_versions":{"all":{"from_version":"*","from_inclusive":true,"to_version":"*","to_inclusive":true}},"patched":false,"patched_versions":[],"remediation":null"#;
+        let feed = format!(
+            r#"{{"{vulnerability_id}":{{"id":"{vulnerability_id}","title":"Informational fixture","software":[{{"type":"plugin","name":"Plugin","slug":"plugin-a",{range}}},{{"type":"theme","name":"Theme","slug":"theme-a",{range}}},{{"type":"core","name":"WordPress","slug":"wordpress",{range}}}],"informational":true,"description":null,"references":[],"cwe":null,"cvss":null,"cve":null,"cve_link":null,"researchers":[],"published":null,"updated":null,"copyrights":{{"message":"Attribution required","defiant":{{"notice":"Fixture notice","license":"Fixture license","license_url":"https://www.wordfence.com/wordfence-intelligence-terms-and-conditions/"}}}}}}}}"#
+        );
+        fs::write(&feed_path, feed).unwrap();
+        let summary = database
+            .import_wordfence_feed(&feed_path, &utc_now())
+            .unwrap();
+        assert_eq!(summary.vulnerability_count, 1);
+        assert_eq!(summary.software_record_count, 3);
+        let inventory = [
+            InstalledSoftware {
+                software_type: "plugin".into(),
+                slug: "plugin-a".into(),
+                name: "Plugin".into(),
+                version: "1.0.0".into(),
+                status: "active".into(),
+                update_version: None,
+                observed_at: utc_now(),
+            },
+            InstalledSoftware {
+                software_type: "theme".into(),
+                slug: "theme-a".into(),
+                name: "Theme".into(),
+                version: "2.0.0".into(),
+                status: "inactive".into(),
+                update_version: None,
+                observed_at: utc_now(),
+            },
+            InstalledSoftware {
+                software_type: "core".into(),
+                slug: "wordpress".into(),
+                name: "WordPress".into(),
+                version: "6.8.2".into(),
+                status: "active".into(),
+                update_version: None,
+                observed_at: utc_now(),
+            },
+        ];
+        let candidates = database
+            .vulnerability_candidates_for_inventory(WORDFENCE_PROVIDER, &inventory)
+            .unwrap();
+        assert_eq!(
+            candidates.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![1, 1, 1]
+        );
+        for candidate in candidates.into_iter().flatten() {
+            assert!(candidate.informational);
+            assert!(candidate.cvss_score.is_none());
+            assert!(candidate.cve.is_none());
+            assert_eq!(
+                candidate
+                    .copyrights
+                    .as_ref()
+                    .and_then(|value| value.get("message"))
+                    .and_then(serde_json::Value::as_str),
+                Some("Attribution required")
+            );
+        }
+
+        drop(database);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(feed_path);
+    }
+
+    #[test]
     fn vulnerability_feed_attempt_enforces_a_local_cooldown() {
         let path = std::env::temp_dir().join(format!("wpmm-cooldown-{}.sqlite3", Uuid::new_v4()));
         let database = Database::initialize(path.clone()).unwrap();

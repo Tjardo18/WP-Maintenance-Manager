@@ -39,6 +39,18 @@ Bij iedere volgende scan worden actieve trustregistraties opnieuw gecontroleerd.
 
 Notities zijn optioneel, begrensd en weigeren herkenbare secretmarkers. Auditregels bevatten alleen site, target, findingtype/actie en tijd; nooit bestandsinhoud, credential of volledige remote output.
 
+## Wordfence Intelligence Integration
+
+- De Wordfence API key staat uitsluitend in de beveiligde credentialopslag van het besturingssysteem. SQLite bewaart alleen feed- en scanmetadata; de key komt niet in SQLite, frontendpersistence, auditregels, foutenlogs, fixtures, URL's of Git en wordt na opslag niet aan Vue teruggestuurd.
+- Alleen de Rust-backend maakt via `reqwest` en normale TLS-certificaatverificatie verbinding met de officiële V3 Production Feed. Authenticatie gebruikt uitsluitend `Authorization: Bearer …`; de header en sleutel worden nooit gelogd. Er is geen optie om certificaatcontrole uit te schakelen.
+- Een verbindingstest streamt de complete feed naar een backend-beheerd tijdelijk cachebestand. De volgende database-update claimt en importeert diezelfde download, zodat de voorgeschreven test- en updateflow niet twee feedrequests veroorzaakt. Een tijdelijke of half gedownloade file wordt nooit als actieve dataset gebruikt.
+- De feedrequest bevat geen sitenaam, klant-URL, SSH-hostname of software-inventaris. Core-, plugin- en themamatching gebeurt volledig lokaal. De API key wordt nooit via SSH verzonden en de app installeert Wordfence niet op beheerde websites.
+- Een import gebruikt een SQLite-transactie en activeert de nieuwe complete dataset pas nadat streaming JSON-validatie en normalisatie volledig zijn geslaagd. Bij HTTP-, JSON- of databasefouten blijft de vorige dataset actief. Een lokale 30-minutencooldown en 24-uurs automatische policy voorkomen agressieve requests; `429` veroorzaakt geen retry-loop.
+- Providerrecords zijn niet-vertrouwde data. Titels, beschrijvingen, remediation, researchers en copyrighttekst worden alleen via tekstinterpolatie weergegeven. Externe links worden in Vue én Rust beperkt tot geldige `http`/`https`-URL's zonder credentials voordat de OS-browseropener wordt gebruikt; `javascript:`, `file:` en custom protocollen worden geweigerd.
+- Het volledige `copyrights`-object blijft behouden. Record-specifieke notices en licenties, waaronder aanwezige MITRE/CVE-attributie, zijn toegankelijk via **Bronnen en licenties** in het detailvenster.
+- Een feed ouder dan 24 uur blijft bruikbaar maar wordt als verouderd aangeduid. Na een nieuwe feed wordt een opgeslagen software-inventaris uitsluitend lokaal opnieuw gematcht. Inventaris ouder dan zeven dagen levert een expliciete **mogelijke kwetsbaarheid op basis van laatst bekende versie** op met advies om de website opnieuw te scannen.
+- Wordfence Intelligence is security intelligence, geen veiligheidsbewijs. Geen finding betekent alleen dat geen bekende vulnerability voor een exact gematchte identiteit en vergelijkbare versie in de actieve lokale feed is gevonden. Onbekende, custom en premiumsoftware kan buiten de dekking vallen.
+
 ## WordPress users en core
 
 Usermutaties laden de actuele users, rollen en Multisite-status vlak vóór uitvoering opnieuw. Remote commands gebruiken numerieke user-id's. De backend blokkeert verwijdering of degradatie van de laatste Administrator, eist exact één contentkeuze en voegt nooit `--network` toe.

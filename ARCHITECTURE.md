@@ -34,6 +34,34 @@ De WP-CLI autocomplete-index wordt één keer uit de recursieve resource opgebou
 
 De Rust-backend is opgesplitst in domeinmodellen, SQLite-repositories, runtime-authenticatie, credentialopslag, SSH-adapter, managed commandcatalogus, interactieve terminalmanager, centrale error-logservice, checksum-bestandsservice, userservice, scan-/update-engine en maintenance-/core-orchestratie. De normale SSH-executor is een trait zodat managed flows mocks kunnen gebruiken.
 
+## Wordfence Intelligence V3
+
+```text
+Wordfence Intelligence V3 Production Feed
+        ↓ Authorization: Bearer via geverifieerde HTTPS
+Streaming download → backend-tempfile → JSON-validatie
+        ↓                                  ↓ failure: oude dataset blijft actief
+Atomaire SQLite-transactie → genormaliseerde actieve vulnerabilitydataset
+        ↓
+Index op provider + software type + exacte slug
+        ↓
+Lokale numerieke/prerelease version-range matcher
+        ↓
+Gecachete WordPress Core/plugin/theme-inventaris
+        ↓
+Typed Security Findings → uitzonderingen/severity
+        ↓
+Gecachete sitesamenvatting → Dashboard + Security UI
+```
+
+`WordfenceIntelligenceProvider` implementeert de providergrens voor een streaming complete-feeddownload. Alleen de V3 Production Feed is nu actief; de service- en opslaggrenzen laten een latere provider toe zonder multi-providerlogica in de huidige UI te introduceren. De API key komt uit de OS credential store en gaat alleen als Bearer-header naar `www.wordfence.com`. De request bevat geen site- of klantgegevens.
+
+De verbindingstest en de eerste refresh delen één backend-download: een volledig ontvangen testfeed wordt maximaal 24 uur als staged bestand in de app-cache gehouden en door de databasejob atomair geclaimd. Nieuwe downloads worden naar een unieke tempfile gestreamd. `serde_json::Deserializer` leest via `BufReader` rechtstreeks de root-map; vulnerabilities, softwarekoppelingen, ranges en attributie worden binnen één transactie ingevoegd. Alleen na een complete geldige import wisselt `vulnerability_feed_state.active_dataset_id`; daarna verdwijnen records uit de vorige complete dataset coherent. Mislukking rolt de nieuwe transactie terug en laat de actieve cache ongemoeid.
+
+`vulnerable_software` is geïndexeerd op provider, softwaretype en slug. Plugins en thema's matchen uitsluitend op exact type plus exacte slug. Core gebruikt daadwerkelijk als `type=core` aangeleverde records en verzint geen provider-slug. De matcher vergelijkt numerieke dotted versies en bekende prereleasestadia, respecteert `*` plus inclusieve/exclusieve grenzen en maakt bij onbekende notatie een typed vergelijkingsmelding in plaats van een veilige of kwetsbare uitkomst te gokken. Een normale sitescan downloadt nooit een feed.
+
+Feedrefresh is een onafhankelijke named worker met korte jobstate-locks en fases voor download, validatie, verwerking en lokale database-update. Bij appstart start alleen een ontbrekende of minstens 24 uur oude feed op de achtergrond; een lokale 30-minutencooldown en server-`429` verhinderen retrylussen. Na succesvolle import worden alle aanwezige `software_inventory`-snapshots lokaal opnieuw gematcht, zonder SSH. De tabel `site_vulnerability_state` bewaart de actuele afgeleide check en overschrijft alleen de nieuwste Security-weergave; historische scanrecords en finding-snapshots blijven intact. `sites` bevat compacte severitytellingen voor het Dashboard, zodat daar geen feedjoin of grote reactieve array nodig is. Een inventorysnapshot ouder dan zeven dagen wordt als mogelijk verouderd gemarkeerd.
+
 ## Background Jobs and Responsiveness
 
 Een normale site- of bulkscan loopt niet meer binnen de levensduur van een lang Tauri-request:

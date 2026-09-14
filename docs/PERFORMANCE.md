@@ -14,6 +14,7 @@ filesystem and HTTP latency depends on the remote server.
 | UI-blocking scan work | Full request lifecycle | None; the scan runs on a named blocking worker and reports events |
 | Synthetic full scan | Not retained for the old implementation | 2.07 s; 2.062 s was the deliberately failing local HTTP check and mocked SSH/parser steps were 0 ms |
 | Persist and read 5,000 findings | No isolated baseline retained | 198 ms write, 18 ms read, using one transaction and prepared statements |
+| Match 100 installed plugins against the local Wordfence index | Not applicable | Below 2 seconds in the deterministic Rust regression test; no network or SSH request |
 
 The old implementation was inspected before refactoring. It authenticated once
 for the initial scan and then opened a new authenticated SSH session for each
@@ -43,6 +44,13 @@ slow hosting step without logging command output, paths or credentials.
 - IPC warning threshold in development: 1 MiB.
 - Security-result page sizes: 25, 50 or 100 rows; normal PHP inventory entries are
   summarized rather than sent to Vue.
+- Wordfence Production Feed refresh: at most once automatically per 24 hours and
+  never from a normal site scan. The response streams to disk and is parsed with
+  `BufReader`; only compact job progress crosses IPC.
+- Vulnerability matching: indexed by provider, software type and exact slug.
+  Dashboard counts are precomputed on `sites`; a successful feed refresh
+  re-evaluates cached inventories locally without SSH and does not rewrite old
+  scan history.
 
 ## Remaining measurement limitations
 
