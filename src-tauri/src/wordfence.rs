@@ -32,7 +32,6 @@ pub fn feed_refresh_due(last_successful_update_at: Option<&str>, now: DateTime<U
 }
 
 pub trait VulnerabilityProvider: Send + Sync {
-    fn test_connection(&self, api_key: &str) -> Result<(), AppError>;
     fn download_feed(&self, api_key: &str, destination: &Path) -> Result<u64, AppError>;
 }
 
@@ -177,12 +176,6 @@ impl WordfenceIntelligenceProvider {
 }
 
 impl VulnerabilityProvider for WordfenceIntelligenceProvider {
-    fn test_connection(&self, api_key: &str) -> Result<(), AppError> {
-        let response = self.request(api_key)?;
-        drop(response);
-        Ok(())
-    }
-
     fn download_feed(&self, api_key: &str, destination: &Path) -> Result<u64, AppError> {
         let mut response = self.request(api_key)?;
         if response
@@ -404,7 +397,7 @@ mod tests {
             Duration::from_secs(2),
         )
         .unwrap();
-        provider.test_connection("test-api-key").unwrap();
+        drop(provider.request("test-api-key").unwrap());
         let request = request.recv().unwrap();
         assert!(request.starts_with("GET /production HTTP/1.1\r\n"));
         assert!(request.contains("authorization: Bearer test-api-key\r\n"));
@@ -430,7 +423,7 @@ mod tests {
                 Duration::from_secs(2),
             )
             .unwrap();
-            let error = provider.test_connection("never-log-this-key").unwrap_err();
+            let error = provider.request("never-log-this-key").unwrap_err();
             assert_eq!(error.category, category);
             assert_eq!(error.retryable, retryable);
             assert!(!format!("{error:?}").contains("never-log-this-key"));
@@ -448,7 +441,7 @@ mod tests {
             Duration::from_millis(20),
         )
         .unwrap();
-        let error = provider.test_connection("timeout-secret").unwrap_err();
+        let error = provider.request("timeout-secret").unwrap_err();
         assert_eq!(error.category, "connection_timeout");
         assert!(!format!("{error:?}").contains("timeout-secret"));
     }

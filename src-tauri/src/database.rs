@@ -27,6 +27,16 @@ pub struct Database {
     path: PathBuf,
 }
 
+pub struct CurrentVulnerabilityState<'a> {
+    pub site_id: &'a str,
+    pub check: &'a ScanCheck,
+    pub site_status: SiteStatus,
+    pub security_status: &'a str,
+    pub feed_updated_at: Option<&'a str>,
+    pub inventory_observed_at: Option<&'a str>,
+    pub inventory_stale: bool,
+}
+
 impl Database {
     pub fn initialize(path: PathBuf) -> Result<Self, AppError> {
         if let Some(parent) = path.parent() {
@@ -443,34 +453,28 @@ impl Database {
 
     pub fn save_current_vulnerability_state(
         &self,
-        site_id: &str,
-        check: &ScanCheck,
-        site_status: SiteStatus,
-        security_status: &str,
-        feed_updated_at: Option<&str>,
-        inventory_observed_at: Option<&str>,
-        inventory_stale: bool,
+        current: &CurrentVulnerabilityState<'_>,
     ) -> Result<(), AppError> {
         let connection = self.connect()?;
         let transaction = connection.unchecked_transaction()?;
         let scan_run_id: String = transaction
             .query_row(
                 "SELECT id FROM scan_runs WHERE site_id=?1 ORDER BY started_at DESC,rowid DESC LIMIT 1",
-                [site_id],
+                [current.site_id],
                 |row| row.get(0),
             )
             .optional()?
             .ok_or_else(|| AppError::not_found("Laatste scan"))?;
-        let check_json = serde_json::to_string(check).map_err(AppError::storage)?;
+        let check_json = serde_json::to_string(current.check).map_err(AppError::storage)?;
         let recalculated_at = utc_now();
-        let counts = active_vulnerability_counts_for_check(check);
+        let counts = active_vulnerability_counts_for_check(current.check);
         transaction.execute(
             "INSERT INTO site_vulnerability_state(site_id,scan_run_id,check_json,site_status,security_status,recalculated_at,feed_updated_at,inventory_observed_at,inventory_stale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(site_id) DO UPDATE SET scan_run_id=excluded.scan_run_id,check_json=excluded.check_json,site_status=excluded.site_status,security_status=excluded.security_status,recalculated_at=excluded.recalculated_at,feed_updated_at=excluded.feed_updated_at,inventory_observed_at=excluded.inventory_observed_at,inventory_stale=excluded.inventory_stale",
-            params![site_id, scan_run_id, check_json, site_status.as_db(), security_status, recalculated_at, feed_updated_at, inventory_observed_at, inventory_stale],
+            params![current.site_id, scan_run_id, check_json, current.site_status.as_db(), current.security_status, recalculated_at, current.feed_updated_at, current.inventory_observed_at, current.inventory_stale],
         )?;
         transaction.execute(
             "UPDATE sites SET status=?1,security_status=?2,updated_at=?3,vulnerability_critical_count=?4,vulnerability_high_count=?5,vulnerability_medium_count=?6,vulnerability_low_count=?7,vulnerability_info_count=?8,vulnerability_unknown_count=?9,vulnerability_last_checked_at=?3,vulnerability_feed_updated_at=?10,vulnerability_inventory_observed_at=?11,vulnerability_inventory_stale=?12 WHERE id=?13",
-            params![site_status.as_db(), security_status, recalculated_at, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], feed_updated_at, inventory_observed_at, inventory_stale, site_id],
+            params![current.site_status.as_db(), current.security_status, recalculated_at, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], current.feed_updated_at, current.inventory_observed_at, current.inventory_stale, current.site_id],
         )?;
         transaction.commit()?;
         Ok(())
@@ -2301,15 +2305,15 @@ mod tests {
             crate::vulnerability_matcher::scan_inventory(&database, &inventory).unwrap();
         let current_finding_id = refreshed.findings[0].id.clone().unwrap();
         database
-            .save_current_vulnerability_state(
-                &site.id,
-                &refreshed,
-                SiteStatus::Attention,
-                "Aandacht nodig",
-                Some("2026-09-02T07:00:00Z"),
-                Some("2026-09-01T09:00:00Z"),
-                false,
-            )
+            .save_current_vulnerability_state(&CurrentVulnerabilityState {
+                site_id: &site.id,
+                check: &refreshed,
+                site_status: SiteStatus::Attention,
+                security_status: "Aandacht nodig",
+                feed_updated_at: Some("2026-09-02T07:00:00Z"),
+                inventory_observed_at: Some("2026-09-01T09:00:00Z"),
+                inventory_stale: false,
+            })
             .unwrap();
 
         let scans = database.list_scans(&site.id).unwrap();

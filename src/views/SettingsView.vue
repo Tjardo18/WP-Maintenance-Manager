@@ -23,7 +23,7 @@ const refreshJob = ref<VulnerabilityRefreshJobState>();
 const integrationMessage = ref<string>();
 const error = ref<string>();
 
-const wordfenceStatusLabel = computed(() => wordfence.value?.configured ? "Ingesteld" : "Niet geconfigureerd");
+const wordfenceStatusLabel = computed(() => wordfence.value?.connectionStatus === "connected" ? "Verbonden" : wordfence.value?.configured ? "Ingesteld" : "Niet geconfigureerd");
 const feedStatusLabel = computed(() => ({ missing: "Niet gedownload", current: "Actueel", stale: "Vernieuwing gewenst", refreshing: "Wordt bijgewerkt…", failed: "Vernieuwen mislukt" })[wordfence.value?.feedStatus ?? "missing"]);
 const refreshPhaseLabel = computed(() => ({ download: "Downloaden", validate: "Controleren", process: "Verwerken", database: "Lokale websites herberekenen", complete: "Klaar" })[refreshJob.value?.phase ?? wordfence.value?.refreshPhase ?? "download"]);
 let unlistenRefresh: (() => void) | undefined;

@@ -31,13 +31,14 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant, SystemTime},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
 
 const INVENTORY_STALE_SECONDS: i64 = 7 * 24 * 60 * 60;
+const STAGED_WORDFENCE_FEED_FILE: &str = "wordfence-connection-test.json";
 
 #[tauri::command(async)]
 pub fn get_auth_status(
@@ -2210,11 +2211,7 @@ pub fn get_wordfence_status(
     state: State<'_, AppState>,
 ) -> Result<WordfenceIntegrationStatus, AppError> {
     require_auth(&state, &session_token)?;
-    wordfence::integration_status(
-        &state.credentials,
-        &state.database,
-        &state.vulnerability_jobs,
-    )
+    wordfence_status_for_state(&state)
 }
 
 #[tauri::command(async)]
@@ -2225,6 +2222,7 @@ pub fn save_wordfence_api_key(
 ) -> Result<WordfenceIntegrationStatus, AppError> {
     require_auth(&state, &session_token)?;
     let api_key = Zeroizing::new(api_key);
+    remove_staged_wordfence_feed(&state);
     wordfence::save_api_key(&state.credentials, &api_key)?;
     state.database.save_audit_event(
         None,
@@ -2233,11 +2231,7 @@ pub fn save_wordfence_api_key(
         "success",
         Some("Wordfence API-sleutel opgeslagen in de beveiligde credentialopslag"),
     )?;
-    wordfence::integration_status(
-        &state.credentials,
-        &state.database,
-        &state.vulnerability_jobs,
-    )
+    wordfence_status_for_state(&state)
 }
 
 #[tauri::command(async)]
@@ -2247,6 +2241,7 @@ pub fn remove_wordfence_api_key(
 ) -> Result<WordfenceIntegrationStatus, AppError> {
     require_auth(&state, &session_token)?;
     wordfence::remove_api_key(&state.credentials)?;
+    remove_staged_wordfence_feed(&state);
     state.database.save_audit_event(
         None,
         "wordfence_key_removed",
@@ -2254,11 +2249,7 @@ pub fn remove_wordfence_api_key(
         "success",
         Some("Wordfence API-sleutel uit de beveiligde credentialopslag verwijderd"),
     )?;
-    wordfence::integration_status(
-        &state.credentials,
-        &state.database,
-        &state.vulnerability_jobs,
-    )
+    wordfence_status_for_state(&state)
 }
 
 #[tauri::command(async)]
@@ -2274,9 +2265,30 @@ pub fn test_wordfence_connection(
             .ok_or_else(|| AppError::validation("Sla eerst een Wordfence API-sleutel op."))?,
     );
     let started = Instant::now();
-    let result = wordfence::WordfenceIntelligenceProvider::new().and_then(|provider| {
-        wordfence::VulnerabilityProvider::test_connection(&provider, &api_key)
-    });
+    let staged_path = staged_wordfence_feed_path(&state);
+    let staging_path = staged_path.with_extension("download");
+    let result = (|| {
+        let cooldown = state.database.vulnerability_feed_cooldown_remaining(
+            wordfence::WORDFENCE_PROVIDER,
+            wordfence::FEED_COOLDOWN_SECONDS,
+        )?;
+        if cooldown > 0 && !staged_wordfence_feed_is_fresh(&staged_path, SystemTime::now()) {
+            return Err(wordfence_cooldown_error(cooldown));
+        }
+        fs::create_dir_all(&state.vulnerability_cache_directory).map_err(AppError::storage)?;
+        if staged_wordfence_feed_is_fresh(&staged_path, SystemTime::now()) {
+            return Ok(());
+        }
+        let _ = fs::remove_file(&staging_path);
+        let provider = wordfence::WordfenceIntelligenceProvider::new()?;
+        state
+            .database
+            .record_vulnerability_feed_attempt(wordfence::WORDFENCE_PROVIDER)?;
+        wordfence::VulnerabilityProvider::download_feed(&provider, &api_key, &staging_path)?;
+        let _ = fs::remove_file(&staged_path);
+        fs::rename(&staging_path, &staged_path).map_err(AppError::storage)
+    })();
+    let _ = fs::remove_file(&staging_path);
     if let Err(error) = result {
         return Err(error_log::persist_error(
             &state.database,
@@ -2288,11 +2300,7 @@ pub fn test_wordfence_connection(
             error,
         ));
     }
-    let mut status = wordfence::integration_status(
-        &state.credentials,
-        &state.database,
-        &state.vulnerability_jobs,
-    )?;
+    let mut status = wordfence_status_for_state(&state)?;
     status.connection_status = "connected".into();
     Ok(status)
 }
@@ -2388,21 +2396,14 @@ pub(crate) fn start_wordfence_feed_refresh_internal(
             "Sla eerst een Wordfence API-sleutel op.",
         ));
     }
+    let staged_path = staged_wordfence_feed_path(&state);
+    let staged_feed_available = staged_wordfence_feed_is_fresh(&staged_path, SystemTime::now());
     let cooldown = state.database.vulnerability_feed_cooldown_remaining(
         wordfence::WORDFENCE_PROVIDER,
         wordfence::FEED_COOLDOWN_SECONDS,
     )?;
-    if cooldown > 0 {
-        return Err(AppError {
-            error_id: None,
-            category: "vulnerability_feed_cooldown".into(),
-            user_message: format!(
-                "De vulnerability database kan over {} minuten opnieuw worden vernieuwd.",
-                cooldown.div_ceil(60)
-            ),
-            technical_details: None,
-            retryable: true,
-        });
+    if cooldown > 0 && !staged_feed_available {
+        return Err(wordfence_cooldown_error(cooldown));
     }
     let (job, is_new) = state.vulnerability_jobs.create(automatic)?;
     if !is_new {
@@ -2464,8 +2465,14 @@ fn run_wordfence_feed_refresh(app: AppHandle, job_id: String) {
         let attempted_at = state
             .database
             .record_vulnerability_feed_attempt(wordfence::WORDFENCE_PROVIDER)?;
-        let bytes =
-            wordfence::VulnerabilityProvider::download_feed(&provider, &api_key, &temp_path)?;
+        let staged_path = staged_wordfence_feed_path(&state);
+        let bytes = if staged_wordfence_feed_is_fresh(&staged_path, SystemTime::now()) {
+            fs::rename(&staged_path, &temp_path).map_err(AppError::storage)?;
+            fs::metadata(&temp_path).map_err(AppError::storage)?.len()
+        } else {
+            let _ = fs::remove_file(&staged_path);
+            wordfence::VulnerabilityProvider::download_feed(&provider, &api_key, &temp_path)?
+        };
         if let Ok(job) = state
             .vulnerability_jobs
             .phase(&job_id, "validate", Some(bytes))
@@ -2509,6 +2516,51 @@ fn run_wordfence_feed_refresh(app: AppHandle, job_id: String) {
                 emit_wordfence_refresh_job(&app, &job);
             }
         }
+    }
+}
+
+fn staged_wordfence_feed_path(state: &AppState) -> std::path::PathBuf {
+    state
+        .vulnerability_cache_directory
+        .join(STAGED_WORDFENCE_FEED_FILE)
+}
+
+fn staged_wordfence_feed_is_fresh(path: &std::path::Path, now: SystemTime) -> bool {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age <= Duration::from_secs(wordfence::FEED_REFRESH_SECONDS as u64))
+}
+
+fn remove_staged_wordfence_feed(state: &AppState) {
+    let staged_path = staged_wordfence_feed_path(state);
+    let _ = fs::remove_file(&staged_path);
+    let _ = fs::remove_file(staged_path.with_extension("download"));
+}
+
+fn wordfence_status_for_state(state: &AppState) -> Result<WordfenceIntegrationStatus, AppError> {
+    let mut status = wordfence::integration_status(
+        &state.credentials,
+        &state.database,
+        &state.vulnerability_jobs,
+    )?;
+    if staged_wordfence_feed_is_fresh(&staged_wordfence_feed_path(state), SystemTime::now()) {
+        status.cooldown_remaining_seconds = 0;
+    }
+    Ok(status)
+}
+
+fn wordfence_cooldown_error(cooldown: u64) -> AppError {
+    AppError {
+        error_id: None,
+        category: "vulnerability_feed_cooldown".into(),
+        user_message: format!(
+            "De vulnerability database kan over {} minuten opnieuw worden vernieuwd.",
+            cooldown.div_ceil(60)
+        ),
+        technical_details: None,
+        retryable: true,
     }
 }
 
@@ -2597,13 +2649,15 @@ fn recalculate_cached_vulnerability_site(
     latest_scan.status = security_policy::calculate_site_status(&latest_scan.checks);
     let security_status = security_policy::security_summary(&latest_scan.checks);
     state.database.save_current_vulnerability_state(
-        site_id,
-        &vulnerability_check,
-        latest_scan.status,
-        &security_status,
-        feed_updated_at,
-        inventory_observed_at,
-        inventory_stale,
+        &crate::database::CurrentVulnerabilityState {
+            site_id,
+            check: &vulnerability_check,
+            site_status: latest_scan.status,
+            security_status: &security_status,
+            feed_updated_at,
+            inventory_observed_at,
+            inventory_stale,
+        },
     )?;
     Ok(true)
 }
@@ -3414,6 +3468,20 @@ mod tests {
         ));
         assert!(inventory_snapshot_is_stale(None, now));
         assert!(inventory_snapshot_is_stale(Some("invalid"), now));
+    }
+
+    #[test]
+    fn successful_connection_test_feed_can_be_reused_without_a_second_request() {
+        let path =
+            std::env::temp_dir().join(format!("wpmm-wordfence-staged-{}.json", Uuid::new_v4()));
+        std::fs::write(&path, "fixture").unwrap();
+        let now = SystemTime::now();
+        assert!(staged_wordfence_feed_is_fresh(&path, now));
+        assert!(!staged_wordfence_feed_is_fresh(
+            &path,
+            now + Duration::from_secs(u64::try_from(wordfence::FEED_REFRESH_SECONDS).unwrap() + 1)
+        ));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
