@@ -16,6 +16,7 @@ mod parsers;
 mod scan_jobs;
 mod security_policy;
 pub mod snapshot_builder;
+pub mod snapshot_diff;
 pub mod snapshot_repository;
 pub mod snapshots;
 mod ssh;
