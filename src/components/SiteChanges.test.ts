@@ -39,4 +39,16 @@ describe("SiteChanges", () => {
     const wrapper = mount(SiteChanges, { props: { history } });
     expect(wrapper.text()).toContain("Geen wijzigingen gevonden");
   });
+
+  it("selects the explicit baseline and can mark the current snapshot as baseline", async () => {
+    const history = structuredClone(demoChanges);
+    const snapshots = [history.latestSnapshot, history.baselineSnapshot].flatMap((snapshot) => snapshot ? [snapshot] : []);
+    const wrapper = mount(SiteChanges, { props: { history, snapshots } });
+
+    await wrapper.find(".comparison-toolbar select").setValue("baseline");
+    expect(wrapper.emitted("compare")?.[0]).toEqual(["baseline"]);
+
+    await wrapper.find(".comparison-toolbar button").trigger("click");
+    expect(wrapper.emitted("baseline")?.[0]).toEqual(["snapshot-current"]);
+  });
 });

@@ -1,9 +1,10 @@
 use crate::{
     database::{Database, utc_now},
     error::AppError,
+    snapshot_diff::SnapshotDiffEngine,
     snapshots::{
         MAX_SNAPSHOTS_PER_SITE, SNAPSHOT_SCHEMA_VERSION, SiteChangeHistory, SiteSnapshot,
-        SnapshotChange, SnapshotDiff, SnapshotDiffSection,
+        SnapshotChange, SnapshotChangeOrigin, SnapshotDiff, SnapshotDiffSection, SnapshotMetadata,
     },
 };
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -57,6 +58,22 @@ struct StoredDiff {
     schema_version: u32,
     origin: String,
     maintenance_run_id: Option<String>,
+}
+
+struct StoredMetadata {
+    snapshot_id: String,
+    site_id: String,
+    created_at: String,
+    scan_run_id: Option<String>,
+    maintenance_run_id: Option<String>,
+    source: String,
+    schema_version: u32,
+    status: String,
+    wordpress_root_identity: Option<String>,
+    scan_timestamp: String,
+    app_version: Option<String>,
+    is_baseline: bool,
+    previous_snapshot_id: Option<String>,
 }
 
 impl Database {
@@ -179,6 +196,60 @@ impl SnapshotRepository<'_> {
         refresh_state(&transaction, site_id)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn list_snapshot_metadata(
+        &self,
+        site_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SnapshotMetadata>, AppError> {
+        let connection = self.database.connect()?;
+        let limit = i64::try_from(limit.clamp(1, MAX_SNAPSHOTS_PER_SITE))
+            .unwrap_or(MAX_SNAPSHOTS_PER_SITE as i64);
+        let mut statement = connection.prepare(
+            "SELECT id,site_id,created_at,scan_run_id,maintenance_run_id,source,schema_version,status,wordpress_root_identity,scan_timestamp,app_version,is_baseline,previous_snapshot_id FROM site_snapshots WHERE site_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT ?2",
+        )?;
+        let stored = statement
+            .query_map(params![site_id, limit], |row| {
+                Ok(StoredMetadata {
+                    snapshot_id: row.get(0)?,
+                    site_id: row.get(1)?,
+                    created_at: row.get(2)?,
+                    scan_run_id: row.get(3)?,
+                    maintenance_run_id: row.get(4)?,
+                    source: row.get(5)?,
+                    schema_version: row.get(6)?,
+                    status: row.get(7)?,
+                    wordpress_root_identity: row.get(8)?,
+                    scan_timestamp: row.get(9)?,
+                    app_version: row.get(10)?,
+                    is_baseline: row.get(11)?,
+                    previous_snapshot_id: row.get(12)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        stored.into_iter().map(decode_stored_metadata).collect()
+    }
+
+    pub fn compare_snapshots(
+        &self,
+        site_id: &str,
+        from_snapshot_id: &str,
+        to_snapshot_id: &str,
+    ) -> Result<SnapshotDiff, AppError> {
+        let connection = self.database.connect()?;
+        if let Some(diff) =
+            load_diff_between(&connection, site_id, from_snapshot_id, to_snapshot_id)?
+        {
+            return Ok(diff);
+        }
+        let previous = load_snapshot(&connection, from_snapshot_id)?
+            .filter(|snapshot| snapshot.metadata.site_id == site_id)
+            .ok_or_else(|| AppError::not_found("Eerste momentopname"))?;
+        let current = load_snapshot(&connection, to_snapshot_id)?
+            .filter(|snapshot| snapshot.metadata.site_id == site_id)
+            .ok_or_else(|| AppError::not_found("Tweede momentopname"))?;
+        SnapshotDiffEngine::compare(&previous, &current, SnapshotChangeOrigin::Manual, None)
     }
 
     pub fn list_snapshots(
@@ -527,10 +598,28 @@ fn load_latest_diff_to(
     site_id: &str,
     to_snapshot_id: &str,
 ) -> Result<Option<SnapshotDiff>, AppError> {
+    load_stored_diff(connection, site_id, to_snapshot_id, None)
+}
+
+fn load_diff_between(
+    connection: &rusqlite::Connection,
+    site_id: &str,
+    from_snapshot_id: &str,
+    to_snapshot_id: &str,
+) -> Result<Option<SnapshotDiff>, AppError> {
+    load_stored_diff(connection, site_id, to_snapshot_id, Some(from_snapshot_id))
+}
+
+fn load_stored_diff(
+    connection: &rusqlite::Connection,
+    site_id: &str,
+    to_snapshot_id: &str,
+    from_snapshot_id: Option<&str>,
+) -> Result<Option<SnapshotDiff>, AppError> {
     let stored: Option<StoredDiff> = connection
         .query_row(
-            "SELECT id,site_id,from_snapshot_id,to_snapshot_id,created_at,schema_version,origin,maintenance_run_id FROM snapshot_diffs WHERE site_id=?1 AND to_snapshot_id=?2 ORDER BY created_at DESC,rowid DESC LIMIT 1",
-            params![site_id, to_snapshot_id],
+            "SELECT id,site_id,from_snapshot_id,to_snapshot_id,created_at,schema_version,origin,maintenance_run_id FROM snapshot_diffs WHERE site_id=?1 AND to_snapshot_id=?2 AND (?3 IS NULL OR from_snapshot_id=?3) ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            params![site_id, to_snapshot_id, from_snapshot_id],
             |row| {
                 Ok(StoredDiff {
                     id: row.get(0)?,
@@ -658,6 +747,30 @@ fn decode_stored_change(stored: StoredChange) -> Result<SnapshotChange, AppError
 fn enum_from_db<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, AppError> {
     serde_json::from_value(serde_json::Value::String(value.to_owned()))
         .map_err(snapshot_schema_error)
+}
+
+fn decode_stored_metadata(stored: StoredMetadata) -> Result<SnapshotMetadata, AppError> {
+    if stored.schema_version != SNAPSHOT_SCHEMA_VERSION {
+        return Err(snapshot_schema_error(format!(
+            "Snapshot schema {} wordt nog niet ondersteund.",
+            stored.schema_version
+        )));
+    }
+    Ok(SnapshotMetadata {
+        snapshot_id: stored.snapshot_id,
+        site_id: stored.site_id,
+        created_at: stored.created_at,
+        scan_run_id: stored.scan_run_id,
+        maintenance_run_id: stored.maintenance_run_id,
+        source: enum_from_db(&stored.source)?,
+        schema_version: stored.schema_version,
+        status: enum_from_db(&stored.status)?,
+        wordpress_root_identity: stored.wordpress_root_identity,
+        scan_timestamp: stored.scan_timestamp,
+        app_version: stored.app_version,
+        is_baseline: stored.is_baseline,
+        previous_snapshot_id: stored.previous_snapshot_id,
+    })
 }
 
 fn load_snapshot(
@@ -842,6 +955,10 @@ mod tests {
             .mark_as_baseline(&site_id, &current.metadata.snapshot_id)
             .unwrap();
         assert_eq!(repository.list_snapshots(&site_id, 100).unwrap().len(), 2);
+        let metadata = repository.list_snapshot_metadata(&site_id, 100).unwrap();
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata[0].snapshot_id, current.metadata.snapshot_id);
+        assert!(metadata[0].is_baseline);
         assert_eq!(
             repository
                 .baseline_snapshot(&site_id)
@@ -880,6 +997,17 @@ mod tests {
             .site_change_history(&site_id)
             .unwrap();
         assert_eq!(history.comparison.as_ref(), Some(&diff));
+        assert_eq!(
+            database
+                .snapshot_repository()
+                .compare_snapshots(
+                    &site_id,
+                    &baseline.metadata.snapshot_id,
+                    &current.metadata.snapshot_id,
+                )
+                .unwrap(),
+            diff
+        );
         database
             .snapshot_repository()
             .mark_changes_seen(&site_id, &current.metadata.snapshot_id)
@@ -906,6 +1034,42 @@ mod tests {
             .unwrap();
         assert_eq!(persisted, (1, 1, 1, 0));
         drop(connection);
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn arbitrary_comparison_is_computed_without_polluting_persisted_change_history() {
+        let (database, path, site_id) = database();
+        let baseline = snapshot(&site_id, "2026-09-15T08:00:00Z", SnapshotSource::Baseline);
+        database
+            .snapshot_repository()
+            .save_snapshot(&baseline)
+            .unwrap();
+        let mut current = snapshot(&site_id, "2026-09-15T09:00:00Z", SnapshotSource::Scan);
+        current.metadata.previous_snapshot_id = Some(baseline.metadata.snapshot_id.clone());
+        current.core.as_mut().unwrap().version = "6.9.0".into();
+        database
+            .snapshot_repository()
+            .save_snapshot(&current)
+            .unwrap();
+
+        let comparison = database
+            .snapshot_repository()
+            .compare_snapshots(
+                &site_id,
+                &baseline.metadata.snapshot_id,
+                &current.metadata.snapshot_id,
+            )
+            .unwrap();
+        assert_eq!(comparison.origin, SnapshotChangeOrigin::Manual);
+        assert_eq!(comparison.changes.len(), 1);
+        let persisted: i64 = database
+            .connect()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM snapshot_diffs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(persisted, 0);
         drop(database);
         let _ = fs::remove_file(path);
     }

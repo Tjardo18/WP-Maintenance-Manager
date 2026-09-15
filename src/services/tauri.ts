@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteInput, SnapshotDiff, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import { demoChanges, demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -16,6 +16,7 @@ const browserScanJobListeners = new Set<(job: ScanJobState) => void>();
 const browserExceptions: FindingException[] = [];
 const browserTrustedFiles: TrustedFile[] = [];
 const browserScans = new Map<string, ScanResult>();
+const browserSnapshotBaselines = new Map<string, string>();
 let browserWordfenceConfigured = false;
 let browserWordfenceJob: VulnerabilityRefreshJobState | undefined;
 const browserWordfenceJobListeners = new Set<(job: VulnerabilityRefreshJobState) => void>();
@@ -31,6 +32,21 @@ function browserScan(siteId: string) {
 
 function browserFinding(siteId: string, findingId: string) {
   return browserScan(siteId).checks.flatMap((check) => check.findings).find((finding) => finding.id === findingId);
+}
+
+function browserSiteChanges(siteId: string): SiteChangeHistory {
+  const history = structuredClone(demoChanges);
+  const snapshots = [history.latestSnapshot, history.baselineSnapshot].flatMap((snapshot) => snapshot ? [snapshot] : []);
+  for (const snapshot of snapshots) snapshot.siteId = siteId;
+  const baselineId = browserSnapshotBaselines.get(siteId) ?? history.baselineSnapshot?.snapshotId;
+  for (const snapshot of snapshots) snapshot.isBaseline = snapshot.snapshotId === baselineId;
+  history.baselineSnapshot = snapshots.find((snapshot) => snapshot.snapshotId === baselineId) ?? null;
+  history.latestSnapshot = snapshots.find((snapshot) => snapshot.snapshotId === demoChanges.latestSnapshot?.snapshotId) ?? null;
+  if (history.comparison) {
+    history.comparison.siteId = siteId;
+    history.comparison.changes.forEach((change) => { change.siteId = siteId; });
+  }
+  return history;
 }
 
 const demoScanSteps: ScanJobState["steps"] = [
@@ -183,8 +199,29 @@ export const appApi = {
   async cancelScanJobs(jobIds: string[]): Promise<ScanJobState[]> { if (isTauri()) return call("cancel_scan_jobs", { jobIds }); return Promise.all(jobIds.map((jobId) => appApi.cancelSiteScan(jobId))); },
   async onScanJobUpdated(handler: (job: ScanJobState) => void): Promise<UnlistenFn> { if (isTauri()) return listen("scan-job-updated", (event) => handler(event.payload as ScanJobState)); browserScanJobListeners.add(handler); return () => browserScanJobListeners.delete(handler); },
   async listScans(siteId: string): Promise<ScanResult[]> { return isTauri() ? call("list_scan_runs", { siteId }) : [structuredClone(browserScan(siteId))]; },
-  async getSiteChanges(siteId: string): Promise<SiteChangeHistory> { if (isTauri()) return call("get_site_changes", { siteId }); const history = structuredClone(demoChanges); if (history.latestSnapshot) history.latestSnapshot.siteId = siteId; if (history.baselineSnapshot) history.baselineSnapshot.siteId = siteId; if (history.comparison) { history.comparison.siteId = siteId; history.comparison.changes.forEach((change) => { change.siteId = siteId; }); } return history; },
+  async getSiteChanges(siteId: string): Promise<SiteChangeHistory> { return isTauri() ? call("get_site_changes", { siteId }) : browserSiteChanges(siteId); },
   async markSiteChangesSeen(siteId: string, snapshotId: string): Promise<void> { if (isTauri()) await call("mark_site_changes_seen", { siteId, snapshotId }); },
+  async listSiteSnapshots(siteId: string): Promise<SnapshotMetadata[]> {
+    if (isTauri()) return call("list_site_snapshots", { siteId });
+    const history = browserSiteChanges(siteId);
+    return [history.latestSnapshot, structuredClone(demoChanges.baselineSnapshot)]
+      .flatMap((snapshot) => snapshot ? [{ ...snapshot, siteId, isBaseline: snapshot.snapshotId === history.baselineSnapshot?.snapshotId }] : []);
+  },
+  async compareSiteSnapshots(siteId: string, fromSnapshotId: string, toSnapshotId: string): Promise<SnapshotDiff> {
+    if (isTauri()) return call("compare_site_snapshots", { siteId, fromSnapshotId, toSnapshotId });
+    const comparison = structuredClone(demoChanges.comparison);
+    if (!comparison) throw new Error("Geen demovergelijking beschikbaar.");
+    comparison.siteId = siteId;
+    comparison.fromSnapshotId = fromSnapshotId;
+    comparison.toSnapshotId = toSnapshotId;
+    comparison.origin = "manual";
+    comparison.changes.forEach((change) => { change.siteId = siteId; change.fromSnapshotId = fromSnapshotId; change.toSnapshotId = toSnapshotId; });
+    return comparison;
+  },
+  async setSiteSnapshotBaseline(siteId: string, snapshotId: string): Promise<void> {
+    if (isTauri()) await call("set_site_snapshot_baseline", { siteId, snapshotId });
+    else browserSnapshotBaselines.set(siteId, snapshotId);
+  },
   async listFindingExceptions(siteId?: string): Promise<FindingException[]> { return isTauri() ? call("list_finding_exceptions", { siteId: siteId ?? null }) : structuredClone(browserExceptions.filter((exception) => !siteId || exception.siteId === siteId)); },
   async ignoreFinding(input: FindingExceptionInput): Promise<SecurityPolicyMutationResult> {
     if (isTauri()) return call("ignore_finding", { input });

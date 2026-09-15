@@ -18,7 +18,10 @@ use crate::{
     security_policy,
     snapshot_builder::{SnapshotBuildInput, SnapshotBuildSection, SnapshotBuilder},
     snapshot_diff::SnapshotDiffEngine,
-    snapshots::{SiteChangeHistory, SnapshotChangeOrigin, SnapshotFileState, SnapshotSource},
+    snapshots::{
+        SiteChangeHistory, SnapshotChangeOrigin, SnapshotDiff, SnapshotFileState, SnapshotMetadata,
+        SnapshotSource,
+    },
     state::AppState,
     terminal::{TerminalConnectRequest, TerminalConnectionInfo, TerminalOpenInput},
     terminal_auth::TerminalChallengeInfo,
@@ -1348,6 +1351,70 @@ pub fn mark_site_changes_seen(
         .database
         .snapshot_repository()
         .mark_changes_seen(&site_id, &snapshot_id)
+}
+
+#[tauri::command(async)]
+pub fn list_site_snapshots(
+    session_token: String,
+    site_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SnapshotMetadata>, AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    state.database.get_site(&site_id)?;
+    state
+        .database
+        .snapshot_repository()
+        .list_snapshot_metadata(&site_id, 100)
+}
+
+#[tauri::command(async)]
+pub fn compare_site_snapshots(
+    session_token: String,
+    site_id: String,
+    from_snapshot_id: String,
+    to_snapshot_id: String,
+    state: State<'_, AppState>,
+) -> Result<SnapshotDiff, AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    for snapshot_id in [&from_snapshot_id, &to_snapshot_id] {
+        uuid::Uuid::parse_str(snapshot_id)
+            .map_err(|_| AppError::validation("De snapshot-id is ongeldig."))?;
+    }
+    state.database.get_site(&site_id)?;
+    state.database.snapshot_repository().compare_snapshots(
+        &site_id,
+        &from_snapshot_id,
+        &to_snapshot_id,
+    )
+}
+
+#[tauri::command(async)]
+pub fn set_site_snapshot_baseline(
+    session_token: String,
+    site_id: String,
+    snapshot_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    uuid::Uuid::parse_str(&snapshot_id)
+        .map_err(|_| AppError::validation("De snapshot-id is ongeldig."))?;
+    state
+        .database
+        .snapshot_repository()
+        .mark_as_baseline(&site_id, &snapshot_id)?;
+    state.database.save_audit_event(
+        Some(&site_id),
+        "snapshot_baseline_set",
+        &snapshot_id,
+        "success",
+        None,
+    )
 }
 
 #[tauri::command(async)]

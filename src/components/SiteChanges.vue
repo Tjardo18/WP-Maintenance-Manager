@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { ArrowRight, CheckCircle2, CircleAlert, GitCompare, ShieldAlert, Wrench } from "@lucide/vue";
-import type { SiteChangeHistory, SnapshotChange, SnapshotSection, SnapshotValue } from "../types";
+import type { SiteChangeHistory, SnapshotChange, SnapshotMetadata, SnapshotSection, SnapshotValue } from "../types";
 import { formatDate } from "../utils/format";
 
-const props = defineProps<{ history?: SiteChangeHistory; loading?: boolean }>();
-const emit = defineEmits<{ viewed: [snapshotId: string] }>();
+const props = defineProps<{ history?: SiteChangeHistory; snapshots?: SnapshotMetadata[]; loading?: boolean }>();
+const emit = defineEmits<{ viewed: [snapshotId: string]; compare: [snapshotId: string]; baseline: [snapshotId: string] }>();
 const filter = ref<SnapshotSection | "all">("all");
+const comparisonChoice = ref("previous");
 
 const sectionLabels: Record<SnapshotSection, string> = {
   core: "WordPress",
@@ -23,6 +24,26 @@ const visibleChanges = computed(() => comparison.value?.changes.filter((change) 
 const unavailable = computed(() => comparison.value?.sections.filter((section) => section.status === "unavailable" && (filter.value === "all" || section.category === filter.value)) ?? []);
 const baselineOnly = computed(() => Boolean(props.history?.latestSnapshot?.isBaseline && !comparison.value));
 const relevantSections = computed(() => sections.filter((section) => (comparison.value?.changes.some((change) => change.category === section) ?? false) || (comparison.value?.sections.some((item) => item.category === section && item.status === "unavailable") ?? false)));
+const comparisonOptions = computed(() => {
+  const latestId = props.history?.latestSnapshot?.snapshotId;
+  return (props.snapshots ?? []).filter((snapshot) => snapshot.snapshotId !== latestId);
+});
+const specificComparisonOptions = computed(() => comparisonOptions.value.filter((snapshot) =>
+  snapshot.snapshotId !== props.history?.baselineSnapshot?.snapshotId
+  && snapshot.snapshotId !== props.history?.latestSnapshot?.previousSnapshotId,
+));
+const comparisonLabel = computed(() => {
+  const fromSnapshotId = comparison.value?.fromSnapshotId;
+  if (!fromSnapshotId || fromSnapshotId === props.history?.latestSnapshot?.previousSnapshotId) return "Sinds vorige controle";
+  if (fromSnapshotId === props.history?.baselineSnapshot?.snapshotId) return "Sinds baseline";
+  const reference = comparisonOptions.value.find((snapshot) => snapshot.snapshotId === fromSnapshotId);
+  return reference ? `Sinds ${formatDate(reference.createdAt)}` : "Geselecteerde vergelijking";
+});
+
+watch(
+  () => props.history?.latestSnapshot?.snapshotId,
+  () => { comparisonChoice.value = "previous"; },
+);
 
 watch(
   () => comparison.value?.toSnapshotId,
@@ -34,6 +55,10 @@ watch(
 
 function count(section: SnapshotSection) {
   return comparison.value?.changes.filter((change) => change.category === section).length ?? 0;
+}
+
+function compareSelection() {
+  emit("compare", comparisonChoice.value);
 }
 
 function metadataString(change: SnapshotChange, key: string) {
@@ -74,13 +99,19 @@ function severityLabel(change: SnapshotChange) {
     <header class="card changes-header">
       <span class="section-icon"><GitCompare /></span>
       <div>
-        <small>Sinds vorige controle</small>
+        <small>{{ comparisonLabel }}</small>
         <h3>Wijzigingen</h3>
         <p v-if="comparison">{{ comparison.changes.length }} {{ comparison.changes.length === 1 ? 'wijziging' : 'wijzigingen' }} · {{ formatDate(comparison.createdAt) }}</p>
         <p v-else>Belangrijke WordPress-toestand wordt na controles met eerdere momentopnames vergeleken.</p>
       </div>
       <span v-if="comparison" class="changes-total">{{ comparison.changes.length }}</span>
     </header>
+
+    <section v-if="history?.latestSnapshot && comparisonOptions.length" class="card comparison-toolbar">
+      <label><span>Vergelijk huidige controle met</span><select v-model="comparisonChoice" :disabled="loading" @change="compareSelection"><option value="previous">Vorige controle</option><option v-if="history.baselineSnapshot && history.baselineSnapshot.snapshotId !== history.latestSnapshot.snapshotId" value="baseline">Baseline · {{ formatDate(history.baselineSnapshot.createdAt) }}</option><option v-for="snapshot in specificComparisonOptions" :key="snapshot.snapshotId" :value="snapshot.snapshotId">{{ formatDate(snapshot.createdAt) }} · {{ snapshot.source.replace(/_/g, ' ') }}</option></select></label>
+      <button v-if="!history.latestSnapshot.isBaseline" class="button small secondary" :disabled="loading" @click="emit('baseline', history.latestSnapshot.snapshotId)">Huidige als baseline instellen</button>
+      <span v-else class="current-baseline"><CheckCircle2 :size="14" /> Huidige momentopname is de baseline</span>
+    </section>
 
     <div v-if="loading" class="card empty-state compact"><h3>Wijzigingen laden…</h3></div>
     <div v-else-if="!history?.latestSnapshot" class="card empty-state">
