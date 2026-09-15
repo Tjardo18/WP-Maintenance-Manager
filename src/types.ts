@@ -50,6 +50,7 @@ export interface SiteSnapshot { metadata: SnapshotMetadata; completeness: Snapsh
 export interface SnapshotChange { id: string; siteId: string; fromSnapshotId: string; toSnapshotId: string; category: SnapshotSection; entityType: string; entityKey: string; changeType: SnapshotChangeType; field: string | null; oldValue: SnapshotValue | null; newValue: SnapshotValue | null; severity: SnapshotChangeSeverity; summary: string; metadata: Record<string, SnapshotValue>; origin: SnapshotChangeOrigin; seen: boolean; createdAt: string }
 export interface SnapshotDiffSection { category: SnapshotSection; status: SnapshotComparisonStatus; reason: string | null }
 export interface SnapshotDiff { id: string; siteId: string; fromSnapshotId: string; toSnapshotId: string; createdAt: string; schemaVersion: number; origin: SnapshotChangeOrigin; maintenanceRunId: string | null; sections: SnapshotDiffSection[]; changes: SnapshotChange[] }
+export interface SiteChangeHistory { latestSnapshot: SnapshotMetadata | null; baselineSnapshot: SnapshotMetadata | null; comparison: SnapshotDiff | null }
 
 export interface SiteInput {
   id?: string;

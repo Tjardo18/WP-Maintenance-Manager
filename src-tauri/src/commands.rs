@@ -18,7 +18,7 @@ use crate::{
     security_policy,
     snapshot_builder::{SnapshotBuildInput, SnapshotBuildSection, SnapshotBuilder},
     snapshot_diff::SnapshotDiffEngine,
-    snapshots::{SnapshotChangeOrigin, SnapshotFileState, SnapshotSource},
+    snapshots::{SiteChangeHistory, SnapshotChangeOrigin, SnapshotFileState, SnapshotSource},
     state::AppState,
     terminal::{TerminalConnectRequest, TerminalConnectionInfo, TerminalOpenInput},
     terminal_auth::TerminalChallengeInfo,
@@ -1314,6 +1314,40 @@ pub fn list_scan_runs(
     uuid::Uuid::parse_str(&site_id)
         .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
     state.database.list_scans(&site_id)
+}
+
+#[tauri::command(async)]
+pub fn get_site_changes(
+    session_token: String,
+    site_id: String,
+    state: State<'_, AppState>,
+) -> Result<SiteChangeHistory, AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    state.database.get_site(&site_id)?;
+    state
+        .database
+        .snapshot_repository()
+        .site_change_history(&site_id)
+}
+
+#[tauri::command(async)]
+pub fn mark_site_changes_seen(
+    session_token: String,
+    site_id: String,
+    snapshot_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    uuid::Uuid::parse_str(&snapshot_id)
+        .map_err(|_| AppError::validation("De snapshot-id is ongeldig."))?;
+    state
+        .database
+        .snapshot_repository()
+        .mark_changes_seen(&site_id, &snapshot_id)
 }
 
 #[tauri::command(async)]

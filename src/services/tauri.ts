@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
-import { demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteInput, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import { demoChanges, demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
 let browserSites = structuredClone(demoSites);
@@ -39,7 +39,7 @@ const demoScanSteps: ScanJobState["steps"] = [
   ["checksum", "Core-checksums"], ["users", "Gebruikers"],
   ["php", "PHP-bestanden"], ["uploads", "Uploads"],
   ["modified", "Gewijzigde bestanden"], ["permissions", "Bestandsrechten"],
-  ["configuration", "WordPress-configuratie"], ["database", "Database"],
+  ["configuration", "WordPress-configuratie"], ["cron", "WordPress-cron"], ["database", "Database"],
   ["core_updates", "WordPress-updates"], ["plugin_list", "Plugin-updates"],
   ["theme_list", "Thema-updates"], ["homepage", "Homepage"],
   ["vulnerabilities", "Kwetsbaarheden"], ["persist", "Resultaat opslaan"],
@@ -183,6 +183,8 @@ export const appApi = {
   async cancelScanJobs(jobIds: string[]): Promise<ScanJobState[]> { if (isTauri()) return call("cancel_scan_jobs", { jobIds }); return Promise.all(jobIds.map((jobId) => appApi.cancelSiteScan(jobId))); },
   async onScanJobUpdated(handler: (job: ScanJobState) => void): Promise<UnlistenFn> { if (isTauri()) return listen("scan-job-updated", (event) => handler(event.payload as ScanJobState)); browserScanJobListeners.add(handler); return () => browserScanJobListeners.delete(handler); },
   async listScans(siteId: string): Promise<ScanResult[]> { return isTauri() ? call("list_scan_runs", { siteId }) : [structuredClone(browserScan(siteId))]; },
+  async getSiteChanges(siteId: string): Promise<SiteChangeHistory> { if (isTauri()) return call("get_site_changes", { siteId }); const history = structuredClone(demoChanges); if (history.latestSnapshot) history.latestSnapshot.siteId = siteId; if (history.baselineSnapshot) history.baselineSnapshot.siteId = siteId; if (history.comparison) { history.comparison.siteId = siteId; history.comparison.changes.forEach((change) => { change.siteId = siteId; }); } return history; },
+  async markSiteChangesSeen(siteId: string, snapshotId: string): Promise<void> { if (isTauri()) await call("mark_site_changes_seen", { siteId, snapshotId }); },
   async listFindingExceptions(siteId?: string): Promise<FindingException[]> { return isTauri() ? call("list_finding_exceptions", { siteId: siteId ?? null }) : structuredClone(browserExceptions.filter((exception) => !siteId || exception.siteId === siteId)); },
   async ignoreFinding(input: FindingExceptionInput): Promise<SecurityPolicyMutationResult> {
     if (isTauri()) return call("ignore_finding", { input });

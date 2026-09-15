@@ -368,6 +368,14 @@ pub struct SnapshotDiff {
     pub changes: Vec<SnapshotChange>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteChangeHistory {
+    pub latest_snapshot: Option<SnapshotMetadata>,
+    pub baseline_snapshot: Option<SnapshotMetadata>,
+    pub comparison: Option<SnapshotDiff>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

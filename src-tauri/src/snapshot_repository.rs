@@ -1,7 +1,10 @@
 use crate::{
     database::{Database, utc_now},
     error::AppError,
-    snapshots::{MAX_SNAPSHOTS_PER_SITE, SNAPSHOT_SCHEMA_VERSION, SiteSnapshot, SnapshotDiff},
+    snapshots::{
+        MAX_SNAPSHOTS_PER_SITE, SNAPSHOT_SCHEMA_VERSION, SiteChangeHistory, SiteSnapshot,
+        SnapshotChange, SnapshotDiff, SnapshotDiffSection,
+    },
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -23,6 +26,37 @@ struct StoredSnapshotPayload {
     payload: Vec<u8>,
     is_baseline: bool,
     previous_snapshot_id: Option<String>,
+}
+
+struct StoredChange {
+    id: String,
+    site_id: String,
+    from_snapshot_id: String,
+    to_snapshot_id: String,
+    category: String,
+    entity_type: String,
+    entity_key: String,
+    change_type: String,
+    field: Option<String>,
+    old_value_json: Option<String>,
+    new_value_json: Option<String>,
+    severity: String,
+    summary: String,
+    metadata_json: String,
+    origin: String,
+    seen: bool,
+    created_at: String,
+}
+
+struct StoredDiff {
+    id: String,
+    site_id: String,
+    from_snapshot_id: String,
+    to_snapshot_id: String,
+    created_at: String,
+    schema_version: u32,
+    origin: String,
+    maintenance_run_id: Option<String>,
 }
 
 impl Database {
@@ -85,6 +119,66 @@ impl SnapshotRepository<'_> {
             .map(|id| load_snapshot(&connection, id))
             .transpose()
             .map(Option::flatten)
+    }
+
+    pub fn site_change_history(&self, site_id: &str) -> Result<SiteChangeHistory, AppError> {
+        let connection = self.database.connect()?;
+        let latest_id: Option<String> = connection
+            .query_row(
+                "SELECT latest_snapshot_id FROM site_snapshot_state WHERE site_id=?1",
+                [site_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let baseline_id: Option<String> = connection
+            .query_row(
+                "SELECT baseline_snapshot_id FROM site_snapshot_state WHERE site_id=?1",
+                [site_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let latest_snapshot = latest_id
+            .as_deref()
+            .map(|id| load_snapshot(&connection, id))
+            .transpose()?
+            .flatten();
+        let baseline_snapshot = baseline_id
+            .as_deref()
+            .map(|id| load_snapshot(&connection, id))
+            .transpose()?
+            .flatten();
+        let comparison = latest_id
+            .as_deref()
+            .map(|id| load_latest_diff_to(&connection, site_id, id))
+            .transpose()?
+            .flatten();
+        Ok(SiteChangeHistory {
+            latest_snapshot: latest_snapshot.map(|snapshot| snapshot.metadata),
+            baseline_snapshot: baseline_snapshot.map(|snapshot| snapshot.metadata),
+            comparison,
+        })
+    }
+
+    pub fn mark_changes_seen(&self, site_id: &str, to_snapshot_id: &str) -> Result<(), AppError> {
+        let mut connection = self.database.connect()?;
+        let transaction = connection.transaction()?;
+        let valid: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM site_snapshots WHERE id=?1 AND site_id=?2)",
+            params![to_snapshot_id, site_id],
+            |row| row.get(0),
+        )?;
+        if !valid {
+            return Err(AppError::not_found("Momentopname"));
+        }
+        transaction.execute(
+            "UPDATE snapshot_changes SET seen=1 WHERE site_id=?1 AND to_snapshot_id=?2",
+            params![site_id, to_snapshot_id],
+        )?;
+        refresh_state(&transaction, site_id)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn list_snapshots(
@@ -428,6 +522,144 @@ fn refresh_state(transaction: &Transaction<'_>, site_id: &str) -> Result<(), App
     Ok(())
 }
 
+fn load_latest_diff_to(
+    connection: &rusqlite::Connection,
+    site_id: &str,
+    to_snapshot_id: &str,
+) -> Result<Option<SnapshotDiff>, AppError> {
+    let stored: Option<StoredDiff> = connection
+        .query_row(
+            "SELECT id,site_id,from_snapshot_id,to_snapshot_id,created_at,schema_version,origin,maintenance_run_id FROM snapshot_diffs WHERE site_id=?1 AND to_snapshot_id=?2 ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            params![site_id, to_snapshot_id],
+            |row| {
+                Ok(StoredDiff {
+                    id: row.get(0)?,
+                    site_id: row.get(1)?,
+                    from_snapshot_id: row.get(2)?,
+                    to_snapshot_id: row.get(3)?,
+                    created_at: row.get(4)?,
+                    schema_version: row.get(5)?,
+                    origin: row.get(6)?,
+                    maintenance_run_id: row.get(7)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    if stored.schema_version != SNAPSHOT_SCHEMA_VERSION {
+        return Err(snapshot_schema_error(format!(
+            "Diffschema {} wordt nog niet ondersteund.",
+            stored.schema_version
+        )));
+    }
+    let sections = {
+        let mut statement = connection.prepare(
+            "SELECT category,status,reason FROM snapshot_diff_sections WHERE diff_id=?1 ORDER BY rowid",
+        )?;
+        let rows = statement
+            .query_map([&stored.id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(category, status, reason)| {
+                Ok(SnapshotDiffSection {
+                    category: enum_from_db(&category)?,
+                    status: enum_from_db(&status)?,
+                    reason,
+                })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?
+    };
+    let changes = {
+        let mut statement = connection.prepare(
+            "SELECT id,site_id,from_snapshot_id,to_snapshot_id,category,entity_type,entity_key,change_type,field,old_value_json,new_value_json,severity,summary,metadata_json,origin,seen,created_at FROM snapshot_changes WHERE diff_id=?1 ORDER BY rowid",
+        )?;
+        let stored = statement
+            .query_map([&stored.id], |row| {
+                Ok(StoredChange {
+                    id: row.get(0)?,
+                    site_id: row.get(1)?,
+                    from_snapshot_id: row.get(2)?,
+                    to_snapshot_id: row.get(3)?,
+                    category: row.get(4)?,
+                    entity_type: row.get(5)?,
+                    entity_key: row.get(6)?,
+                    change_type: row.get(7)?,
+                    field: row.get(8)?,
+                    old_value_json: row.get(9)?,
+                    new_value_json: row.get(10)?,
+                    severity: row.get(11)?,
+                    summary: row.get(12)?,
+                    metadata_json: row.get(13)?,
+                    origin: row.get(14)?,
+                    seen: row.get(15)?,
+                    created_at: row.get(16)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        stored
+            .into_iter()
+            .map(decode_stored_change)
+            .collect::<Result<Vec<_>, AppError>>()?
+    };
+    Ok(Some(SnapshotDiff {
+        id: stored.id,
+        site_id: stored.site_id,
+        from_snapshot_id: stored.from_snapshot_id,
+        to_snapshot_id: stored.to_snapshot_id,
+        created_at: stored.created_at,
+        schema_version: stored.schema_version,
+        origin: enum_from_db(&stored.origin)?,
+        maintenance_run_id: stored.maintenance_run_id,
+        sections,
+        changes,
+    }))
+}
+
+fn decode_stored_change(stored: StoredChange) -> Result<SnapshotChange, AppError> {
+    Ok(SnapshotChange {
+        id: stored.id,
+        site_id: stored.site_id,
+        from_snapshot_id: stored.from_snapshot_id,
+        to_snapshot_id: stored.to_snapshot_id,
+        category: enum_from_db(&stored.category)?,
+        entity_type: stored.entity_type,
+        entity_key: stored.entity_key,
+        change_type: enum_from_db(&stored.change_type)?,
+        field: stored.field,
+        old_value: stored
+            .old_value_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(snapshot_schema_error)?,
+        new_value: stored
+            .new_value_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(snapshot_schema_error)?,
+        severity: enum_from_db(&stored.severity)?,
+        summary: stored.summary,
+        metadata: serde_json::from_str(&stored.metadata_json).map_err(snapshot_schema_error)?,
+        origin: enum_from_db(&stored.origin)?,
+        seen: stored.seen,
+        created_at: stored.created_at,
+    })
+}
+
+fn enum_from_db<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, AppError> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned()))
+        .map_err(snapshot_schema_error)
+}
+
 fn load_snapshot(
     connection: &rusqlite::Connection,
     snapshot_id: &str,
@@ -643,15 +875,36 @@ mod tests {
             .save_snapshot_with_diff(&current, Some(&diff))
             .unwrap();
 
+        let history = database
+            .snapshot_repository()
+            .site_change_history(&site_id)
+            .unwrap();
+        assert_eq!(history.comparison.as_ref(), Some(&diff));
+        database
+            .snapshot_repository()
+            .mark_changes_seen(&site_id, &current.metadata.snapshot_id)
+            .unwrap();
+        assert!(
+            database
+                .snapshot_repository()
+                .site_change_history(&site_id)
+                .unwrap()
+                .comparison
+                .unwrap()
+                .changes
+                .iter()
+                .all(|change| change.seen)
+        );
+
         let connection = database.connect().unwrap();
-        let persisted: (i64, i64, i64) = connection
+        let persisted: (i64, i64, i64, i64) = connection
             .query_row(
-                "SELECT (SELECT COUNT(*) FROM snapshot_diffs),(SELECT COUNT(*) FROM snapshot_changes),latest_change_count FROM site_snapshot_state WHERE site_id=?1",
+                "SELECT (SELECT COUNT(*) FROM snapshot_diffs),(SELECT COUNT(*) FROM snapshot_changes),latest_change_count,unseen_change_count FROM site_snapshot_state WHERE site_id=?1",
                 [&site_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(persisted, (1, 1, 1));
+        assert_eq!(persisted, (1, 1, 1, 0));
         drop(connection);
         drop(database);
         let _ = fs::remove_file(path);

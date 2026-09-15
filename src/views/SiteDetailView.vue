@@ -7,18 +7,20 @@ import ConfirmDialog from "../components/ConfirmDialog.vue";
 import ChecksumFilePreview from "../components/ChecksumFilePreview.vue";
 import SecurityChecks from "../components/SecurityChecks.vue";
 import VulnerabilityDetails from "../components/VulnerabilityDetails.vue";
+import SiteChanges from "../components/SiteChanges.vue";
 import { useSitesStore } from "../stores/sites";
 import { useScanJobsStore } from "../stores/scanJobs";
 import { appApi } from "../services/tauri";
-import type { ChecksumDeleteResult, CoreOperationInfo, CoreOperationKind, FilePreview, Finding, MaintenanceRun, MaintenanceStep, ScanResult, UpdateItem, WordPressUser, WordPressUsersData, WordPressUserUpdateInput } from "../types";
+import type { ChecksumDeleteResult, CoreOperationInfo, CoreOperationKind, FilePreview, Finding, MaintenanceRun, MaintenanceStep, ScanResult, SiteChangeHistory, UpdateItem, WordPressUser, WordPressUsersData, WordPressUserUpdateInput } from "../types";
 import { errorMessage } from "../utils/errors";
 import { formatDate } from "../utils/format";
 
 const route = useRoute(); const store = useSitesStore(); const scanJobs = useScanJobsStore();
 const SshTerminal = defineAsyncComponent(() => import("../components/SshTerminal.vue"));
 const site = computed(() => store.byId.get(String(route.params.id)));
-const tabs = ["Overzicht", "Updates", "Security", "Gebruikers", "Bestanden", "Database", "Onderhoud", "Historie", "Terminal"];
+const tabs = ["Overzicht", "Wijzigingen", "Updates", "Security", "Gebruikers", "Bestanden", "Database", "Onderhoud", "Historie", "Terminal"];
 const activeTab = ref("Overzicht"); const scan = ref<ScanResult>(); const scanHistory = ref<ScanResult[]>([]); const updates = ref<UpdateItem[]>([]); const history = ref<MaintenanceRun[]>([]); const liveSteps = ref<MaintenanceStep[]>([]); const busy = ref<string>(); const confirmUpdate = ref<UpdateItem | "all" | "maintenance">(); const error = ref<string>(); let stopProgress: (() => void) | undefined;
+const changes = ref<SiteChangeHistory>(); const changesLoading = ref(true);
 const selectedFindingIds = ref<string[]>([]); const preview = ref<FilePreview>(); const pendingDelete = ref<Finding[]>([]); const deleteResult = ref<ChecksumDeleteResult>();
 const selectedVulnerability = ref<Finding>();
 const pendingPolicyAction = ref<{ kind: "ignore" | "trust"; finding: Finding; temporary: boolean }>(); const policyNote = ref(""); const policyExpiry = ref<"7" | "30" | "date">("7"); const policyExpiryDate = ref("");
@@ -38,7 +40,9 @@ const unexpectedFindings = computed(() => scan.value?.checks.find((check) => che
 const isLatestScan = computed(() => Boolean(scan.value && scanHistory.value[0]?.id === scan.value.id));
 const administratorCount = computed(() => usersData.value?.users.filter((user) => user.roles.includes("administrator")).length ?? 0);
 const promotingAdministrator = computed(() => Boolean(editUser.value && editUserInput.value?.role === "administrator" && !editUser.value.roles.includes("administrator")));
-async function load() { if (!site.value) return; const results = await Promise.allSettled([appApi.listHistory(site.value.id), appApi.listScans(site.value.id), appApi.listCachedUpdates(site.value.id)]); const [historyResult, scansResult, updateResult] = results; if (historyResult.status === "fulfilled") history.value = historyResult.value; if (scansResult.status === "fulfilled") { scanHistory.value = scansResult.value; scan.value = scansResult.value[0]; } if (updateResult.status === "fulfilled") updates.value = updateResult.value; const failed = results.find((result) => result.status === "rejected"); if (failed?.status === "rejected") error.value = errorMessage(failed.reason); }
+async function load() { if (!site.value) return; changesLoading.value = true; const results = await Promise.allSettled([appApi.listHistory(site.value.id), appApi.listScans(site.value.id), appApi.listCachedUpdates(site.value.id), appApi.getSiteChanges(site.value.id)]); const [historyResult, scansResult, updateResult, changesResult] = results; if (historyResult.status === "fulfilled") history.value = historyResult.value; if (scansResult.status === "fulfilled") { scanHistory.value = scansResult.value; scan.value = scansResult.value[0]; } if (updateResult.status === "fulfilled") updates.value = updateResult.value; if (changesResult.status === "fulfilled") changes.value = changesResult.value; changesLoading.value = false; const failed = results.find((result) => result.status === "rejected"); if (failed?.status === "rejected") error.value = errorMessage(failed.reason); }
+async function loadChanges() { if (!site.value) return; changesLoading.value = true; try { changes.value = await appApi.getSiteChanges(site.value.id); } catch (cause) { error.value = errorMessage(cause); } finally { changesLoading.value = false; } }
+async function markChangesSeen(snapshotId: string) { if (!site.value || !changes.value?.comparison?.changes.some((change) => !change.seen)) return; try { await appApi.markSiteChangesSeen(site.value.id, snapshotId); changes.value.comparison.changes.forEach((change) => { change.seen = true; }); } catch (cause) { error.value = errorMessage(cause); } }
 async function loadUpdates() { if (!site.value || updatesLoaded) return; updatesLoaded = true; try { updates.value = await appApi.checkUpdates(site.value.id); } catch (cause) { updatesLoaded = false; error.value = errorMessage(cause); } }
 async function loadUsers() { if (!site.value || usersLoaded) return; usersLoaded = true; try { usersData.value = await appApi.listWordPressUsers(site.value.id); } catch (cause) { usersLoaded = false; error.value = errorMessage(cause); } }
 async function runScan() { if (!site.value || scanActive.value) return; error.value = undefined; selectedFindingIds.value = []; deleteResult.value = undefined; try { await scanJobs.start(site.value.id); } catch (cause) { error.value = errorMessage(cause); } }
@@ -73,6 +77,7 @@ async function executeConfirmed() {
       liveSteps.value = [["preflight", "Preflight"], ["precheck", "Voorcontrole"], ["backup", "Databasebackup"], ["core", "WordPress bijwerken"], ["plugins", "Plugins bijwerken"], ["themes", "Thema's bijwerken"], ["languages", "Vertalingen bijwerken"], ["database", "WordPress database bijwerken"], ["postcheck", "Nacontrole"], ["homepage", "Homepage bereikbaar"]].map(([key, label]) => ({ key, label, status: "pending" }));
       const run = await appApi.runMaintenance(site.value.id);
       history.value.unshift(run);
+      await loadChanges();
       liveSteps.value = [];
     } else if (action === "all") {
       await appApi.runUpdate(site.value.id, "all");
@@ -99,7 +104,7 @@ watch(() => scanJob.value?.status, async (status) => {
   if (status === "completed" && job.resultScanId !== handledScanId && site.value) {
     handledScanId = job.resultScanId;
     const scans = await appApi.listScans(site.value.id);
-    scanHistory.value = scans; scan.value = scans[0]; activeTab.value = "Security";
+    scanHistory.value = scans; scan.value = scans[0]; await loadChanges(); activeTab.value = "Wijzigingen";
     await store.load();
   } else if (status === "failed") error.value = job.error?.userMessage ?? "De scan is mislukt.";
 });
@@ -108,7 +113,7 @@ watch(() => scanJob.value?.status, async (status) => {
 <template>
   <div v-if="site" class="site-detail">
     <section class="site-hero card"><div class="site-avatar xlarge">{{ site.name.slice(0, 2).toUpperCase() }}</div><div class="site-hero-copy"><div><h2>{{ site.name }}</h2><StatusBadge :status="site.status" /></div><span class="site-url">{{ site.url }}</span><p>{{ site.sshUsername }}@{{ site.sshHost }} · {{ site.wordpressPath }}</p></div><div class="hero-actions"><RouterLink class="button secondary" :to="`/websites/${site.id}/bewerken`"><Edit3 :size="16" /> Bewerken</RouterLink><button class="button secondary" :disabled="!!busy || scanActive" @click="runScan"><LoaderCircle v-if="scanActive" class="spin" :size="17" /><RefreshCw v-else :size="17" /> {{ scanActive ? 'Controle bezig…' : 'Website controleren' }}</button><button class="button primary" :disabled="!!busy || scanActive" @click="confirmUpdate = 'maintenance'"><Play :size="17" /> Onderhoud uitvoeren</button></div></section>
-    <nav class="tabs" aria-label="Websiteonderdelen"><button v-for="tab in tabs" :key="tab" :class="{ active: activeTab === tab }" @click="activeTab = tab">{{ tab }}<span v-if="tab === 'Updates' && updates.length">{{ updates.length }}</span><span v-else-if="tab === 'Terminal'" class="advanced-tab-badge">🔒 SSH + WP-CLI</span></button></nav>
+    <nav class="tabs" aria-label="Websiteonderdelen"><button v-for="tab in tabs" :key="tab" :class="{ active: activeTab === tab }" @click="activeTab = tab">{{ tab }}<span v-if="tab === 'Updates' && updates.length">{{ updates.length }}</span><span v-else-if="tab === 'Wijzigingen' && changes?.comparison?.changes.length">{{ changes.comparison.changes.length }}</span><span v-else-if="tab === 'Terminal'" class="advanced-tab-badge">🔒 SSH + WP-CLI</span></button></nav>
     <p v-if="error" class="error-banner">{{ error }}</p>
     <section v-if="scanJob && scanActive" class="card live-progress">
       <div class="card-header"><div><h3>Websitecontrole draait op de achtergrond</h3><p>{{ scanJob?.status === 'queued' ? 'Wacht op een beschikbare scanplek…' : `${activeScanStep?.label ?? 'Resultaten verwerken…'}${activeStepSeconds ? ` · ${activeStepSeconds} sec` : ''}` }}</p></div><button class="button small secondary" :disabled="scanJob?.cancellationRequested" @click="cancelScan">{{ scanJob?.cancellationRequested ? 'Annuleren…' : 'Annuleren' }}</button></div>
@@ -119,6 +124,8 @@ watch(() => scanJob.value?.status, async (status) => {
     <section v-if="liveSteps.length" class="card live-progress"><div class="card-header"><div><h3>Onderhoud wordt uitgevoerd</h3><p>Sluit de app niet zolang muterende stappen bezig zijn.</p></div><LoaderCircle class="spin" :size="20" /></div><ol class="step-list"><li v-for="step in liveSteps" :key="step.key" :class="step.status"><span><Check v-if="step.status === 'success'" :size="15" /><LoaderCircle v-else-if="step.status === 'running'" class="spin" :size="15" /></span><strong>{{ step.label }}</strong><small>{{ step.detail }}</small></li></ol></section>
 
     <template v-if="activeTab === 'Overzicht'"><div class="detail-stat-grid"><article class="card detail-stat"><span><RefreshCw /></span><small>Beschikbare updates</small><strong>{{ updates.length }}</strong><p>{{ updateKinds.core }} core · {{ updateKinds.plugins }} plugins · {{ updateKinds.themes }} thema's</p></article><article class="card detail-stat"><span><ShieldCheck /></span><small>Laatste securityscan</small><strong>{{ site.securityStatus ?? 'Nog niet uitgevoerd' }}</strong><p>{{ formatDate(site.lastScanAt) }}</p></article><article class="card detail-stat"><span><HardDriveDownload /></span><small>Laatste onderhoud</small><strong>{{ formatDate(site.lastMaintenanceAt) }}</strong><p>{{ history[0]?.status === 'success' ? 'Succesvol afgerond' : 'Geen resultaat' }}</p></article></div><section class="card info-card"><div class="card-header"><div><h3>Technische basisinformatie</h3><p>Automatisch uitgelezen via vooraf ingestelde controles.</p></div></div><dl class="info-list"><div><dt>WordPress-versie</dt><dd>{{ site.wordpressVersion ?? 'Onbekend' }}</dd></div><div><dt>PHP-versie</dt><dd>{{ site.phpVersion ?? 'Onbekend' }}</dd></div><div><dt>SSH host key</dt><dd>{{ site.pinnedHostKey ? 'Vastgezet en gecontroleerd' : 'Nog niet geaccepteerd' }}</dd></div><div><dt>Laatste scan</dt><dd>{{ formatDate(site.lastScanAt) }}</dd></div></dl></section></template>
+
+    <SiteChanges v-else-if="activeTab === 'Wijzigingen'" :history="changes" :loading="changesLoading" @viewed="markChangesSeen" />
 
     <section v-else-if="activeTab === 'Updates'" class="card table-card">
       <div class="card-header"><div><h3>Beschikbare updates</h3><p>Een update installeert een nieuwere versie; core-herstel installeert de huidige versie opnieuw.</p></div><div class="heading-actions"><button class="button secondary" :disabled="!!busy" @click="openCoreOperation('repair')"><LoaderCircle v-if="busy === 'core-inspect'" class="spin" :size="15" /> Core-bestanden herstellen</button><button v-if="updates.length" class="button primary" @click="confirmUpdate = 'maintenance'">Alles veilig bijwerken</button></div></div>

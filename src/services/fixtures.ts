@@ -1,4 +1,4 @@
-import type { MaintenanceRun, ScanResult, Site, UpdateItem, WordPressUsersData } from "../types";
+import type { MaintenanceRun, ScanResult, Site, SiteChangeHistory, UpdateItem, WordPressUsersData } from "../types";
 
 const now = new Date();
 const isoAgo = (hours: number) => new Date(now.getTime() - hours * 3_600_000).toISOString();
@@ -45,3 +45,22 @@ export const demoHistory: MaintenanceRun[] = [{
   id: "maintenance-demo", siteId: "demo-1", siteName: "Bakkerij De Molen", startedAt: isoAgo(168), finishedAt: isoAgo(167.9), durationMs: 362000, status: "success", backupPath: "backups/demo-1/2026-08-18.sql.gz", beforeVersions: "WordPress 6.8.0 · 3 pluginupdates", afterVersions: "WordPress 6.8.1 · alles bijgewerkt",
   steps: ["Preflight", "Voorcontrole", "Databasebackup", "WordPress bijwerken", "Plugins bijwerken", "Thema's bijwerken", "Vertalingen", "Database", "Nacontrole", "Homepage bereikbaar"].map((label, index) => ({ key: String(index), label, status: "success" })),
 }];
+
+export const demoChanges: SiteChangeHistory = {
+  baselineSnapshot: { snapshotId: "snapshot-baseline", siteId: "demo-1", createdAt: isoAgo(27), scanRunId: "scan-baseline", maintenanceRunId: null, source: "baseline", schemaVersion: 1, status: "complete", wordpressRootIdentity: "sha256:demo", scanTimestamp: isoAgo(27), appVersion: "0.11.0-beta.1", isBaseline: true, previousSnapshotId: null },
+  latestSnapshot: { snapshotId: "snapshot-current", siteId: "demo-1", createdAt: isoAgo(3), scanRunId: "scan-demo", maintenanceRunId: null, source: "scan", schemaVersion: 1, status: "partial", wordpressRootIdentity: "sha256:demo", scanTimestamp: isoAgo(3), appVersion: "0.11.0-beta.1", isBaseline: false, previousSnapshotId: "snapshot-baseline" },
+  comparison: {
+    id: "diff-demo", siteId: "demo-1", fromSnapshotId: "snapshot-baseline", toSnapshotId: "snapshot-current", createdAt: isoAgo(3), schemaVersion: 1, origin: "scan", maintenanceRunId: null,
+    sections: [
+      { category: "core", status: "compared", reason: null }, { category: "plugins", status: "compared", reason: null },
+      { category: "themes", status: "compared", reason: null }, { category: "users", status: "compared", reason: null },
+      { category: "configuration", status: "compared", reason: null }, { category: "cron", status: "compared", reason: null },
+      { category: "files", status: "unavailable", reason: "Bestandsmetadata kon tijdens één van de controles niet volledig worden opgehaald." },
+    ],
+    changes: [
+      { id: "change-plugin", siteId: "demo-1", fromSnapshotId: "snapshot-baseline", toSnapshotId: "snapshot-current", category: "plugins", entityType: "plugin", entityKey: "plugin:woocommerce", changeType: "version_changed", field: "version", oldValue: { type: "string", value: "9.8.1" }, newValue: { type: "string", value: "9.9.0" }, severity: "info", summary: "Pluginversie gewijzigd", metadata: { name: { type: "string", value: "WooCommerce" } }, origin: "scan", seen: false, createdAt: isoAgo(3) },
+      { id: "change-admin", siteId: "demo-1", fromSnapshotId: "snapshot-baseline", toSnapshotId: "snapshot-current", category: "users", entityType: "user", entityKey: "user:22", changeType: "added", field: null, oldValue: null, newValue: { type: "string", value: "beheerder2" }, severity: "warning", summary: "Nieuwe administrator", metadata: { login: { type: "string", value: "beheerder2" } }, origin: "scan", seen: false, createdAt: isoAgo(3) },
+      { id: "change-debug", siteId: "demo-1", fromSnapshotId: "snapshot-baseline", toSnapshotId: "snapshot-current", category: "configuration", entityType: "configuration", entityKey: "config:WP_DEBUG", changeType: "configuration_changed", field: "WP_DEBUG", oldValue: { type: "boolean", value: false }, newValue: { type: "boolean", value: true }, severity: "warning", summary: "WP_DEBUG gewijzigd", metadata: {}, origin: "scan", seen: false, createdAt: isoAgo(3) },
+    ],
+  },
+};

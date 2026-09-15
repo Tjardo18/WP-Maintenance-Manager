@@ -100,6 +100,8 @@ pub fn run() {
             commands::start_all_site_scans,
             commands::cancel_scan_jobs,
             commands::list_scan_runs,
+            commands::get_site_changes,
+            commands::mark_site_changes_seen,
             commands::list_finding_exceptions,
             commands::ignore_finding,
             commands::remove_finding_exception,
