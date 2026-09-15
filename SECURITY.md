@@ -39,6 +39,20 @@ Bij iedere volgende scan worden actieve trustregistraties opnieuw gecontroleerd.
 
 Notities zijn optioneel, begrensd en weigeren herkenbare secretmarkers. Auditregels bevatten alleen site, target, findingtype/actie en tijd; nooit bestandsinhoud, credential of volledige remote output.
 
+## Site Snapshots and Baselines
+
+Site snapshots zijn lokale, getypeerde toestandsmetingen voor veranderingdetectie. Ze bevatten WordPress Core- en PHP-versie, locale/Multisite indien betrouwbaar, plugin- en themametadata, WordPress user-id/login/weergavenaam/e-mail/rollen, geselecteerde veilige configuratie, genormaliseerde cronmetadata en alleen begrensde relevante bestandsmetadata. E-mailadressen en logins zijn persoonsgegevens en staan daarom alleen in de lokale SQLite-database; de frontend ontvangt uitsluitend de metadata en changes die voor de actuele weergave nodig zijn.
+
+Configuratie gebruikt een positieve allowlist. Alleen `site_url`, `home_url`, `active_theme`, `wp_environment_type`, `WP_DEBUG`, `WP_DEBUG_LOG`, `WP_DEBUG_DISPLAY`, `DISALLOW_FILE_EDIT`, `DISALLOW_FILE_MODS`, `php_version`, `permalink_structure` en `multisite` kunnen worden opgeslagen. Een volledige `wp config list`-dump wordt nooit gemaakt. Databasecredentials, SSH-credentials, API keys, WordPress auth keys/salts, SMTP-wachtwoorden, cookies, sessietokens en arbitrary constants zijn uitgesloten.
+
+Snapshots slaan geen WordPress password hashes, application passwords, auth cookies of sessies op. Arbitrary cronargumenten worden niet opgeslagen of naar Vue gestuurd; indien identiteit dit vereist bewaart de builder alleen een SHA-256-fingerprint. File snapshots bevatten geen inhoud en geen volledige filesysteminventaris, maar hoogstens een genormaliseerd site-relatief pad, categorie/type, grootte, wijzigingstijd en reeds beschikbare SHA-256 voor relevante trusted/security/checksumrecords. De WordPress-rootidentiteit is een hash van sitecontext en pad, niet het leesbare serverpad.
+
+De payload heeft een schema-versie, een grens van 16 MiB en wordt vanaf 4 KiB alleen met gzip opgeslagen wanneer dat ruimte bespaart. Compressie is geen encryptie: bescherming van het Windows-account, de app-datamap en schijfversleuteling blijven relevant. Snapshot-, diff-, change- en statewrites zijn transactioneel; retention gebruikt foreign keys/cascades en verwijdert nooit automatisch de expliciete baseline of pre-/post-maintenance snapshots.
+
+Iedere snapshotsectie is afzonderlijk `complete`, `failed` of `not_collected`. De diff-engine vergelijkt alleen twee complete kanten. Een mislukte userverzameling levert dus **Vergelijking niet beschikbaar** op en nooit een lijst alsof alle gebruikers zijn verwijderd. Normalisatie en stabiele entity keys beperken ordering-noise; een normaal doorgeschoven cron-next-run geldt niet als verandering.
+
+Een baseline betekent uitsluitend dat de gebruiker die momentopname als vergelijkingsreferentie kiest. Dit is geen malwaregarantie, veiligheidsverklaring, uitzondering of acknowledgement. Een change is evenmin automatisch een securityincident; alleen centrale severityregels maken bijvoorbeeld een nieuwe Administrator zichtbaar voor extra beoordeling. Wordfence-vulnerabilities blijven buiten snapshots omdat veranderde externe intelligence geen verandering aan de website zelf is.
+
 ## Wordfence Intelligence Integration
 
 - De Wordfence API key staat uitsluitend in de beveiligde credentialopslag van het besturingssysteem. SQLite bewaart alleen feed- en scanmetadata; de key komt niet in SQLite, frontendpersistence, auditregels, foutenlogs, fixtures, URL's of Git en wordt na opslag niet aan Vue teruggestuurd.
