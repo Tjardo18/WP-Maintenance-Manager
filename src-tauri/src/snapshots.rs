@@ -76,6 +76,19 @@ impl SnapshotSection {
             Self::Files => "files",
         }
     }
+
+    pub fn entity_key(self, identity: impl std::fmt::Display) -> String {
+        let prefix = match self {
+            Self::Core => "core",
+            Self::Plugins => "plugin",
+            Self::Themes => "theme",
+            Self::Users => "user",
+            Self::Configuration => "config",
+            Self::Cron => "cron",
+            Self::Files => "file",
+        };
+        format!("{prefix}:{identity}")
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -403,5 +416,10 @@ mod tests {
         );
         assert_eq!(SnapshotSection::Plugins.as_db(), "plugins");
         assert_eq!(SnapshotSource::PreMaintenance.as_db(), "pre_maintenance");
+        assert_eq!(
+            SnapshotSection::Plugins.entity_key("woocommerce"),
+            "plugin:woocommerce"
+        );
+        assert_eq!(SnapshotSection::Users.entity_key(42), "user:42");
     }
 }
