@@ -703,6 +703,75 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_snapshots_and_changes_keep_the_run_correlation() {
+        let (database, path, site_id) = database();
+        let baseline = snapshot(&site_id, "2026-09-15T08:00:00Z", SnapshotSource::Baseline);
+        database
+            .snapshot_repository()
+            .save_snapshot(&baseline)
+            .unwrap();
+        let stored = database.get_site(&site_id).unwrap();
+        let run = crate::maintenance::new_run(&stored);
+        database.start_maintenance(&run).unwrap();
+
+        let scan = |id: String, finished_at: &str| ScanResult {
+            id,
+            site_id: site_id.clone(),
+            started_at: finished_at.into(),
+            finished_at: finished_at.into(),
+            status: SiteStatus::Healthy,
+            checks: Vec::new(),
+            truncated: false,
+        };
+        let pre_scan = scan(Uuid::new_v4().to_string(), "2026-09-15T09:00:00Z");
+        let mut pre = snapshot(
+            &site_id,
+            "2026-09-15T09:00:00Z",
+            SnapshotSource::PreMaintenance,
+        );
+        pre.metadata.scan_run_id = Some(pre_scan.id.clone());
+        pre.metadata.maintenance_run_id = Some(run.id.clone());
+        pre.metadata.previous_snapshot_id = Some(baseline.metadata.snapshot_id.clone());
+        database
+            .save_scan_with_snapshot(&pre_scan, "Veilig", Some(&pre), None)
+            .unwrap();
+
+        let post_scan = scan(Uuid::new_v4().to_string(), "2026-09-15T09:05:00Z");
+        let mut post = snapshot(
+            &site_id,
+            "2026-09-15T09:05:00Z",
+            SnapshotSource::PostMaintenance,
+        );
+        post.metadata.scan_run_id = Some(post_scan.id.clone());
+        post.metadata.maintenance_run_id = Some(run.id.clone());
+        post.metadata.previous_snapshot_id = Some(pre.metadata.snapshot_id.clone());
+        post.core.as_mut().unwrap().version = "6.8.3".into();
+        let diff = SnapshotDiffEngine::compare(
+            &pre,
+            &post,
+            SnapshotChangeOrigin::Maintenance,
+            Some(run.id.clone()),
+        )
+        .unwrap();
+        database
+            .save_scan_with_snapshot(&post_scan, "Veilig", Some(&post), Some(&diff))
+            .unwrap();
+
+        let connection = database.connect().unwrap();
+        let counts: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM site_snapshots WHERE maintenance_run_id=?1),(SELECT COUNT(*) FROM snapshot_diffs WHERE maintenance_run_id=?1 AND origin='maintenance'),(SELECT COUNT(*) FROM snapshot_changes WHERE origin='maintenance' AND to_snapshot_id=?2)",
+                params![run.id, post.metadata.snapshot_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (2, 1, 1));
+        drop(connection);
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn retention_keeps_baseline_and_protected_maintenance_snapshots() {
         let (database, path, site_id) = database();
         let repository = database.snapshot_repository();

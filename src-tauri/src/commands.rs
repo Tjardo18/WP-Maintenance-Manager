@@ -2143,24 +2143,16 @@ fn scan_site_internal_with_progress(
     let repository = state.database.snapshot_repository();
     let baseline = repository.baseline_snapshot(site_id)?;
     let previous = repository.latest_snapshot(site_id)?;
-    let mut snapshot = SnapshotBuilder::build(SnapshotBuildInput {
-        site_id: site_id.to_owned(),
-        scan_run_id: Some(outcome.result.id.clone()),
-        maintenance_run_id: None,
-        source: SnapshotSource::Scan,
-        previous_snapshot_id: previous
+    let mut snapshot = build_scan_snapshot(
+        &stored,
+        &outcome,
+        SnapshotSource::Scan,
+        None,
+        previous
             .as_ref()
             .map(|snapshot| snapshot.metadata.snapshot_id.clone()),
-        wordpress_path: stored.site.wordpress_path.clone(),
-        scan_timestamp: outcome.result.finished_at.clone(),
-        core: outcome.snapshot_sections.core.clone(),
-        plugins: outcome.snapshot_sections.plugins.clone(),
-        themes: outcome.snapshot_sections.themes.clone(),
-        users: outcome.snapshot_sections.users.clone(),
-        configuration: outcome.snapshot_sections.configuration.clone(),
-        cron: outcome.snapshot_sections.cron.clone(),
-        files: snapshot_files,
-    })?;
+        snapshot_files,
+    )?;
     if baseline.is_none() && snapshot.completeness.baseline_eligible() {
         snapshot.metadata.source = SnapshotSource::Baseline;
         snapshot.metadata.is_baseline = true;
@@ -2276,6 +2268,32 @@ fn scan_snapshot_files(
         }
     }
     SnapshotBuildSection::Complete(files.into_values().collect())
+}
+
+fn build_scan_snapshot(
+    stored: &StoredSite,
+    outcome: &engine::ScanOutcome,
+    source: SnapshotSource,
+    maintenance_run_id: Option<String>,
+    previous_snapshot_id: Option<String>,
+    files: SnapshotBuildSection<Vec<SnapshotFileState>>,
+) -> Result<crate::snapshots::SiteSnapshot, AppError> {
+    SnapshotBuilder::build(SnapshotBuildInput {
+        site_id: stored.site.id.clone(),
+        scan_run_id: Some(outcome.result.id.clone()),
+        maintenance_run_id,
+        source,
+        previous_snapshot_id,
+        wordpress_path: stored.site.wordpress_path.clone(),
+        scan_timestamp: outcome.result.finished_at.clone(),
+        core: outcome.snapshot_sections.core.clone(),
+        plugins: outcome.snapshot_sections.plugins.clone(),
+        themes: outcome.snapshot_sections.themes.clone(),
+        users: outcome.snapshot_sections.users.clone(),
+        configuration: outcome.snapshot_sections.configuration.clone(),
+        cron: outcome.snapshot_sections.cron.clone(),
+        files,
+    })
 }
 
 #[tauri::command(async)]
@@ -3211,10 +3229,114 @@ fn run_maintenance_internal(
             .map_err(AppError::storage)
         },
     )?;
-    for scan in &outcome.scans {
-        state
-            .database
-            .save_scan(&scan.result, &scan.security_status)?;
+    let mut pre_maintenance_snapshot = None;
+    let baseline_missing = state
+        .database
+        .snapshot_repository()
+        .baseline_snapshot(site_id)?
+        .is_none();
+    for (index, scan) in outcome.scans.iter().enumerate() {
+        let source = if index == 0 {
+            SnapshotSource::PreMaintenance
+        } else {
+            SnapshotSource::PostMaintenance
+        };
+        let previous_snapshot_id = if source == SnapshotSource::PostMaintenance {
+            pre_maintenance_snapshot
+                .as_ref()
+                .map(|snapshot: &crate::snapshots::SiteSnapshot| {
+                    snapshot.metadata.snapshot_id.clone()
+                })
+        } else {
+            None
+        };
+        let prepared = build_scan_snapshot(
+            &stored,
+            scan,
+            source,
+            Some(outcome.run.id.clone()),
+            previous_snapshot_id,
+            SnapshotBuildSection::NotCollected,
+        );
+        let snapshot = match prepared {
+            Ok(mut snapshot) => {
+                if source == SnapshotSource::PreMaintenance
+                    && baseline_missing
+                    && snapshot.completeness.baseline_eligible()
+                {
+                    snapshot.metadata.is_baseline = true;
+                }
+                Some(snapshot)
+            }
+            Err(error) => {
+                let _ = error_log::persist_error(
+                    &state.database,
+                    Some(site_id),
+                    Some(&stored.site.name),
+                    "Onderhoudsmomentopname opbouwen",
+                    None,
+                    None,
+                    error,
+                );
+                None
+            }
+        };
+        let diff = match (source, pre_maintenance_snapshot.as_ref(), snapshot.as_ref()) {
+            (SnapshotSource::PostMaintenance, Some(previous), Some(current)) => {
+                match SnapshotDiffEngine::compare(
+                    previous,
+                    current,
+                    SnapshotChangeOrigin::Maintenance,
+                    Some(outcome.run.id.clone()),
+                ) {
+                    Ok(diff) => Some(diff),
+                    Err(error) => {
+                        let _ = error_log::persist_error(
+                            &state.database,
+                            Some(site_id),
+                            Some(&stored.site.name),
+                            "Onderhoudswijzigingen vergelijken",
+                            None,
+                            None,
+                            error,
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let snapshot_save = snapshot.as_ref().map_or_else(
+            || {
+                state
+                    .database
+                    .save_scan(&scan.result, &scan.security_status)
+            },
+            |snapshot| {
+                state.database.save_scan_with_snapshot(
+                    &scan.result,
+                    &scan.security_status,
+                    Some(snapshot),
+                    diff.as_ref(),
+                )
+            },
+        );
+        if let Err(error) = snapshot_save {
+            let _ = error_log::persist_error(
+                &state.database,
+                Some(site_id),
+                Some(&stored.site.name),
+                "Onderhoudsmomentopname opslaan",
+                None,
+                None,
+                error,
+            );
+            state
+                .database
+                .save_scan(&scan.result, &scan.security_status)?;
+        } else if source == SnapshotSource::PreMaintenance {
+            pre_maintenance_snapshot = snapshot;
+        }
         state
             .database
             .update_versions(site_id, &scan.wordpress_version, &scan.php_version)?;
