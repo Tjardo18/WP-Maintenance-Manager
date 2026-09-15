@@ -239,7 +239,7 @@ impl Database {
         Ok(database)
     }
 
-    fn connect(&self) -> Result<Connection, AppError> {
+    pub(crate) fn connect(&self) -> Result<Connection, AppError> {
         let connection = Connection::open(&self.path)?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;",
