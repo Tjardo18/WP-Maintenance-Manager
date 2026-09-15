@@ -8,7 +8,15 @@ use crate::{
         SnapshotHistoryItem, SnapshotMetadata,
     },
 };
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use rusqlite::{OptionalExtension, Transaction, params};
+use std::{
+    borrow::Cow,
+    io::{Read, Write},
+};
+
+const SNAPSHOT_COMPRESSION_THRESHOLD_BYTES: usize = 4 * 1024;
+const MAX_SNAPSHOT_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotPersistResult {
@@ -165,12 +173,12 @@ impl SnapshotRepository<'_> {
             .flatten();
         let latest_snapshot = latest_id
             .as_deref()
-            .map(|id| load_snapshot(&connection, id))
+            .map(|id| load_snapshot_metadata(&connection, id))
             .transpose()?
             .flatten();
         let baseline_snapshot = baseline_id
             .as_deref()
-            .map(|id| load_snapshot(&connection, id))
+            .map(|id| load_snapshot_metadata(&connection, id))
             .transpose()?
             .flatten();
         let comparison = latest_id
@@ -179,8 +187,8 @@ impl SnapshotRepository<'_> {
             .transpose()?
             .flatten();
         Ok(SiteChangeHistory {
-            latest_snapshot: latest_snapshot.map(|snapshot| snapshot.metadata),
-            baseline_snapshot: baseline_snapshot.map(|snapshot| snapshot.metadata),
+            latest_snapshot,
+            baseline_snapshot,
             comparison,
         })
     }
@@ -390,9 +398,9 @@ pub(crate) fn persist_snapshot_in_transaction(
     }
     let section_status_json =
         serde_json::to_string(&snapshot.completeness).map_err(snapshot_persist_error)?;
-    let payload = serde_json::to_vec(snapshot).map_err(snapshot_persist_error)?;
+    let (payload_encoding, payload) = encode_snapshot_payload(snapshot)?;
     transaction.execute(
-        "INSERT INTO site_snapshots(id,site_id,created_at,scan_run_id,maintenance_run_id,source,schema_version,status,wordpress_root_identity,scan_timestamp,app_version,section_status_json,payload_encoding,payload,is_baseline,previous_snapshot_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'json_utf8',?13,?14,?15)",
+        "INSERT INTO site_snapshots(id,site_id,created_at,scan_run_id,maintenance_run_id,source,schema_version,status,wordpress_root_identity,scan_timestamp,app_version,section_status_json,payload_encoding,payload,is_baseline,previous_snapshot_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
         params![
             snapshot.metadata.snapshot_id,
             snapshot.metadata.site_id,
@@ -406,6 +414,7 @@ pub(crate) fn persist_snapshot_in_transaction(
             snapshot.metadata.scan_timestamp,
             snapshot.metadata.app_version,
             section_status_json,
+            payload_encoding,
             payload,
             snapshot.metadata.is_baseline,
             snapshot.metadata.previous_snapshot_id,
@@ -594,27 +603,13 @@ fn validate_relations(
 }
 
 fn enforce_retention(transaction: &Transaction<'_>, site_id: &str) -> Result<usize, AppError> {
-    let total: i64 = transaction.query_row(
-        "SELECT COUNT(*) FROM site_snapshots WHERE site_id=?1",
-        [site_id],
-        |row| row.get(0),
-    )?;
-    let excess = (total - MAX_SNAPSHOTS_PER_SITE as i64).max(0);
-    if excess == 0 {
-        return Ok(0);
-    }
-    let ids = {
-        let mut statement = transaction.prepare(
-            "SELECT id FROM site_snapshots WHERE site_id=?1 AND is_baseline=0 AND source NOT IN ('pre_maintenance','post_maintenance') ORDER BY created_at ASC,rowid ASC LIMIT ?2",
-        )?;
-        statement
-            .query_map(params![site_id, excess], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for id in &ids {
-        transaction.execute("DELETE FROM site_snapshots WHERE id=?1", [id])?;
-    }
-    Ok(ids.len())
+    let maximum = i64::try_from(MAX_SNAPSHOTS_PER_SITE).unwrap_or(i64::MAX);
+    transaction
+        .execute(
+            "DELETE FROM site_snapshots WHERE id IN (SELECT id FROM site_snapshots WHERE site_id=?1 AND is_baseline=0 AND source NOT IN ('pre_maintenance','post_maintenance') ORDER BY created_at ASC,rowid ASC LIMIT MAX((SELECT COUNT(*) FROM site_snapshots WHERE site_id=?1)-?2,0))",
+            params![site_id, maximum],
+        )
+        .map_err(AppError::from)
 }
 
 fn refresh_state(transaction: &Transaction<'_>, site_id: &str) -> Result<(), AppError> {
@@ -845,6 +840,88 @@ fn decode_stored_metadata(stored: StoredMetadata) -> Result<SnapshotMetadata, Ap
     })
 }
 
+fn load_snapshot_metadata(
+    connection: &rusqlite::Connection,
+    snapshot_id: &str,
+) -> Result<Option<SnapshotMetadata>, AppError> {
+    let stored = connection
+        .query_row(
+            "SELECT id,site_id,created_at,scan_run_id,maintenance_run_id,source,schema_version,status,wordpress_root_identity,scan_timestamp,app_version,is_baseline,previous_snapshot_id FROM site_snapshots WHERE id=?1",
+            [snapshot_id],
+            |row| {
+                Ok(StoredMetadata {
+                    snapshot_id: row.get(0)?,
+                    site_id: row.get(1)?,
+                    created_at: row.get(2)?,
+                    scan_run_id: row.get(3)?,
+                    maintenance_run_id: row.get(4)?,
+                    source: row.get(5)?,
+                    schema_version: row.get(6)?,
+                    status: row.get(7)?,
+                    wordpress_root_identity: row.get(8)?,
+                    scan_timestamp: row.get(9)?,
+                    app_version: row.get(10)?,
+                    is_baseline: row.get(11)?,
+                    previous_snapshot_id: row.get(12)?,
+                })
+            },
+        )
+        .optional()?;
+    stored.map(decode_stored_metadata).transpose()
+}
+
+fn encode_snapshot_payload(snapshot: &SiteSnapshot) -> Result<(&'static str, Vec<u8>), AppError> {
+    let raw = serde_json::to_vec(snapshot).map_err(snapshot_persist_error)?;
+    if raw.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
+        return Err(snapshot_persist_error(format!(
+            "De genormaliseerde snapshotpayload is groter dan {} bytes.",
+            MAX_SNAPSHOT_PAYLOAD_BYTES
+        )));
+    }
+    if raw.len() < SNAPSHOT_COMPRESSION_THRESHOLD_BYTES {
+        return Ok(("json_utf8", raw));
+    }
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&raw).map_err(snapshot_persist_error)?;
+    let compressed = encoder.finish().map_err(snapshot_persist_error)?;
+    if compressed.len() < raw.len() {
+        Ok(("gzip_json", compressed))
+    } else {
+        Ok(("json_utf8", raw))
+    }
+}
+
+fn decode_snapshot_payload<'a>(
+    encoding: &str,
+    payload: &'a [u8],
+) -> Result<Cow<'a, [u8]>, AppError> {
+    match encoding {
+        "json_utf8" => {
+            if payload.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
+                return Err(snapshot_schema_error("De snapshotpayload is te groot."));
+            }
+            Ok(Cow::Borrowed(payload))
+        }
+        "gzip_json" => {
+            let decoder = GzDecoder::new(payload);
+            let mut limited = decoder.take((MAX_SNAPSHOT_PAYLOAD_BYTES + 1) as u64);
+            let mut decoded = Vec::new();
+            limited
+                .read_to_end(&mut decoded)
+                .map_err(snapshot_schema_error)?;
+            if decoded.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
+                return Err(snapshot_schema_error(
+                    "De uitgepakte snapshotpayload is te groot.",
+                ));
+            }
+            Ok(Cow::Owned(decoded))
+        }
+        other => Err(snapshot_schema_error(format!(
+            "Snapshot encoding {other} wordt nog niet ondersteund."
+        ))),
+    }
+}
+
 fn load_snapshot(
     connection: &rusqlite::Connection,
     snapshot_id: &str,
@@ -871,14 +948,9 @@ fn load_snapshot(
             stored.schema_version
         )));
     }
-    if stored.encoding != "json_utf8" {
-        return Err(snapshot_schema_error(format!(
-            "Snapshot encoding {} wordt nog niet ondersteund.",
-            stored.encoding
-        )));
-    }
+    let payload = decode_snapshot_payload(&stored.encoding, &stored.payload)?;
     let mut snapshot: SiteSnapshot =
-        serde_json::from_slice(&stored.payload).map_err(snapshot_schema_error)?;
+        serde_json::from_slice(&payload).map_err(snapshot_schema_error)?;
     if snapshot.metadata.schema_version != stored.schema_version
         || snapshot.metadata.snapshot_id != snapshot_id
     {
@@ -972,6 +1044,49 @@ mod tests {
             files: SnapshotBuildSection::Complete(Vec::<SnapshotFileState>::new()),
         })
         .unwrap()
+    }
+
+    fn large_snapshot(site_id: &str) -> SiteSnapshot {
+        let mut snapshot = snapshot(site_id, "2026-09-15T08:00:00Z", SnapshotSource::Baseline);
+        snapshot.plugins = (0..100)
+            .map(|index| crate::snapshots::SnapshotPlugin {
+                slug: format!("plugin-{index:03}"),
+                name: format!("Testplugin {index:03}"),
+                version: format!("1.{}.0", index % 10),
+                status: if index % 2 == 0 { "active" } else { "inactive" }.into(),
+                auto_update: Some(index % 3 == 0),
+                update_available: false,
+                available_version: None,
+            })
+            .collect();
+        snapshot.users = (0..20)
+            .map(|index| crate::snapshots::SnapshotUser {
+                id: index + 1,
+                login: format!("gebruiker-{index:02}"),
+                display_name: Some(format!("Testgebruiker {index:02}")),
+                email: format!("gebruiker-{index:02}@example.test"),
+                roles: vec![
+                    if index == 0 {
+                        "administrator"
+                    } else {
+                        "subscriber"
+                    }
+                    .into(),
+                ],
+                registered_at: Some("2026-01-01T00:00:00Z".into()),
+            })
+            .collect();
+        snapshot.cron = (0..100)
+            .map(|index| crate::snapshots::SnapshotCronEvent {
+                identity: format!("cron:test-hook-{index:03}"),
+                hook: format!("test_hook_{index:03}"),
+                schedule: Some("hourly".into()),
+                recurrence: Some("3600".into()),
+                args_fingerprint: Some(format!("sha256:{index:064x}")),
+                next_run_at: Some("2026-09-15T09:00:00Z".into()),
+            })
+            .collect();
+        snapshot
     }
 
     #[test]
@@ -1363,6 +1478,61 @@ mod tests {
             repository.get_snapshot(&maintenance_id).is_ok(),
             "maintenance snapshot must survive retention"
         );
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_repeated_snapshots_are_compressed_bounded_and_retained() {
+        let (database, path, site_id) = database();
+        let repository = database.snapshot_repository();
+        let mut previous = large_snapshot(&site_id);
+        let baseline_id = previous.metadata.snapshot_id.clone();
+        let raw_size = serde_json::to_vec(&previous).unwrap().len();
+        repository.save_snapshot(&previous).unwrap();
+        let (encoding, stored_size): (String, i64) = database
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT payload_encoding,LENGTH(payload) FROM site_snapshots WHERE id=?1",
+                [&baseline_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(encoding, "gzip_json");
+        assert!(usize::try_from(stored_size).unwrap() < raw_size);
+        assert_eq!(repository.get_snapshot(&baseline_id).unwrap(), previous);
+
+        for index in 1..=MAX_SNAPSHOTS_PER_SITE {
+            let mut current = previous.clone();
+            current.metadata.snapshot_id = Uuid::new_v4().to_string();
+            current.metadata.source = SnapshotSource::Scan;
+            current.metadata.is_baseline = false;
+            current.metadata.previous_snapshot_id = Some(previous.metadata.snapshot_id.clone());
+            current.metadata.created_at =
+                format!("2026-09-15T10:{:02}:{:02}Z", index / 60, index % 60);
+            current.metadata.scan_timestamp = current.metadata.created_at.clone();
+            let diff =
+                SnapshotDiffEngine::compare(&previous, &current, SnapshotChangeOrigin::Scan, None)
+                    .unwrap();
+            assert!(diff.changes.is_empty());
+            repository
+                .save_snapshot_with_diff(&current, Some(&diff))
+                .unwrap();
+            previous = current;
+        }
+
+        let retained: i64 = database
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM site_snapshots WHERE site_id=?1",
+                [&site_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, MAX_SNAPSHOTS_PER_SITE as i64);
+        assert!(repository.get_snapshot(&baseline_id).is_ok());
         drop(database);
         let _ = fs::remove_file(path);
     }

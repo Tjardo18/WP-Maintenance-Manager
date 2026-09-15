@@ -238,6 +238,21 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let snapshot_performance_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 14)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !snapshot_performance_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(include_str!("../migrations/0014_snapshot_performance.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(14, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -2722,12 +2737,12 @@ mod tests {
 
         let migration_count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version=13",
+                "SELECT COUNT(*) FROM schema_migrations WHERE version IN (13,14)",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(migration_count, 1);
+        assert_eq!(migration_count, 2);
         for table in [
             "site_snapshots",
             "snapshot_diffs",
@@ -2768,6 +2783,24 @@ mod tests {
             )
             .unwrap();
         assert!(snapshot_plan.contains("idx_site_snapshots_site_created"));
+
+        let diff_plan: String = connection
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT MAX(change_count) FROM snapshot_diffs WHERE to_snapshot_id=?1",
+                ["snapshot"],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(diff_plan.contains("idx_snapshot_diffs_to_created"));
+
+        let important_change_plan: String = connection
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT summary FROM snapshot_changes WHERE to_snapshot_id=?1 AND severity='warning' AND seen=0",
+                ["snapshot"],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(important_change_plan.contains("idx_snapshot_changes_to_severity_seen"));
 
         drop(connection);
         drop(database);
