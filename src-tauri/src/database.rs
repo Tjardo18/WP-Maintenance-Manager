@@ -9,6 +9,8 @@ use crate::{
         TrustedFileStatus, UpdateItem, UpdateKind, VulnerabilityCandidate, VulnerabilityFeedState,
         VulnerabilityImportSummary, VulnerabilityMatch,
     },
+    snapshot_repository::persist_snapshot_in_transaction,
+    snapshots::{SiteSnapshot, SnapshotDiff},
     wordfence::{WORDFENCE_PROVIDER, WordfenceVulnerability},
 };
 use chrono::{SecondsFormat, Utc};
@@ -315,6 +317,21 @@ impl Database {
     }
 
     pub fn save_scan(&self, scan: &ScanResult, security_status: &str) -> Result<(), AppError> {
+        self.save_scan_with_snapshot(scan, security_status, None, None)
+    }
+
+    pub fn save_scan_with_snapshot(
+        &self,
+        scan: &ScanResult,
+        security_status: &str,
+        snapshot: Option<&SiteSnapshot>,
+        diff: Option<&SnapshotDiff>,
+    ) -> Result<(), AppError> {
+        if diff.is_some() && snapshot.is_none() {
+            return Err(AppError::storage(
+                "Een snapshotdiff kan niet zonder momentopname worden opgeslagen.",
+            ));
+        }
         let connection = self.connect()?;
         let transaction = connection.unchecked_transaction()?;
         let vulnerability_counts = active_vulnerability_counts(scan);
@@ -407,6 +424,9 @@ impl Database {
                 "UPDATE sites SET status=?1,security_status=?2,last_scan_at=?3,updated_at=?3 WHERE id=?4",
                 params![scan.status.as_db(), security_status, scan.finished_at, scan.site_id],
             )?;
+        }
+        if let Some(snapshot) = snapshot {
+            persist_snapshot_in_transaction(&transaction, snapshot, diff)?;
         }
         transaction.commit()?;
         Ok(())

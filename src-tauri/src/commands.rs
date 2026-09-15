@@ -16,6 +16,9 @@ use crate::{
         WordfenceIntegrationStatus,
     },
     security_policy,
+    snapshot_builder::{SnapshotBuildInput, SnapshotBuildSection, SnapshotBuilder},
+    snapshot_diff::SnapshotDiffEngine,
+    snapshots::{SnapshotChangeOrigin, SnapshotFileState, SnapshotSource},
     state::AppState,
     terminal::{TerminalConnectRequest, TerminalConnectionInfo, TerminalOpenInput},
     terminal_auth::TerminalChallengeInfo,
@@ -25,7 +28,7 @@ use crate::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     fs,
     sync::{
         Arc, Mutex,
@@ -965,6 +968,7 @@ const SITE_SCAN_STEPS: &[(&str, &str)] = &[
     ("modified", "Gewijzigde bestanden"),
     ("permissions", "Bestandsrechten"),
     ("configuration", "WordPress-configuratie"),
+    ("cron", "WordPress-cron"),
     ("database", "Databasecontrole"),
     ("core_updates", "WordPress-updates"),
     ("plugin_list", "Plugin-updates"),
@@ -2135,6 +2139,43 @@ fn scan_site_internal_with_progress(
         Utc::now(),
     );
     outcome.result.status = security_policy::calculate_site_status(&outcome.result.checks);
+    let snapshot_files = scan_snapshot_files(&outcome.result, &trusted_files);
+    let repository = state.database.snapshot_repository();
+    let baseline = repository.baseline_snapshot(site_id)?;
+    let previous = repository.latest_snapshot(site_id)?;
+    let mut snapshot = SnapshotBuilder::build(SnapshotBuildInput {
+        site_id: site_id.to_owned(),
+        scan_run_id: Some(outcome.result.id.clone()),
+        maintenance_run_id: None,
+        source: SnapshotSource::Scan,
+        previous_snapshot_id: previous
+            .as_ref()
+            .map(|snapshot| snapshot.metadata.snapshot_id.clone()),
+        wordpress_path: stored.site.wordpress_path.clone(),
+        scan_timestamp: outcome.result.finished_at.clone(),
+        core: outcome.snapshot_sections.core.clone(),
+        plugins: outcome.snapshot_sections.plugins.clone(),
+        themes: outcome.snapshot_sections.themes.clone(),
+        users: outcome.snapshot_sections.users.clone(),
+        configuration: outcome.snapshot_sections.configuration.clone(),
+        cron: outcome.snapshot_sections.cron.clone(),
+        files: snapshot_files,
+    })?;
+    if baseline.is_none() && snapshot.completeness.baseline_eligible() {
+        snapshot.metadata.source = SnapshotSource::Baseline;
+        snapshot.metadata.is_baseline = true;
+        snapshot.metadata.previous_snapshot_id = None;
+    }
+    let diff = if snapshot.metadata.is_baseline {
+        None
+    } else {
+        previous
+            .as_ref()
+            .map(|previous| {
+                SnapshotDiffEngine::compare(previous, &snapshot, SnapshotChangeOrigin::Scan, None)
+            })
+            .transpose()?
+    };
     state
         .database
         .update_versions(site_id, &outcome.wordpress_version, &outcome.php_version)?;
@@ -2151,10 +2192,12 @@ fn scan_site_internal_with_progress(
     }
     progress.step_started("persist");
     let persist_started = Instant::now();
-    if let Err(error) = state
-        .database
-        .save_scan(&outcome.result, &outcome.security_status)
-    {
+    if let Err(error) = state.database.save_scan_with_snapshot(
+        &outcome.result,
+        &outcome.security_status,
+        Some(&snapshot),
+        diff.as_ref(),
+    ) {
         progress.step_finished(
             "persist",
             StepStatus::Failed,
@@ -2170,6 +2213,69 @@ fn scan_site_internal_with_progress(
         Some("Scanresultaat atomair opgeslagen.".into()),
     );
     Ok(outcome.result)
+}
+
+fn scan_snapshot_files(
+    scan: &ScanResult,
+    trusted_files: &[TrustedFile],
+) -> SnapshotBuildSection<Vec<SnapshotFileState>> {
+    let relevant_checks = ["core_checksum", "php_files", "php_uploads"];
+    let reliable_checks = relevant_checks.iter().all(|key| {
+        scan.checks
+            .iter()
+            .find(|check| check.key == *key)
+            .is_some_and(|check| check.status != StepStatus::Failed)
+    });
+    if scan.truncated
+        || !reliable_checks
+        || trusted_files
+            .iter()
+            .any(|trusted| trusted.active && trusted.status == TrustedFileStatus::Unchecked)
+    {
+        return SnapshotBuildSection::Failed;
+    }
+    let mut files = BTreeMap::new();
+    for trusted in trusted_files
+        .iter()
+        .filter(|trusted| trusted.active && trusted.status != TrustedFileStatus::Missing)
+    {
+        files.insert(
+            trusted.relative_path.clone(),
+            SnapshotFileState {
+                relative_path: trusted.relative_path.clone(),
+                category: "trusted".into(),
+                file_type: trusted.file_type.clone(),
+                size_bytes: trusted.current_size_bytes,
+                modified_at: trusted.current_modified_at.clone(),
+                sha256: trusted.current_sha256.clone(),
+            },
+        );
+    }
+    for check in scan
+        .checks
+        .iter()
+        .filter(|check| relevant_checks.contains(&check.key.as_str()))
+    {
+        for finding in &check.findings {
+            let Some(path) = finding.path.as_deref() else {
+                continue;
+            };
+            files
+                .entry(path.to_owned())
+                .or_insert_with(|| SnapshotFileState {
+                    relative_path: path.to_owned(),
+                    category: finding.category.clone(),
+                    file_type: path.rsplit_once('.').map_or_else(
+                        || "bestand".into(),
+                        |(_, extension)| extension.to_ascii_lowercase(),
+                    ),
+                    size_bytes: None,
+                    modified_at: finding.observed_at.clone(),
+                    sha256: None,
+                });
+        }
+    }
+    SnapshotBuildSection::Complete(files.into_values().collect())
 }
 
 #[tauri::command(async)]
@@ -3468,6 +3574,32 @@ mod tests {
         ));
         assert!(inventory_snapshot_is_stale(None, now));
         assert!(inventory_snapshot_is_stale(Some("invalid"), now));
+    }
+
+    #[test]
+    fn completed_site_scan_persists_its_first_reliable_snapshot_as_baseline() {
+        let temp = std::env::temp_dir().join(format!("wpmm-scan-snapshot-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        let mut input = site_input();
+        input.url = "http://127.0.0.1:9".into();
+        let site = database.save_site(&input, None).unwrap();
+        let state = app_state(database.clone(), &temp);
+
+        let scan = scan_site_internal(&state, &site.id, 30).unwrap();
+        let snapshot = database
+            .snapshot_repository()
+            .baseline_snapshot(&site.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot.metadata.scan_run_id.as_deref(),
+            Some(scan.id.as_str())
+        );
+        assert_eq!(snapshot.metadata.source, SnapshotSource::Baseline);
+        assert!(snapshot.metadata.is_baseline);
+        assert_eq!(database.list_scans(&site.id).unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
     }
 
     #[test]

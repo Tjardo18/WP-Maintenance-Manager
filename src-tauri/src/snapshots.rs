@@ -140,6 +140,18 @@ impl SnapshotCompleteness {
             SnapshotStatus::Partial
         }
     }
+
+    pub fn baseline_eligible(&self) -> bool {
+        [
+            SnapshotSection::Core,
+            SnapshotSection::Plugins,
+            SnapshotSection::Themes,
+            SnapshotSection::Users,
+            SnapshotSection::Configuration,
+        ]
+        .into_iter()
+        .all(|section| self.status_for(section).is_reliable())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -374,7 +386,10 @@ mod tests {
         assert_eq!(completeness.overall_status(), SnapshotStatus::Complete);
         completeness.cron = SnapshotSectionStatus::Failed;
         assert_eq!(completeness.overall_status(), SnapshotStatus::Partial);
+        assert!(completeness.baseline_eligible());
         assert!(!completeness.status_for(SnapshotSection::Cron).is_reliable());
+        completeness.users = SnapshotSectionStatus::Failed;
+        assert!(!completeness.baseline_eligible());
     }
 
     #[test]

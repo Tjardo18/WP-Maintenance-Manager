@@ -1,7 +1,7 @@
 use crate::{
     database::{Database, utc_now},
     error::AppError,
-    snapshots::{MAX_SNAPSHOTS_PER_SITE, SNAPSHOT_SCHEMA_VERSION, SiteSnapshot},
+    snapshots::{MAX_SNAPSHOTS_PER_SITE, SNAPSHOT_SCHEMA_VERSION, SiteSnapshot, SnapshotDiff},
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -36,53 +36,19 @@ impl SnapshotRepository<'_> {
         &self,
         snapshot: &SiteSnapshot,
     ) -> Result<SnapshotPersistResult, AppError> {
-        validate_snapshot(snapshot)?;
+        self.save_snapshot_with_diff(snapshot, None)
+    }
+
+    pub fn save_snapshot_with_diff(
+        &self,
+        snapshot: &SiteSnapshot,
+        diff: Option<&SnapshotDiff>,
+    ) -> Result<SnapshotPersistResult, AppError> {
         let mut connection = self.database.connect()?;
         let transaction = connection.transaction()?;
-        validate_relations(&transaction, snapshot)?;
-        let first_snapshot = transaction.query_row(
-            "SELECT NOT EXISTS(SELECT 1 FROM site_snapshots WHERE site_id=?1)",
-            [&snapshot.metadata.site_id],
-            |row| row.get(0),
-        )?;
-        if snapshot.metadata.is_baseline {
-            transaction.execute(
-                "UPDATE site_snapshots SET is_baseline=0 WHERE site_id=?1",
-                [&snapshot.metadata.site_id],
-            )?;
-        }
-        let section_status_json =
-            serde_json::to_string(&snapshot.completeness).map_err(snapshot_persist_error)?;
-        let payload = serde_json::to_vec(snapshot).map_err(snapshot_persist_error)?;
-        transaction.execute(
-            "INSERT INTO site_snapshots(id,site_id,created_at,scan_run_id,maintenance_run_id,source,schema_version,status,wordpress_root_identity,scan_timestamp,app_version,section_status_json,payload_encoding,payload,is_baseline,previous_snapshot_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'json_utf8',?13,?14,?15)",
-            params![
-                snapshot.metadata.snapshot_id,
-                snapshot.metadata.site_id,
-                snapshot.metadata.created_at,
-                snapshot.metadata.scan_run_id,
-                snapshot.metadata.maintenance_run_id,
-                snapshot.metadata.source.as_db(),
-                snapshot.metadata.schema_version,
-                snapshot.metadata.status.as_db(),
-                snapshot.metadata.wordpress_root_identity,
-                snapshot.metadata.scan_timestamp,
-                snapshot.metadata.app_version,
-                section_status_json,
-                payload,
-                snapshot.metadata.is_baseline,
-                snapshot.metadata.previous_snapshot_id,
-            ],
-        )?;
-        let removed_by_retention = enforce_retention(&transaction, &snapshot.metadata.site_id)?;
-        refresh_state(&transaction, &snapshot.metadata.site_id)?;
+        let result = persist_snapshot_in_transaction(&transaction, snapshot, diff)?;
         transaction.commit()?;
-        Ok(SnapshotPersistResult {
-            snapshot_id: snapshot.metadata.snapshot_id.clone(),
-            first_snapshot,
-            is_baseline: snapshot.metadata.is_baseline,
-            removed_by_retention,
-        })
+        Ok(result)
     }
 
     pub fn get_snapshot(&self, snapshot_id: &str) -> Result<SiteSnapshot, AppError> {
@@ -165,6 +131,159 @@ impl SnapshotRepository<'_> {
         transaction.commit()?;
         Ok(())
     }
+}
+
+pub(crate) fn persist_snapshot_in_transaction(
+    transaction: &Transaction<'_>,
+    snapshot: &SiteSnapshot,
+    diff: Option<&SnapshotDiff>,
+) -> Result<SnapshotPersistResult, AppError> {
+    validate_snapshot(snapshot)?;
+    validate_relations(transaction, snapshot)?;
+    let first_snapshot = transaction.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM site_snapshots WHERE site_id=?1)",
+        [&snapshot.metadata.site_id],
+        |row| row.get(0),
+    )?;
+    if snapshot.metadata.is_baseline {
+        transaction.execute(
+            "UPDATE site_snapshots SET is_baseline=0 WHERE site_id=?1",
+            [&snapshot.metadata.site_id],
+        )?;
+    }
+    let section_status_json =
+        serde_json::to_string(&snapshot.completeness).map_err(snapshot_persist_error)?;
+    let payload = serde_json::to_vec(snapshot).map_err(snapshot_persist_error)?;
+    transaction.execute(
+        "INSERT INTO site_snapshots(id,site_id,created_at,scan_run_id,maintenance_run_id,source,schema_version,status,wordpress_root_identity,scan_timestamp,app_version,section_status_json,payload_encoding,payload,is_baseline,previous_snapshot_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'json_utf8',?13,?14,?15)",
+        params![
+            snapshot.metadata.snapshot_id,
+            snapshot.metadata.site_id,
+            snapshot.metadata.created_at,
+            snapshot.metadata.scan_run_id,
+            snapshot.metadata.maintenance_run_id,
+            snapshot.metadata.source.as_db(),
+            snapshot.metadata.schema_version,
+            snapshot.metadata.status.as_db(),
+            snapshot.metadata.wordpress_root_identity,
+            snapshot.metadata.scan_timestamp,
+            snapshot.metadata.app_version,
+            section_status_json,
+            payload,
+            snapshot.metadata.is_baseline,
+            snapshot.metadata.previous_snapshot_id,
+        ],
+    )?;
+    if let Some(diff) = diff {
+        persist_diff(transaction, snapshot, diff)?;
+    }
+    let removed_by_retention = enforce_retention(transaction, &snapshot.metadata.site_id)?;
+    refresh_state(transaction, &snapshot.metadata.site_id)?;
+    Ok(SnapshotPersistResult {
+        snapshot_id: snapshot.metadata.snapshot_id.clone(),
+        first_snapshot,
+        is_baseline: snapshot.metadata.is_baseline,
+        removed_by_retention,
+    })
+}
+
+fn persist_diff(
+    transaction: &Transaction<'_>,
+    snapshot: &SiteSnapshot,
+    diff: &SnapshotDiff,
+) -> Result<(), AppError> {
+    validate_diff(snapshot, diff)?;
+    transaction.execute(
+        "INSERT INTO snapshot_diffs(id,site_id,from_snapshot_id,to_snapshot_id,created_at,schema_version,origin,maintenance_run_id,change_count) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            diff.id,
+            diff.site_id,
+            diff.from_snapshot_id,
+            diff.to_snapshot_id,
+            diff.created_at,
+            diff.schema_version,
+            enum_db(&diff.origin)?,
+            diff.maintenance_run_id,
+            i64::try_from(diff.changes.len()).map_err(snapshot_persist_error)?,
+        ],
+    )?;
+    {
+        let mut insert = transaction.prepare_cached(
+            "INSERT INTO snapshot_diff_sections(diff_id,category,status,reason) VALUES(?1,?2,?3,?4)",
+        )?;
+        for section in &diff.sections {
+            insert.execute(params![
+                diff.id,
+                section.category.as_db(),
+                enum_db(&section.status)?,
+                section.reason,
+            ])?;
+        }
+    }
+    {
+        let mut insert = transaction.prepare_cached(
+            "INSERT INTO snapshot_changes(id,diff_id,site_id,from_snapshot_id,to_snapshot_id,category,entity_type,entity_key,change_type,field,old_value_json,new_value_json,severity,summary,metadata_json,origin,seen,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+        )?;
+        for change in &diff.changes {
+            insert.execute(params![
+                change.id,
+                diff.id,
+                change.site_id,
+                change.from_snapshot_id,
+                change.to_snapshot_id,
+                change.category.as_db(),
+                change.entity_type,
+                change.entity_key,
+                enum_db(&change.change_type)?,
+                change.field,
+                change
+                    .old_value
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(snapshot_persist_error)?,
+                change
+                    .new_value
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(snapshot_persist_error)?,
+                enum_db(&change.severity)?,
+                change.summary,
+                serde_json::to_string(&change.metadata).map_err(snapshot_persist_error)?,
+                enum_db(&change.origin)?,
+                change.seen,
+                change.created_at,
+            ])?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_diff(snapshot: &SiteSnapshot, diff: &SnapshotDiff) -> Result<(), AppError> {
+    if diff.schema_version != SNAPSHOT_SCHEMA_VERSION
+        || diff.site_id != snapshot.metadata.site_id
+        || diff.to_snapshot_id != snapshot.metadata.snapshot_id
+        || snapshot.metadata.previous_snapshot_id.as_deref() != Some(diff.from_snapshot_id.as_str())
+        || diff.changes.iter().any(|change| {
+            change.site_id != diff.site_id
+                || change.from_snapshot_id != diff.from_snapshot_id
+                || change.to_snapshot_id != diff.to_snapshot_id
+        })
+    {
+        return Err(snapshot_persist_error(
+            "De snapshotdiff komt niet overeen met de gekoppelde momentopnames.",
+        ));
+    }
+    Ok(())
+}
+
+fn enum_db(value: &impl serde::Serialize) -> Result<String, AppError> {
+    serde_json::to_value(value)
+        .map_err(snapshot_persist_error)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| snapshot_persist_error("Een snapshotwaarde kon niet worden opgeslagen."))
 }
 
 fn validate_snapshot(snapshot: &SiteSnapshot) -> Result<(), AppError> {
@@ -277,9 +396,34 @@ fn refresh_state(transaction: &Transaction<'_>, site_id: &str) -> Result<(), App
         )
         .optional()?;
     let (latest_id, latest_at) = latest.unzip();
+    let latest_change_count: i64 = latest_id.as_deref().map_or(Ok(0), |snapshot_id| {
+        transaction.query_row(
+            "SELECT COALESCE(MAX(change_count),0) FROM snapshot_diffs WHERE to_snapshot_id=?1",
+            [snapshot_id],
+            |row| row.get(0),
+        )
+    })?;
+    let unseen_change_count: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM snapshot_changes WHERE site_id=?1 AND seen=0",
+        [site_id],
+        |row| row.get(0),
+    )?;
+    let important_change_summary: Option<String> = latest_id
+        .as_deref()
+        .map(|snapshot_id| {
+            transaction
+                .query_row(
+                    "SELECT summary FROM snapshot_changes WHERE to_snapshot_id=?1 AND severity IN ('critical','warning') ORDER BY CASE severity WHEN 'critical' THEN 0 ELSE 1 END,created_at DESC LIMIT 1",
+                    [snapshot_id],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
+        .transpose()?
+        .flatten();
     transaction.execute(
-        "INSERT INTO site_snapshot_state(site_id,latest_snapshot_id,baseline_snapshot_id,latest_snapshot_at,latest_change_count,unseen_change_count,important_change_summary,updated_at) VALUES(?1,?2,?3,?4,0,0,NULL,?5) ON CONFLICT(site_id) DO UPDATE SET latest_snapshot_id=excluded.latest_snapshot_id,baseline_snapshot_id=excluded.baseline_snapshot_id,latest_snapshot_at=excluded.latest_snapshot_at,latest_change_count=0,updated_at=excluded.updated_at",
-        params![site_id, latest_id, baseline, latest_at, utc_now()],
+        "INSERT INTO site_snapshot_state(site_id,latest_snapshot_id,baseline_snapshot_id,latest_snapshot_at,latest_change_count,unseen_change_count,important_change_summary,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(site_id) DO UPDATE SET latest_snapshot_id=excluded.latest_snapshot_id,baseline_snapshot_id=excluded.baseline_snapshot_id,latest_snapshot_at=excluded.latest_snapshot_at,latest_change_count=excluded.latest_change_count,unseen_change_count=excluded.unseen_change_count,important_change_summary=excluded.important_change_summary,updated_at=excluded.updated_at",
+        params![site_id, latest_id, baseline, latest_at, latest_change_count, unseen_change_count, important_change_summary, utc_now()],
     )?;
     Ok(())
 }
@@ -354,11 +498,12 @@ fn snapshot_schema_error(error: impl std::fmt::Display) -> AppError {
 mod tests {
     use super::*;
     use crate::{
-        models::{AuthMethod, SiteInput},
+        models::{AuthMethod, ScanResult, SiteInput, SiteStatus},
         snapshot_builder::{SnapshotBuildInput, SnapshotBuildSection, SnapshotBuilder},
+        snapshot_diff::SnapshotDiffEngine,
         snapshots::{
-            SnapshotCompleteness, SnapshotCore, SnapshotFileState, SnapshotSectionStatus,
-            SnapshotSource, SnapshotStatus,
+            SnapshotChangeOrigin, SnapshotCompleteness, SnapshotCore, SnapshotFileState,
+            SnapshotSectionStatus, SnapshotSource, SnapshotStatus,
         },
     };
     use std::{collections::BTreeMap, fs, path::PathBuf};
@@ -474,6 +619,85 @@ mod tests {
                 .snapshot_id,
             current.metadata.snapshot_id
         );
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persists_diff_changes_and_refreshes_cached_site_state() {
+        let (database, path, site_id) = database();
+        let baseline = snapshot(&site_id, "2026-09-15T08:00:00Z", SnapshotSource::Baseline);
+        database
+            .snapshot_repository()
+            .save_snapshot(&baseline)
+            .unwrap();
+        let mut current = snapshot(&site_id, "2026-09-15T09:00:00Z", SnapshotSource::Scan);
+        current.metadata.previous_snapshot_id = Some(baseline.metadata.snapshot_id.clone());
+        current.core.as_mut().unwrap().version = "6.8.3".into();
+        let diff =
+            SnapshotDiffEngine::compare(&baseline, &current, SnapshotChangeOrigin::Scan, None)
+                .unwrap();
+        assert_eq!(diff.changes.len(), 1);
+        database
+            .snapshot_repository()
+            .save_snapshot_with_diff(&current, Some(&diff))
+            .unwrap();
+
+        let connection = database.connect().unwrap();
+        let persisted: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM snapshot_diffs),(SELECT COUNT(*) FROM snapshot_changes),latest_change_count FROM site_snapshot_state WHERE site_id=?1",
+                [&site_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(persisted, (1, 1, 1));
+        drop(connection);
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn scan_snapshot_and_diff_roll_back_as_one_unit() {
+        let (database, path, site_id) = database();
+        let baseline = snapshot(&site_id, "2026-09-15T08:00:00Z", SnapshotSource::Baseline);
+        database
+            .snapshot_repository()
+            .save_snapshot(&baseline)
+            .unwrap();
+        let scan_id = Uuid::new_v4().to_string();
+        let mut current = snapshot(&site_id, "2026-09-15T09:00:00Z", SnapshotSource::Scan);
+        current.metadata.scan_run_id = Some(scan_id.clone());
+        current.metadata.previous_snapshot_id = Some(baseline.metadata.snapshot_id.clone());
+        current.core.as_mut().unwrap().version = "6.8.3".into();
+        let mut diff =
+            SnapshotDiffEngine::compare(&baseline, &current, SnapshotChangeOrigin::Scan, None)
+                .unwrap();
+        diff.to_snapshot_id = "verkeerde-snapshot".into();
+        let scan = ScanResult {
+            id: scan_id.clone(),
+            site_id: site_id.clone(),
+            started_at: "2026-09-15T08:59:00Z".into(),
+            finished_at: "2026-09-15T09:00:00Z".into(),
+            status: SiteStatus::Healthy,
+            checks: Vec::new(),
+            truncated: false,
+        };
+        assert!(
+            database
+                .save_scan_with_snapshot(&scan, "Veilig", Some(&current), Some(&diff))
+                .is_err()
+        );
+        let connection = database.connect().unwrap();
+        let counts: (i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM scan_runs WHERE id=?1),(SELECT COUNT(*) FROM site_snapshots WHERE id=?2)",
+                params![scan_id, current.metadata.snapshot_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0));
+        drop(connection);
         drop(database);
         let _ = fs::remove_file(path);
     }

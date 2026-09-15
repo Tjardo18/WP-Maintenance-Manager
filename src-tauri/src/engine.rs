@@ -4,13 +4,26 @@ use crate::{
     error::AppError,
     models::{
         ChecksumStatus, Finding, FindingSeverity, InstalledSoftware, ScanCheck, ScanResult,
-        SiteStatus, StepStatus, StoredSite, UpdateItem, UpdateKind,
+        SiteStatus, StepStatus, StoredSite, UpdateItem, UpdateKind, WordPressUser,
     },
     parsers,
+    snapshot_builder::{SnapshotBuildSection, SnapshotCronInput},
+    snapshots::SnapshotCore,
     ssh::{ExecOutput, SshConnection, SshExecutor},
 };
+use std::collections::BTreeMap;
 use std::time::Instant;
 use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct ScanSnapshotSections {
+    pub core: SnapshotBuildSection<SnapshotCore>,
+    pub plugins: SnapshotBuildSection<Vec<InstalledSoftware>>,
+    pub themes: SnapshotBuildSection<Vec<InstalledSoftware>>,
+    pub users: SnapshotBuildSection<Vec<WordPressUser>>,
+    pub configuration: SnapshotBuildSection<BTreeMap<String, serde_json::Value>>,
+    pub cron: SnapshotBuildSection<Vec<SnapshotCronInput>>,
+}
 
 pub struct ScanOutcome {
     pub result: ScanResult,
@@ -19,12 +32,15 @@ pub struct ScanOutcome {
     pub php_version: String,
     pub updates: Option<Vec<UpdateItem>>,
     pub inventory: Vec<InstalledSoftware>,
+    pub snapshot_sections: ScanSnapshotSections,
 }
 
 struct ScannedUpdates {
     updates: Vec<UpdateItem>,
     errors: Vec<AppError>,
     inventory: Vec<InstalledSoftware>,
+    plugins: SnapshotBuildSection<Vec<InstalledSoftware>>,
+    themes: SnapshotBuildSection<Vec<InstalledSoftware>>,
 }
 
 pub trait ScanProgress {
@@ -95,18 +111,21 @@ pub fn scan_site_with_progress(
     checks.push(measured_check(progress, "checksum", || {
         checksum_check(connection.as_mut(), stored)
     })?);
+    let mut snapshot_users = SnapshotBuildSection::Failed;
     checks.push(measured_check(
         progress,
         "users",
         || match connection_text_action(connection.as_mut(), stored, RemoteAction::ListUsers) {
-            Ok(output) => {
-                match measured_parse(&stored.site.id, "users", || parsers::parse_users(&output)) {
-                    Ok(findings) => {
-                        findings_check("users", "Gebruikersaccounts", findings, "accounts", false)
-                    }
-                    Err(error) => failed_check("users", "Gebruikersaccounts", error),
+            Ok(output) => match measured_parse(&stored.site.id, "users", || {
+                parsers::parse_wordpress_users(&output)
+            }) {
+                Ok(users) => {
+                    let findings = parsers::user_findings(&users);
+                    snapshot_users = SnapshotBuildSection::Complete(users);
+                    findings_check("users", "Gebruikersaccounts", findings, "accounts", false)
                 }
-            }
+                Err(error) => failed_check("users", "Gebruikersaccounts", error),
+            },
             Err(error) => failed_check("users", "Gebruikersaccounts", error),
         },
     )?);
@@ -211,6 +230,7 @@ pub fn scan_site_with_progress(
     )?);
     truncated |= permissions_cut;
 
+    let mut snapshot_configuration = SnapshotBuildSection::Failed;
     checks.push(measured_check(
         progress,
         "configuration",
@@ -220,18 +240,49 @@ pub fn scan_site_with_progress(
             RemoteAction::CheckSelectedWpConfigConstants,
         ) {
             Ok(output) => match measured_parse(&stored.site.id, "configuration", || {
-                parsers::parse_config(&output)
+                parsers::parse_selected_config(&output)
             }) {
-                Ok(findings) => findings_check(
-                    "configuration",
-                    "WordPress-configuratie",
-                    findings,
-                    "instellingen",
-                    false,
-                ),
+                Ok(mut configuration) => {
+                    configuration.insert("php_version".into(), php_version.clone().into());
+                    let findings = parsers::config_findings(&configuration);
+                    snapshot_configuration = SnapshotBuildSection::Complete(configuration);
+                    findings_check(
+                        "configuration",
+                        "WordPress-configuratie",
+                        findings,
+                        "instellingen",
+                        false,
+                    )
+                }
                 Err(error) => failed_check("configuration", "WordPress-configuratie", error),
             },
             Err(error) => failed_check("configuration", "WordPress-configuratie", error),
+        },
+    )?);
+
+    let mut snapshot_cron = SnapshotBuildSection::Failed;
+    checks.push(measured_check(
+        progress,
+        "cron",
+        || match connection_text_action(connection.as_mut(), stored, RemoteAction::ListCronEvents) {
+            Ok(output) => match measured_parse(&stored.site.id, "cron", || {
+                parsers::parse_snapshot_cron(&output)
+            }) {
+                Ok(events) => {
+                    let count = events.len();
+                    snapshot_cron = SnapshotBuildSection::Complete(events);
+                    ScanCheck {
+                        key: "cron".into(),
+                        label: "WordPress-cron".into(),
+                        status: StepStatus::Success,
+                        summary: format!("{count} cronregels veilig geïnventariseerd."),
+                        technical_details: None,
+                        findings: Vec::new(),
+                    }
+                }
+                Err(error) => failed_check("cron", "WordPress-cron", error),
+            },
+            Err(error) => failed_check("cron", "WordPress-cron", error),
         },
     )?);
 
@@ -255,6 +306,8 @@ pub fn scan_site_with_progress(
         updates: detected_updates,
         errors: update_errors,
         mut inventory,
+        plugins,
+        themes,
     } = scan_updates_with_progress(connection.as_mut(), stored, &wordpress_version, progress)?;
     inventory.insert(
         0,
@@ -335,10 +388,34 @@ pub fn scan_site_with_progress(
     Ok(ScanOutcome {
         result,
         security_status,
-        wordpress_version,
-        php_version,
+        wordpress_version: wordpress_version.clone(),
+        php_version: php_version.clone(),
         updates,
         inventory,
+        snapshot_sections: ScanSnapshotSections {
+            core: SnapshotBuildSection::Complete(SnapshotCore {
+                version: wordpress_version.clone(),
+                locale: match &snapshot_configuration {
+                    SnapshotBuildSection::Complete(configuration) => configuration
+                        .get("locale")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    SnapshotBuildSection::Failed | SnapshotBuildSection::NotCollected => None,
+                },
+                multisite: match &snapshot_configuration {
+                    SnapshotBuildSection::Complete(configuration) => configuration
+                        .get("multisite")
+                        .and_then(serde_json::Value::as_bool),
+                    SnapshotBuildSection::Failed | SnapshotBuildSection::NotCollected => None,
+                },
+                php_version: Some(php_version.clone()),
+            }),
+            plugins,
+            themes,
+            users: snapshot_users,
+            configuration: snapshot_configuration,
+            cron: snapshot_cron,
+        },
     })
 }
 
@@ -385,6 +462,8 @@ fn scan_updates_with_progress(
     let mut updates = Vec::new();
     let mut errors = Vec::new();
     let mut inventory = Vec::new();
+    let mut plugin_inventory = SnapshotBuildSection::Failed;
+    let mut theme_inventory = SnapshotBuildSection::Failed;
     let observed_at = utc_now();
 
     let core = measured_result(progress, "core_updates", || {
@@ -412,6 +491,7 @@ fn scan_updates_with_progress(
     match plugins {
         Ok((items, installed)) => {
             updates.extend(items);
+            plugin_inventory = SnapshotBuildSection::Complete(installed.clone());
             inventory.extend(installed);
         }
         Err(error) if error.category == "scan_cancelled" => return Err(error),
@@ -431,6 +511,7 @@ fn scan_updates_with_progress(
     match themes {
         Ok((items, installed)) => {
             updates.extend(items);
+            theme_inventory = SnapshotBuildSection::Complete(installed.clone());
             inventory.extend(installed);
         }
         Err(error) if error.category == "scan_cancelled" => return Err(error),
@@ -441,6 +522,8 @@ fn scan_updates_with_progress(
         updates,
         errors,
         inventory,
+        plugins: plugin_inventory,
+        themes: theme_inventory,
     })
 }
 
@@ -1033,6 +1116,12 @@ mod tests {
                         r#"{"WP_DEBUG":false,"DISALLOW_FILE_EDIT":true,"WP_ENVIRONMENT_TYPE":"production"}"#,
                     ),
                 ),
+                (
+                    "ListCronEvents",
+                    output(
+                        r#"[{"hook":"wp_update_plugins","timestamp":1789462800,"schedule":"twicedaily","interval":43200,"args":[]}]"#,
+                    ),
+                ),
                 ("CheckDatabase", output("Success: Database checked.")),
                 ("CheckCoreUpdates", output("[]")),
                 ("ListPluginUpdates", output("[]")),
@@ -1049,6 +1138,10 @@ mod tests {
 
         assert_eq!(ssh.authentications.load(Ordering::SeqCst), 1);
         assert_eq!(outcome.wordpress_version, "6.8.2");
+        assert!(matches!(
+            outcome.snapshot_sections.cron,
+            SnapshotBuildSection::Complete(ref events) if events.len() == 1
+        ));
         assert_eq!(
             progress.started.first().map(String::as_str),
             Some("ssh_connect")

@@ -28,9 +28,8 @@ pub const SNAPSHOT_CONFIG_ALLOWLIST: [&str; 12] = [
     "permalink_structure",
     "multisite",
 ];
-const BOOLEAN_CONFIG_KEYS: [&str; 6] = [
+const BOOLEAN_CONFIG_KEYS: [&str; 5] = [
     "WP_DEBUG",
-    "WP_DEBUG_LOG",
     "WP_DEBUG_DISPLAY",
     "DISALLOW_FILE_EDIT",
     "DISALLOW_FILE_MODS",

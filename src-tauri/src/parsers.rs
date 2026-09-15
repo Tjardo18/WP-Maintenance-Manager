@@ -5,11 +5,12 @@ use crate::{
         ChecksumStatus, Finding, FindingSeverity, InstalledSoftware, UpdateItem, UpdateKind,
         WordPressRole, WordPressUser,
     },
+    snapshot_builder::SnapshotCronInput,
     validation::{validate_checksum_relative_path, validate_role, validate_slug, validate_user_id},
 };
-use chrono::{Duration, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, SecondsFormat, Utc};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
 pub fn parse_nul_paths(
@@ -467,9 +468,14 @@ fn checksum_finding(path: &str, message: &str, observed_at: &str) -> Result<Find
     })
 }
 
+#[cfg(test)]
 pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
-    Ok(parse_wordpress_users(output)?
-        .into_iter()
+    Ok(user_findings(&parse_wordpress_users(output)?))
+}
+
+pub fn user_findings(users: &[WordPressUser]) -> Vec<Finding> {
+    users
+        .iter()
         .map(|user| {
             let administrator = user.roles.iter().any(|role| role == "administrator");
             let recent = NaiveDateTime::parse_from_str(&user.registered_at, "%Y-%m-%d %H:%M:%S")
@@ -513,7 +519,7 @@ pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
                 observed_at: None,
             }
         })
-        .collect())
+        .collect()
 }
 
 pub fn parse_wordpress_users(output: &str) -> Result<Vec<WordPressUser>, AppError> {
@@ -588,7 +594,12 @@ pub fn parse_multisite(output: &str) -> Result<bool, AppError> {
     }
 }
 
+#[cfg(test)]
 pub fn parse_config(output: &str) -> Result<Vec<Finding>, AppError> {
+    Ok(config_findings(&parse_selected_config(output)?))
+}
+
+pub fn parse_selected_config(output: &str) -> Result<BTreeMap<String, Value>, AppError> {
     let config: Value = serde_json::from_str(output).map_err(|error| {
         AppError::ssh(
             "parse_failed",
@@ -597,6 +608,46 @@ pub fn parse_config(output: &str) -> Result<Vec<Finding>, AppError> {
             false,
         )
     })?;
+    let object = config.as_object().ok_or_else(|| {
+        AppError::ssh(
+            "parse_failed",
+            "De geselecteerde WordPress-instellingen konden niet worden gelezen.",
+            "WP-CLI retourneerde geen JSON-object.",
+            false,
+        )
+    })?;
+    let mut selected = BTreeMap::new();
+    for (key, value) in object {
+        if [
+            "site_url",
+            "home_url",
+            "active_theme",
+            "wp_environment_type",
+            "WP_ENVIRONMENT_TYPE",
+            "WP_ENVIRONMENT_TYPE_EXPLICIT",
+            "WP_DEBUG",
+            "WP_DEBUG_LOG",
+            "WP_DEBUG_DISPLAY",
+            "DISALLOW_FILE_EDIT",
+            "DISALLOW_FILE_MODS",
+            "permalink_structure",
+            "multisite",
+            "locale",
+        ]
+        .contains(&key.as_str())
+        {
+            selected.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(value) = selected.remove("WP_ENVIRONMENT_TYPE") {
+        selected
+            .entry("wp_environment_type".into())
+            .or_insert(value);
+    }
+    Ok(selected)
+}
+
+pub fn config_findings(config: &BTreeMap<String, Value>) -> Vec<Finding> {
     let mut findings = Vec::new();
     if config.get("WP_DEBUG").and_then(Value::as_bool) == Some(true) {
         findings.push(config_finding(
@@ -613,7 +664,7 @@ pub fn parse_config(output: &str) -> Result<Vec<Finding>, AppError> {
         ));
     }
     let environment = config
-        .get("WP_ENVIRONMENT_TYPE")
+        .get("wp_environment_type")
         .and_then(Value::as_str)
         .unwrap_or("production");
     let environment_is_explicit = config
@@ -640,7 +691,61 @@ pub fn parse_config(output: &str) -> Result<Vec<Finding>, AppError> {
         vulnerability: None,
         observed_at: None,
     });
-    Ok(findings)
+    findings
+}
+
+pub fn parse_snapshot_cron(output: &str) -> Result<Vec<SnapshotCronInput>, AppError> {
+    let rows: Vec<Value> = if output.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(output).map_err(|error| {
+            AppError::ssh(
+                "parse_failed",
+                "De WordPress-cronplanning kon niet worden gelezen.",
+                error,
+                false,
+            )
+        })?
+    };
+    if rows.len() > MAX_SCAN_RESULTS {
+        return Err(AppError::ssh(
+            "output_limit",
+            "De WordPress-cronplanning is te groot voor een betrouwbare momentopname.",
+            format!("meer dan {MAX_SCAN_RESULTS} cronregels"),
+            false,
+        ));
+    }
+    rows.into_iter()
+        .map(|row| {
+            let hook = required_string_field(&row, "hook", "cronhook")?;
+            if hook.chars().count() > 250 || hook.chars().any(char::is_control) {
+                return Err(AppError::validation(
+                    "WordPress retourneerde een ongeldige cronhook.",
+                ));
+            }
+            let timestamp = row
+                .get("timestamp")
+                .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+                .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
+                .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Secs, true));
+            let schedule = row
+                .get("schedule")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            let recurrence = row
+                .get("interval")
+                .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+                .map(|value| value.to_string());
+            Ok(SnapshotCronInput {
+                hook,
+                schedule,
+                recurrence,
+                args: row.get("args").cloned(),
+                next_run_at: timestamp,
+            })
+        })
+        .collect()
 }
 
 pub fn parse_update_list(output: &str, kind: UpdateKind) -> Result<Vec<UpdateItem>, AppError> {
@@ -1077,6 +1182,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(explicit[0].detail, "staging");
+    }
+
+    #[test]
+    fn selected_configuration_keeps_only_explicit_safe_snapshot_keys() {
+        let configuration = parse_selected_config(
+            r#"{"site_url":"https://example.test","WP_ENVIRONMENT_TYPE":"staging","DB_PASSWORD":"never-store","AUTH_KEY":"never-store-either"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            configuration
+                .get("wp_environment_type")
+                .and_then(Value::as_str),
+            Some("staging")
+        );
+        assert!(!configuration.contains_key("WP_ENVIRONMENT_TYPE"));
+        assert!(!configuration.contains_key("DB_PASSWORD"));
+        assert!(!configuration.contains_key("AUTH_KEY"));
+    }
+
+    #[test]
+    fn cron_parser_keeps_args_only_for_later_fingerprinting() {
+        let events = parse_snapshot_cron(
+            r#"[{"hook":"wp_update_plugins","timestamp":1789462800,"schedule":"twicedaily","interval":43200,"args":{"site":"primary"}}]"#,
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].hook, "wp_update_plugins");
+        assert_eq!(events[0].recurrence.as_deref(), Some("43200"));
+        assert_eq!(
+            events[0].args.as_ref().and_then(|args| args.get("site")),
+            Some(&Value::String("primary".into()))
+        );
+        assert!(events[0].next_run_at.as_deref().unwrap().ends_with('Z'));
     }
 
     #[test]

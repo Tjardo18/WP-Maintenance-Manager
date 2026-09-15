@@ -90,6 +90,10 @@ pub enum ErrorCategory {
     VulnerabilityFeed,
     VulnerabilityParse,
     VulnerabilityMatch,
+    SnapshotBuild,
+    SnapshotPersist,
+    SnapshotDiff,
+    SnapshotSchema,
     Unknown,
 }
 
@@ -116,6 +120,10 @@ impl ErrorCategory {
             Self::VulnerabilityFeed => "vulnerability_feed",
             Self::VulnerabilityParse => "vulnerability_parse",
             Self::VulnerabilityMatch => "vulnerability_match",
+            Self::SnapshotBuild => "snapshot_build",
+            Self::SnapshotPersist => "snapshot_persist",
+            Self::SnapshotDiff => "snapshot_diff",
+            Self::SnapshotSchema => "snapshot_schema",
             Self::Unknown => "unknown",
         }
     }
@@ -142,6 +150,10 @@ impl ErrorCategory {
             "vulnerability_feed" => Self::VulnerabilityFeed,
             "vulnerability_parse" => Self::VulnerabilityParse,
             "vulnerability_match" => Self::VulnerabilityMatch,
+            "snapshot_build" => Self::SnapshotBuild,
+            "snapshot_persist" => Self::SnapshotPersist,
+            "snapshot_diff" => Self::SnapshotDiff,
+            "snapshot_schema" => Self::SnapshotSchema,
             _ => Self::Unknown,
         }
     }

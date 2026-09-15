@@ -31,6 +31,10 @@ pub fn classify_error(error: &AppError, action: &str) -> ErrorCategory {
         | "vulnerability_feed_cooldown" => ErrorCategory::VulnerabilityFeed,
         "vulnerability_parse" => ErrorCategory::VulnerabilityParse,
         "vulnerability_match" => ErrorCategory::VulnerabilityMatch,
+        "snapshot_build" => ErrorCategory::SnapshotBuild,
+        "snapshot_persist" => ErrorCategory::SnapshotPersist,
+        "snapshot_diff" => ErrorCategory::SnapshotDiff,
+        "snapshot_schema" => ErrorCategory::SnapshotSchema,
         "locked"
         | "session_expired"
         | "invalid_session"

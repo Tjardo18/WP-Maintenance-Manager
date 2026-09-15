@@ -23,6 +23,8 @@ const categories: Array<{ value: ErrorCategory; label: string }> = [
   { value: "ssh_command", label: "SSH-commando" }, { value: "wp_cli", label: "WP-CLI" }, { value: "database", label: "Database" },
   { value: "http", label: "HTTP" }, { value: "filesystem", label: "Bestandssysteem" }, { value: "backup", label: "Backup" },
   { value: "update", label: "Update" }, { value: "parse", label: "Verwerking" }, { value: "authentication", label: "Applicatielogin" },
+  { value: "snapshot_build", label: "Momentopname opbouwen" }, { value: "snapshot_persist", label: "Momentopname opslaan" },
+  { value: "snapshot_diff", label: "Wijzigingen vergelijken" }, { value: "snapshot_schema", label: "Momentopnameversie" },
   { value: "application", label: "Applicatie" }, { value: "unknown", label: "Onbekend" },
 ];
 

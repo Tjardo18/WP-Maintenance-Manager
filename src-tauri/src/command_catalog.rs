@@ -44,6 +44,7 @@ pub enum RemoteAction {
     },
     CheckUnsafePermissions,
     CheckSelectedWpConfigConstants,
+    ListCronEvents,
     CheckCoreUpdates,
     ListPluginUpdates,
     ListThemeUpdates,
@@ -290,13 +291,23 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
             4 * 1024 * 1024,
         ),
         RemoteAction::CheckSelectedWpConfigConstants => {
-            let code = "echo json_encode(array('WP_DEBUG'=>defined('WP_DEBUG') ? (bool) WP_DEBUG : null,'DISALLOW_FILE_EDIT'=>defined('DISALLOW_FILE_EDIT') ? (bool) DISALLOW_FILE_EDIT : null,'WP_ENVIRONMENT_TYPE'=>function_exists('wp_get_environment_type') ? wp_get_environment_type() : (defined('WP_ENVIRONMENT_TYPE') ? WP_ENVIRONMENT_TYPE : 'production'),'WP_ENVIRONMENT_TYPE_EXPLICIT'=>defined('WP_ENVIRONMENT_TYPE') || (function_exists('getenv') && getenv('WP_ENVIRONMENT_TYPE') !== false)));";
+            let code = "echo json_encode(array('site_url'=>get_option('siteurl'),'home_url'=>get_option('home'),'active_theme'=>get_stylesheet(),'wp_environment_type'=>function_exists('wp_get_environment_type') ? wp_get_environment_type() : (defined('WP_ENVIRONMENT_TYPE') ? WP_ENVIRONMENT_TYPE : 'production'),'WP_ENVIRONMENT_TYPE_EXPLICIT'=>defined('WP_ENVIRONMENT_TYPE') || (function_exists('getenv') && getenv('WP_ENVIRONMENT_TYPE') !== false),'WP_DEBUG'=>defined('WP_DEBUG') ? WP_DEBUG : null,'WP_DEBUG_LOG'=>defined('WP_DEBUG_LOG') ? WP_DEBUG_LOG : null,'WP_DEBUG_DISPLAY'=>defined('WP_DEBUG_DISPLAY') ? WP_DEBUG_DISPLAY : null,'DISALLOW_FILE_EDIT'=>defined('DISALLOW_FILE_EDIT') ? DISALLOW_FILE_EDIT : null,'DISALLOW_FILE_MODS'=>defined('DISALLOW_FILE_MODS') ? DISALLOW_FILE_MODS : null,'permalink_structure'=>get_option('permalink_structure'),'multisite'=>is_multisite(),'locale'=>determine_locale()));";
             (
                 "CheckSelectedWpConfigConstants",
                 format!("{wp} eval {}", shell_escape(code)),
                 false,
                 normal,
                 64 * 1024,
+            )
+        }
+        RemoteAction::ListCronEvents => {
+            let code = "$events=array();$count=0;$cron=_get_cron_array();if(is_array($cron)){foreach($cron as $timestamp=>$hooks){foreach($hooks as $hook=>$instances){foreach($instances as $event){if($count>=5000)break 3;$events[]=array('hook'=>(string)$hook,'timestamp'=>(int)$timestamp,'schedule'=>isset($event['schedule']) ? (string)$event['schedule'] : null,'interval'=>isset($event['interval']) ? (int)$event['interval'] : null,'args'=>isset($event['args']) ? $event['args'] : array());$count++;}}}}echo json_encode($events);";
+            (
+                "ListCronEvents",
+                format!("{wp} eval {}", shell_escape(code)),
+                false,
+                normal,
+                4 * 1024 * 1024,
             )
         }
         RemoteAction::CheckCoreUpdates => (
@@ -571,6 +582,24 @@ mod tests {
         assert!(command.command.contains("--include-root"));
         assert!(command.command.contains("--format=json"));
         assert!(!command.mutating);
+    }
+
+    #[test]
+    fn snapshot_commands_are_read_only_bounded_and_never_request_secrets() {
+        let configuration = build(
+            "/srv/example site",
+            RemoteAction::CheckSelectedWpConfigConstants,
+        )
+        .unwrap();
+        assert!(!configuration.mutating);
+        assert!(configuration.command.contains("WP_DEBUG"));
+        assert!(!configuration.command.contains("DB_PASSWORD"));
+        assert!(!configuration.command.contains("AUTH_KEY"));
+
+        let cron = build("/srv/example site", RemoteAction::ListCronEvents).unwrap();
+        assert!(!cron.mutating);
+        assert!(cron.command.contains("$count>=5000"));
+        assert!(cron.max_output_bytes <= 4 * 1024 * 1024);
     }
 
     #[test]
