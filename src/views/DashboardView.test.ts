@@ -69,4 +69,18 @@ describe("dashboard background scans", () => {
     expect(wrapper.get(".vulnerability-priority").text()).toContain("Mogelijk · laatst bekende versies · scan opnieuw");
     expect(wrapper.get(".table-card tbody").text()).toContain("Mogelijk · scan opnieuw");
   });
+
+  it("shows a compact latest-change summary and only highlights unseen important changes", () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useSitesStore();
+    store.sites = [site];
+    store.changeSummaries = new Map([[site.id, { siteId: site.id, latestSnapshotAt: "2026-09-15T10:00:00.000Z", latestChangeCount: 3, unseenChangeCount: 2, importantChangeSummary: "Nieuwe administrator" }]]);
+    const wrapper = mount(DashboardView, { global: { plugins: [pinia], stubs: { RouterLink: { template: "<a><slot /></a>" } } } });
+
+    const summary = wrapper.get(".dashboard-changes");
+    expect(summary.text()).toContain("3 wijzigingen");
+    expect(summary.text()).toContain("Nieuwe administrator");
+    expect(wrapper.get(".table-card thead").text()).toContain("Wijzigingen");
+  });
 });

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteInput, SnapshotDiff, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteChangeSummary, SiteInput, SnapshotDiff, SnapshotHistoryItem, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import { demoChanges, demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -17,6 +17,7 @@ const browserExceptions: FindingException[] = [];
 const browserTrustedFiles: TrustedFile[] = [];
 const browserScans = new Map<string, ScanResult>();
 const browserSnapshotBaselines = new Map<string, string>();
+const browserSeenSnapshots = new Set<string>();
 let browserWordfenceConfigured = false;
 let browserWordfenceJob: VulnerabilityRefreshJobState | undefined;
 const browserWordfenceJobListeners = new Set<(job: VulnerabilityRefreshJobState) => void>();
@@ -44,7 +45,7 @@ function browserSiteChanges(siteId: string): SiteChangeHistory {
   history.latestSnapshot = snapshots.find((snapshot) => snapshot.snapshotId === demoChanges.latestSnapshot?.snapshotId) ?? null;
   if (history.comparison) {
     history.comparison.siteId = siteId;
-    history.comparison.changes.forEach((change) => { change.siteId = siteId; });
+    history.comparison.changes.forEach((change) => { change.siteId = siteId; change.seen = browserSeenSnapshots.has(`${siteId}:${change.toSnapshotId}`); });
   }
   return history;
 }
@@ -200,12 +201,31 @@ export const appApi = {
   async onScanJobUpdated(handler: (job: ScanJobState) => void): Promise<UnlistenFn> { if (isTauri()) return listen("scan-job-updated", (event) => handler(event.payload as ScanJobState)); browserScanJobListeners.add(handler); return () => browserScanJobListeners.delete(handler); },
   async listScans(siteId: string): Promise<ScanResult[]> { return isTauri() ? call("list_scan_runs", { siteId }) : [structuredClone(browserScan(siteId))]; },
   async getSiteChanges(siteId: string): Promise<SiteChangeHistory> { return isTauri() ? call("get_site_changes", { siteId }) : browserSiteChanges(siteId); },
-  async markSiteChangesSeen(siteId: string, snapshotId: string): Promise<void> { if (isTauri()) await call("mark_site_changes_seen", { siteId, snapshotId }); },
+  async markSiteChangesSeen(siteId: string, snapshotId: string): Promise<void> { if (isTauri()) await call("mark_site_changes_seen", { siteId, snapshotId }); else browserSeenSnapshots.add(`${siteId}:${snapshotId}`); },
   async listSiteSnapshots(siteId: string): Promise<SnapshotMetadata[]> {
     if (isTauri()) return call("list_site_snapshots", { siteId });
     const history = browserSiteChanges(siteId);
     return [history.latestSnapshot, structuredClone(demoChanges.baselineSnapshot)]
       .flatMap((snapshot) => snapshot ? [{ ...snapshot, siteId, isBaseline: snapshot.snapshotId === history.baselineSnapshot?.snapshotId }] : []);
+  },
+  async listSiteSnapshotHistory(siteId: string): Promise<SnapshotHistoryItem[]> {
+    if (isTauri()) return call("list_site_snapshot_history", { siteId });
+    const history = browserSiteChanges(siteId);
+    const important = history.comparison?.changes.find((change) => ["critical", "warning"].includes(change.severity))?.summary ?? null;
+    return (await appApi.listSiteSnapshots(siteId)).map((snapshot) => ({
+      snapshot,
+      changeCount: snapshot.snapshotId === history.latestSnapshot?.snapshotId ? history.comparison?.changes.length ?? 0 : 0,
+      importantChangeSummary: snapshot.snapshotId === history.latestSnapshot?.snapshotId ? important : null,
+    }));
+  },
+  async listSiteChangeSummaries(): Promise<SiteChangeSummary[]> {
+    if (isTauri()) return call("list_site_change_summaries");
+    return browserSites.flatMap((site) => {
+      const history = browserSiteChanges(site.id);
+      if (!history.latestSnapshot) return [];
+      const unseen = history.comparison?.changes.filter((change) => !change.seen) ?? [];
+      return [{ siteId: site.id, latestSnapshotAt: history.latestSnapshot.createdAt, latestChangeCount: history.comparison?.changes.length ?? 0, unseenChangeCount: unseen.length, importantChangeSummary: unseen.find((change) => ["critical", "warning"].includes(change.severity))?.summary ?? null }];
+    });
   },
   async compareSiteSnapshots(siteId: string, fromSnapshotId: string, toSnapshotId: string): Promise<SnapshotDiff> {
     if (isTauri()) return call("compare_site_snapshots", { siteId, fromSnapshotId, toSnapshotId });

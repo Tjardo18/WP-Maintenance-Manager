@@ -103,6 +103,8 @@ pub fn run() {
             commands::get_site_changes,
             commands::mark_site_changes_seen,
             commands::list_site_snapshots,
+            commands::list_site_snapshot_history,
+            commands::list_site_change_summaries,
             commands::compare_site_snapshots,
             commands::set_site_snapshot_baseline,
             commands::list_finding_exceptions,

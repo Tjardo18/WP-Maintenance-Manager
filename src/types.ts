@@ -51,6 +51,8 @@ export interface SnapshotChange { id: string; siteId: string; fromSnapshotId: st
 export interface SnapshotDiffSection { category: SnapshotSection; status: SnapshotComparisonStatus; reason: string | null }
 export interface SnapshotDiff { id: string; siteId: string; fromSnapshotId: string; toSnapshotId: string; createdAt: string; schemaVersion: number; origin: SnapshotChangeOrigin; maintenanceRunId: string | null; sections: SnapshotDiffSection[]; changes: SnapshotChange[] }
 export interface SiteChangeHistory { latestSnapshot: SnapshotMetadata | null; baselineSnapshot: SnapshotMetadata | null; comparison: SnapshotDiff | null }
+export interface SiteChangeSummary { siteId: string; latestSnapshotAt: string | null; latestChangeCount: number; unseenChangeCount: number; importantChangeSummary: string | null }
+export interface SnapshotHistoryItem { snapshot: SnapshotMetadata; changeCount: number; importantChangeSummary: string | null }
 
 export interface SiteInput {
   id?: string;

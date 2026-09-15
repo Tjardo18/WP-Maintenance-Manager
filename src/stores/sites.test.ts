@@ -25,6 +25,7 @@ afterEach(() => vi.restoreAllMocks());
 describe("sites store", () => {
   it("laadt websites en bouwt de id-index", async () => {
     vi.spyOn(appApi, "listSites").mockResolvedValue([site]);
+    vi.spyOn(appApi, "listSiteChangeSummaries").mockResolvedValue([{ siteId: site.id, latestSnapshotAt: "2026-09-15T10:00:00.000Z", latestChangeCount: 2, unseenChangeCount: 1, importantChangeSummary: "Nieuwe administrator" }]);
     setActivePinia(createPinia());
     const store = useSitesStore();
 
@@ -32,11 +33,13 @@ describe("sites store", () => {
 
     expect(store.sites).toEqual([site]);
     expect(store.byId.get(site.id)?.name).toBe("Testsite");
+    expect(store.changeSummaries.get(site.id)?.latestChangeCount).toBe(2);
     expect(store.loading).toBe(false);
   });
 
   it("toont de getypeerde backendmelding", async () => {
     vi.spyOn(appApi, "listSites").mockRejectedValue({ category: "storage", userMessage: "Database niet beschikbaar.", retryable: true });
+    vi.spyOn(appApi, "listSiteChangeSummaries").mockResolvedValue([]);
     setActivePinia(createPinia());
     const store = useSitesStore();
 

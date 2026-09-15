@@ -3,8 +3,9 @@ use crate::{
     error::AppError,
     snapshot_diff::SnapshotDiffEngine,
     snapshots::{
-        MAX_SNAPSHOTS_PER_SITE, SNAPSHOT_SCHEMA_VERSION, SiteChangeHistory, SiteSnapshot,
-        SnapshotChange, SnapshotChangeOrigin, SnapshotDiff, SnapshotDiffSection, SnapshotMetadata,
+        MAX_SNAPSHOTS_PER_SITE, SNAPSHOT_SCHEMA_VERSION, SiteChangeHistory, SiteChangeSummary,
+        SiteSnapshot, SnapshotChange, SnapshotChangeOrigin, SnapshotDiff, SnapshotDiffSection,
+        SnapshotHistoryItem, SnapshotMetadata,
     },
 };
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -74,6 +75,12 @@ struct StoredMetadata {
     app_version: Option<String>,
     is_baseline: bool,
     previous_snapshot_id: Option<String>,
+}
+
+struct StoredSnapshotHistoryItem {
+    metadata: StoredMetadata,
+    change_count: i64,
+    important_change_summary: Option<String>,
 }
 
 impl Database {
@@ -229,6 +236,71 @@ impl SnapshotRepository<'_> {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         stored.into_iter().map(decode_stored_metadata).collect()
+    }
+
+    pub fn list_snapshot_history(
+        &self,
+        site_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SnapshotHistoryItem>, AppError> {
+        let connection = self.database.connect()?;
+        let limit = i64::try_from(limit.clamp(1, MAX_SNAPSHOTS_PER_SITE))
+            .unwrap_or(MAX_SNAPSHOTS_PER_SITE as i64);
+        let mut statement = connection.prepare(
+            "SELECT s.id,s.site_id,s.created_at,s.scan_run_id,s.maintenance_run_id,s.source,s.schema_version,s.status,s.wordpress_root_identity,s.scan_timestamp,s.app_version,s.is_baseline,s.previous_snapshot_id,COALESCE((SELECT MAX(d.change_count) FROM snapshot_diffs d WHERE d.to_snapshot_id=s.id),0),(SELECT c.summary FROM snapshot_changes c WHERE c.to_snapshot_id=s.id AND c.severity IN ('critical','warning') ORDER BY CASE c.severity WHEN 'critical' THEN 0 ELSE 1 END,c.created_at DESC LIMIT 1) FROM site_snapshots s WHERE s.site_id=?1 ORDER BY s.created_at DESC,s.rowid DESC LIMIT ?2",
+        )?;
+        let stored = statement
+            .query_map(params![site_id, limit], |row| {
+                Ok(StoredSnapshotHistoryItem {
+                    metadata: StoredMetadata {
+                        snapshot_id: row.get(0)?,
+                        site_id: row.get(1)?,
+                        created_at: row.get(2)?,
+                        scan_run_id: row.get(3)?,
+                        maintenance_run_id: row.get(4)?,
+                        source: row.get(5)?,
+                        schema_version: row.get(6)?,
+                        status: row.get(7)?,
+                        wordpress_root_identity: row.get(8)?,
+                        scan_timestamp: row.get(9)?,
+                        app_version: row.get(10)?,
+                        is_baseline: row.get(11)?,
+                        previous_snapshot_id: row.get(12)?,
+                    },
+                    change_count: row.get(13)?,
+                    important_change_summary: row.get(14)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        stored
+            .into_iter()
+            .map(|item| {
+                Ok(SnapshotHistoryItem {
+                    snapshot: decode_stored_metadata(item.metadata)?,
+                    change_count: u64::try_from(item.change_count).unwrap_or(0),
+                    important_change_summary: item.important_change_summary,
+                })
+            })
+            .collect()
+    }
+
+    pub fn list_site_change_summaries(&self) -> Result<Vec<SiteChangeSummary>, AppError> {
+        let connection = self.database.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT site_id,latest_snapshot_at,latest_change_count,unseen_change_count,important_change_summary FROM site_snapshot_state ORDER BY site_id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok(SiteChangeSummary {
+                    site_id: row.get(0)?,
+                    latest_snapshot_at: row.get(1)?,
+                    latest_change_count: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                    unseen_change_count: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                    important_change_summary: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(AppError::from)
     }
 
     pub fn compare_snapshots(
@@ -578,7 +650,7 @@ fn refresh_state(transaction: &Transaction<'_>, site_id: &str) -> Result<(), App
         .map(|snapshot_id| {
             transaction
                 .query_row(
-                    "SELECT summary FROM snapshot_changes WHERE to_snapshot_id=?1 AND severity IN ('critical','warning') ORDER BY CASE severity WHEN 'critical' THEN 0 ELSE 1 END,created_at DESC LIMIT 1",
+                    "SELECT summary FROM snapshot_changes WHERE to_snapshot_id=?1 AND seen=0 AND severity IN ('critical','warning') ORDER BY CASE severity WHEN 'critical' THEN 0 ELSE 1 END,created_at DESC LIMIT 1",
                     [snapshot_id],
                     |row| row.get(0),
                 )
@@ -1008,6 +1080,25 @@ mod tests {
                 .unwrap(),
             diff
         );
+        let summaries = database
+            .snapshot_repository()
+            .list_site_change_summaries()
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].site_id, site_id);
+        assert_eq!(summaries[0].latest_change_count, 1);
+        assert_eq!(summaries[0].unseen_change_count, 1);
+        let snapshot_history = database
+            .snapshot_repository()
+            .list_snapshot_history(&site_id, 100)
+            .unwrap();
+        assert_eq!(snapshot_history.len(), 2);
+        assert_eq!(
+            snapshot_history[0].snapshot.snapshot_id,
+            current.metadata.snapshot_id
+        );
+        assert_eq!(snapshot_history[0].change_count, 1);
+        assert_eq!(snapshot_history[1].change_count, 0);
         database
             .snapshot_repository()
             .mark_changes_seen(&site_id, &current.metadata.snapshot_id)
@@ -1034,6 +1125,56 @@ mod tests {
             .unwrap();
         assert_eq!(persisted, (1, 1, 1, 0));
         drop(connection);
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dashboard_summary_only_surfaces_unseen_important_changes() {
+        let (database, path, site_id) = database();
+        let baseline = snapshot(&site_id, "2026-09-15T08:00:00Z", SnapshotSource::Baseline);
+        database
+            .snapshot_repository()
+            .save_snapshot(&baseline)
+            .unwrap();
+        let mut current = snapshot(&site_id, "2026-09-15T09:00:00Z", SnapshotSource::Scan);
+        current.metadata.previous_snapshot_id = Some(baseline.metadata.snapshot_id.clone());
+        current.users.push(crate::snapshots::SnapshotUser {
+            id: 42,
+            login: "beheerder2".into(),
+            display_name: Some("Nieuwe beheerder".into()),
+            email: "beheerder2@example.test".into(),
+            roles: vec!["administrator".into()],
+            registered_at: None,
+        });
+        let diff =
+            SnapshotDiffEngine::compare(&baseline, &current, SnapshotChangeOrigin::Scan, None)
+                .unwrap();
+        database
+            .snapshot_repository()
+            .save_snapshot_with_diff(&current, Some(&diff))
+            .unwrap();
+
+        let summary = database
+            .snapshot_repository()
+            .list_site_change_summaries()
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            summary.important_change_summary.as_deref(),
+            Some("Nieuwe administrator")
+        );
+        database
+            .snapshot_repository()
+            .mark_changes_seen(&site_id, &current.metadata.snapshot_id)
+            .unwrap();
+        let seen_summary = database
+            .snapshot_repository()
+            .list_site_change_summaries()
+            .unwrap()
+            .remove(0);
+        assert_eq!(seen_summary.unseen_change_count, 0);
+        assert_eq!(seen_summary.important_change_summary, None);
         drop(database);
         let _ = fs::remove_file(path);
     }

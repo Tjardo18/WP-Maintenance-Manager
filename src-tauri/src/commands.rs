@@ -19,8 +19,8 @@ use crate::{
     snapshot_builder::{SnapshotBuildInput, SnapshotBuildSection, SnapshotBuilder},
     snapshot_diff::SnapshotDiffEngine,
     snapshots::{
-        SiteChangeHistory, SnapshotChangeOrigin, SnapshotDiff, SnapshotFileState, SnapshotMetadata,
-        SnapshotSource,
+        SiteChangeHistory, SiteChangeSummary, SnapshotChangeOrigin, SnapshotDiff,
+        SnapshotFileState, SnapshotHistoryItem, SnapshotMetadata, SnapshotSource,
     },
     state::AppState,
     terminal::{TerminalConnectRequest, TerminalConnectionInfo, TerminalOpenInput},
@@ -1367,6 +1367,34 @@ pub fn list_site_snapshots(
         .database
         .snapshot_repository()
         .list_snapshot_metadata(&site_id, 100)
+}
+
+#[tauri::command(async)]
+pub fn list_site_snapshot_history(
+    session_token: String,
+    site_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SnapshotHistoryItem>, AppError> {
+    require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&site_id)
+        .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
+    state.database.get_site(&site_id)?;
+    state
+        .database
+        .snapshot_repository()
+        .list_snapshot_history(&site_id, 100)
+}
+
+#[tauri::command(async)]
+pub fn list_site_change_summaries(
+    session_token: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SiteChangeSummary>, AppError> {
+    require_auth(&state, &session_token)?;
+    state
+        .database
+        .snapshot_repository()
+        .list_site_change_summaries()
 }
 
 #[tauri::command(async)]

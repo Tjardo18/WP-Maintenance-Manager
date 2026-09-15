@@ -376,6 +376,24 @@ pub struct SiteChangeHistory {
     pub comparison: Option<SnapshotDiff>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteChangeSummary {
+    pub site_id: String,
+    pub latest_snapshot_at: Option<String>,
+    pub latest_change_count: u64,
+    pub unseen_change_count: u64,
+    pub important_change_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotHistoryItem {
+    pub snapshot: SnapshotMetadata,
+    pub change_count: u64,
+    pub important_change_summary: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
