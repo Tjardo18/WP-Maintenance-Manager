@@ -222,6 +222,20 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let site_snapshots_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 13)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !site_snapshots_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!("../migrations/0013_site_snapshots.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(13, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -2672,6 +2686,68 @@ mod tests {
             )
             .unwrap();
         assert!(finding_plan.contains("idx_findings_check"));
+
+        drop(connection);
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn site_snapshot_migration_is_versioned_and_indexed() {
+        let path =
+            std::env::temp_dir().join(format!("wpmm-snapshot-schema-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let site = database.save_site(&input(), None).unwrap();
+        let connection = database.connect().unwrap();
+
+        let migration_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=13",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migration_count, 1);
+        for table in [
+            "site_snapshots",
+            "snapshot_diffs",
+            "snapshot_diff_sections",
+            "snapshot_changes",
+            "site_snapshot_state",
+        ] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing snapshot table {table}");
+        }
+
+        connection
+            .execute(
+                "INSERT INTO site_snapshots(id,site_id,created_at,scan_run_id,maintenance_run_id,source,schema_version,status,wordpress_root_identity,scan_timestamp,app_version,section_status_json,payload_encoding,payload,is_baseline,previous_snapshot_id) VALUES('baseline',?1,'2026-09-15T08:00:00Z',NULL,NULL,'baseline',1,'partial',NULL,'2026-09-15T08:00:00Z','0.11.0-beta.1','{}','json_utf8',X'7B7D',1,NULL)",
+                [&site.id],
+            )
+            .unwrap();
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO site_snapshots(id,site_id,created_at,source,schema_version,status,scan_timestamp,section_status_json,payload,is_baseline) VALUES('duplicate',?1,'2026-09-15T09:00:00Z','baseline',1,'partial','2026-09-15T09:00:00Z','{}',X'7B7D',1)",
+                    [&site.id],
+                )
+                .is_err()
+        );
+
+        let snapshot_plan: String = connection
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM site_snapshots WHERE site_id=?1 ORDER BY created_at DESC LIMIT 1",
+                [&site.id],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(snapshot_plan.contains("idx_site_snapshots_site_created"));
 
         drop(connection);
         drop(database);

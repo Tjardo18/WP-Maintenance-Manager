@@ -62,6 +62,32 @@ De verbindingstest en de eerste refresh delen één backend-download: een volled
 
 Feedrefresh is een onafhankelijke named worker met korte jobstate-locks en fases voor download, validatie, verwerking en lokale database-update. Bij appstart start alleen een ontbrekende of minstens 24 uur oude feed op de achtergrond; een lokale 30-minutencooldown en server-`429` verhinderen retrylussen. Na succesvolle import worden alle aanwezige `software_inventory`-snapshots lokaal opnieuw gematcht, zonder SSH. De tabel `site_vulnerability_state` bewaart de actuele afgeleide check en overschrijft alleen de nieuwste Security-weergave; historische scanrecords en finding-snapshots blijven intact. `sites` bevat compacte severitytellingen voor het Dashboard, zodat daar geen feedjoin of grote reactieve array nodig is. Een inventorysnapshot ouder dan zeven dagen wordt als mogelijk verouderd gemarkeerd.
 
+## Site snapshots and baseline foundation
+
+```text
+SiteScanResult
+      ↓
+SnapshotBuilder
+      ↓
+Normalized SiteSnapshot (schema v1 + section completeness)
+      ↓
+SnapshotRepository
+      ↓
+Previous/Baseline Snapshot
+      ↓
+SnapshotDiffEngine
+      ↓
+SnapshotChange[]
+      ↓
+Transactional persistence → UI / History / future features
+```
+
+Het snapshotdomein gebruikt gedeelde typed Rust-modellen en overeenkomstige TypeScript-contracten voor Core, plugins, thema's, users, een expliciete configuratie-allowlist, cronmetadata en begrensde relevante bestandsmetadata. Iedere sectie draagt afzonderlijk `complete`, `failed` of `not_collected`. Alleen `complete` aan beide kanten is vergelijkbaar; een ontbrekende partial sectie kan daardoor nooit als massale verwijdering worden geïnterpreteerd. De eerste geschikte scan wordt zonder changes als expliciete baseline vastgelegd. Een baseline is een vertrouwd vergelijkingspunt, terwijl `previous_snapshot_id` de chronologisch vorige geschikte controle aanduidt.
+
+De opslag is bewust hybride. Relationele `site_snapshots`-metadata en geïndexeerde `snapshot_diffs`, sectiestatussen en change records ondersteunen snelle historie-, categorie- en unseen-queries. De complete genormaliseerde payload blijft één versioned backend-object in een BLOB met een expliciete encoding; v1 gebruikt UTF-8 JSON en reserveert een gzip-encoding zonder compressie nu verplicht te maken. Hiermee hoeven snapshot-entiteiten niet over veel tabellen te worden herhaald, terwijl schema-upgrades en deterministisch herbouwen van diffs mogelijk blijven. `site_snapshot_state` bevat uitsluitend pointers en compacte UI-samenvattingen. De standaardretentie wordt honderd snapshots per site; een expliciete baseline en gekoppelde pre/post-maintenance snapshots zijn beschermd.
+
+Vulnerability intelligence hoort niet in de websitebaseline: een feedwijziging verandert de website zelf niet. De opgeslagen Core-, plugin- en themaversies kunnen wel opnieuw lokaal tegen Wordfence worden gematcht. Snapshot changes blijven daarnaast een ander concept dan security findings en uitzonderingen. Toekomstige gebruikersbewaking, configuration drift, plugin hygiene, rapportage en prioritering bouwen op dezelfde `SnapshotDiffEngine` in plaats van eigen vergelijkingslogica.
+
 ## Background Jobs and Responsiveness
 
 Een normale site- of bulkscan loopt niet meer binnen de levensduur van een lang Tauri-request:

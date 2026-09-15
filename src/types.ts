@@ -27,6 +27,30 @@ export interface Site {
 
 export interface SiteVulnerabilitySummary { criticalCount: number; highCount: number; mediumCount: number; lowCount: number; infoCount: number; unknownCount: number; lastCheckedAt: string; feedUpdatedAt?: string; inventoryObservedAt?: string; inventoryStale: boolean }
 
+export type SnapshotSource = "scan" | "baseline" | "pre_maintenance" | "post_maintenance" | "manual";
+export type SnapshotStatus = "complete" | "partial";
+export type SnapshotSection = "core" | "plugins" | "themes" | "users" | "configuration" | "cron" | "files";
+export type SnapshotSectionStatus = "complete" | "failed" | "not_collected";
+export type SnapshotChangeType = "added" | "removed" | "updated" | "enabled" | "disabled" | "activated" | "deactivated" | "role_changed" | "version_changed" | "configuration_changed" | "scheduled" | "unscheduled" | "unknown";
+export type SnapshotChangeSeverity = "info" | "attention" | "warning" | "critical";
+export type SnapshotChangeOrigin = "scan" | "maintenance" | "manual" | "unknown";
+export type SnapshotComparisonStatus = "compared" | "unavailable";
+export type SnapshotValue = { type: "string"; value: string } | { type: "boolean"; value: boolean } | { type: "number"; value: number } | { type: "null" };
+
+export interface SnapshotCompleteness { core: SnapshotSectionStatus; plugins: SnapshotSectionStatus; themes: SnapshotSectionStatus; users: SnapshotSectionStatus; configuration: SnapshotSectionStatus; cron: SnapshotSectionStatus; files: SnapshotSectionStatus }
+export interface SnapshotMetadata { snapshotId: string; siteId: string; createdAt: string; scanRunId: string | null; maintenanceRunId: string | null; source: SnapshotSource; schemaVersion: number; status: SnapshotStatus; wordpressRootIdentity: string | null; scanTimestamp: string; appVersion: string | null; isBaseline: boolean; previousSnapshotId: string | null }
+export interface SnapshotCore { version: string; locale: string | null; multisite: boolean | null; phpVersion: string | null }
+export interface SnapshotPlugin { slug: string; name: string; version: string; status: string; autoUpdate: boolean | null; updateAvailable: boolean; availableVersion: string | null }
+export interface SnapshotTheme extends SnapshotPlugin { active: boolean }
+export interface SnapshotUser { id: number; login: string; displayName: string | null; email: string; roles: string[]; registeredAt: string | null }
+export interface SnapshotConfiguration { key: string; value: SnapshotValue }
+export interface SnapshotCronEvent { identity: string; hook: string; schedule: string | null; recurrence: string | null; argsFingerprint: string | null; nextRunAt: string | null }
+export interface SnapshotFileState { relativePath: string; category: string; fileType: string; sizeBytes: number | null; modifiedAt: string | null; sha256: string | null }
+export interface SiteSnapshot { metadata: SnapshotMetadata; completeness: SnapshotCompleteness; core: SnapshotCore | null; plugins: SnapshotPlugin[]; themes: SnapshotTheme[]; users: SnapshotUser[]; configuration: SnapshotConfiguration[]; cron: SnapshotCronEvent[]; files: SnapshotFileState[] }
+export interface SnapshotChange { id: string; siteId: string; fromSnapshotId: string; toSnapshotId: string; category: SnapshotSection; entityType: string; entityKey: string; changeType: SnapshotChangeType; field: string | null; oldValue: SnapshotValue | null; newValue: SnapshotValue | null; severity: SnapshotChangeSeverity; summary: string; metadata: Record<string, SnapshotValue>; origin: SnapshotChangeOrigin; seen: boolean; createdAt: string }
+export interface SnapshotDiffSection { category: SnapshotSection; status: SnapshotComparisonStatus; reason: string | null }
+export interface SnapshotDiff { id: string; siteId: string; fromSnapshotId: string; toSnapshotId: string; createdAt: string; schemaVersion: number; origin: SnapshotChangeOrigin; maintenanceRunId: string | null; sections: SnapshotDiffSection[]; changes: SnapshotChange[] }
+
 export interface SiteInput {
   id?: string;
   name: string;

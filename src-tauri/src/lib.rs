@@ -15,6 +15,7 @@ mod models;
 mod parsers;
 mod scan_jobs;
 mod security_policy;
+pub mod snapshots;
 mod ssh;
 mod state;
 mod terminal;
