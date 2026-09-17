@@ -15,6 +15,7 @@ describe("file preview syntax", () => {
     ["theme.scss", "scss", "scss"],
     ["sitemap.xml", "xml", "xml"],
     ["icon.svg", "svg", "svg"],
+    ["compressed.svgz", "svgz", "svg"],
   ])("selects highlighting for %s", (fileName, extension, expected) => {
     expect(previewSyntax(fileName, extension)).toBe(expected);
   });

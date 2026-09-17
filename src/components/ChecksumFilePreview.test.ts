@@ -162,6 +162,91 @@ describe("ChecksumFilePreview", () => {
     expect(wrapper.get(".preview-modal").classes()).toContain("fullscreen");
   });
 
+  it("opens binary images in Raw and preserves their original data in Preview", async () => {
+    const dataBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        defaultMarkdownMode: "preview",
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "pixel.png" },
+          fileName: "pixel.png", relativePath: "pixel.png", sizeBytes: 24, fileType: "png-bestand", extension: "png", imageMimeType: "image/png", imageDataBase64: dataBase64, binary: true, truncated: false,
+        },
+      },
+    });
+
+    expect(wrapper.find('.preview-mode-toggle[aria-label="Afbeeldingsweergave"]').exists()).toBe(true);
+    expect(wrapper.get('button[aria-pressed="true"]').text()).toContain("Raw");
+    expect(wrapper.find(".binary-inspector").exists()).toBe(true);
+    expect(wrapper.find(".hljs").exists()).toBe(false);
+    expect(wrapper.find(".image-preview").exists()).toBe(false);
+
+    await wrapper.get(".preview-mode-toggle button:last-child").trigger("click");
+    expect(wrapper.get(".image-preview img").attributes("src")).toBe(`data:image/png;base64,${dataBase64}`);
+    expect(wrapper.find(".binary-inspector").exists()).toBe(false);
+    expect(wrapper.emitted("close")).toBeUndefined();
+
+    await wrapper.get('button[aria-label="Fullscreen openen"]').trigger("click");
+    expect(wrapper.get(".preview-modal").classes()).toContain("fullscreen");
+    expect(wrapper.find(".image-preview img").exists()).toBe(true);
+
+    await wrapper.get(".preview-mode-toggle button:first-child").trigger("click");
+    expect(wrapper.find(".binary-inspector").exists()).toBe(true);
+    expect(wrapper.get(".preview-modal").classes()).toContain("fullscreen");
+  });
+
+  it("shows readable and suspicious code hidden behind PNG data", () => {
+    const pngEnd = String.fromCharCode(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0, 0, 0, 0);
+    const dataBase64 = window.btoa(`${pngEnd}<?php eval(base64_decode($payload)); ?>`);
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "warning", title: "Gewijzigd", detail: "Recent gewijzigd", path: "suspicious.png" },
+          fileName: "suspicious.png", relativePath: "suspicious.png", sizeBytes: 61, fileType: "png-bestand", extension: "png", imageMimeType: "image/png", imageDataBase64: dataBase64, binary: true, truncated: false,
+        },
+      },
+    });
+
+    expect(wrapper.get(".readable-binary-text").text()).toContain("<?php eval(base64_decode($payload)); ?>");
+    expect(wrapper.get(".binary-suspicious-list").text()).toContain("PHP-openingstag");
+    expect(wrapper.get(".binary-suspicious-list").text()).toContain("extra bytes na PNG IEND");
+    expect(wrapper.find(".hljs").exists()).toBe(false);
+  });
+
+  it("passes animated GIF data through unchanged", async () => {
+    const dataBase64 = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "animation.gif" },
+          fileName: "animation.gif", relativePath: "animation.gif", sizeBytes: 34, fileType: "gif-bestand", extension: "gif", imageMimeType: "image/gif", imageDataBase64: dataBase64, binary: true, truncated: false,
+        },
+      },
+    });
+
+    await wrapper.get(".preview-mode-toggle button:last-child").trigger("click");
+    expect(wrapper.get(".image-preview img").attributes("src")).toBe(`data:image/gif;base64,${dataBase64}`);
+  });
+
+  it("shows decompressed SVGZ source with SVG highlighting before Preview", async () => {
+    const content = '<svg xmlns="http://www.w3.org/2000/svg"><!-- compressed --><path fill="red" d="M0 0h10v10z" /></svg>';
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "logo.svgz" },
+          fileName: "logo.svgz", relativePath: "logo.svgz", sizeBytes: 72, fileType: "svgz-bestand", extension: "svgz", textContent: content, imageMimeType: "image/svg+xml", binary: false, truncated: false,
+        },
+      },
+    });
+
+    expect(wrapper.get('button[aria-pressed="true"]').text()).toContain("Raw");
+    expect(wrapper.get(".file-preview-code code").attributes("data-syntax")).toBe("svg");
+    expect(wrapper.find(".hljs-comment").exists()).toBe(true);
+    expect(wrapper.get(".file-preview-code").text()).toBe(content);
+
+    await wrapper.get(".preview-mode-toggle button:last-child").trigger("click");
+    expect(wrapper.get(".svg-preview img").attributes("src")).toMatch(/^data:image\/svg\+xml;charset=utf-8,/);
+  });
+
   it("keeps unsupported text files as plain white text", () => {
     const content = "<script>not executable</script>\nplain text";
     const wrapper = mount(ChecksumFilePreview, {

@@ -59,6 +59,7 @@ export function previewSyntax(fileName: string, extension?: string): PreviewSynt
   if (fileName.toLowerCase() === ".htaccess") return "htaccess";
   const normalized = extension?.toLowerCase().replace(/^\./, "")
     ?? fileName.toLowerCase().match(/\.([^.]+)$/)?.[1];
+  if (normalized === "svgz") return "svg";
   if (normalized && Object.prototype.hasOwnProperty.call(highlighterLanguages, normalized)) return normalized as PreviewSyntax;
   return undefined;
 }

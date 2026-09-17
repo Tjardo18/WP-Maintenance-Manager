@@ -16,6 +16,7 @@ use std::{
 };
 
 const MAX_TERMINAL_PASSWORD_BYTES: usize = 4 * 1024;
+const MAX_FILE_PREVIEW_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ExecOutput {
@@ -828,7 +829,7 @@ impl SshExecutor for Ssh2Executor {
         relative_path: &str,
         max_bytes: usize,
     ) -> Result<RemoteFileRead, AppError> {
-        if max_bytes == 0 || max_bytes > 256 * 1024 {
+        if max_bytes == 0 || max_bytes > MAX_FILE_PREVIEW_BYTES {
             return Err(AppError::validation("De previewlimiet is ongeldig."));
         }
         let session = self.verified_session(site, credential, Duration::from_secs(60))?;

@@ -646,6 +646,9 @@ pub struct FilePreview {
     pub file_type: String,
     pub extension: Option<String>,
     pub text_content: Option<String>,
+    pub image_mime_type: Option<String>,
+    pub image_data_base64: Option<String>,
+    pub raw_data_base64: Option<String>,
     pub binary: bool,
     pub truncated: bool,
 }
