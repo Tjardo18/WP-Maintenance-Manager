@@ -5,7 +5,7 @@ use crate::{
         ChecksumFindingRecord, ChecksumStatus, ErrorCategory, ErrorLogFilter, ErrorLogPage,
         ErrorLogRecord, ErrorSeverity, ExceptionScope, FilePreviewMode, Finding, FindingContext,
         FindingDisposition, FindingException, FindingSeverity, InstalledSoftware, MaintenanceRun,
-        MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus,
+        MaintenanceStep, MarkdownPreviewMode, ScanCheck, ScanResult, Site, SiteInput, SiteStatus,
         SiteVulnerabilitySummary, StepStatus, StoredSite, TrustedFile, TrustedFileStatus,
         UpdateItem, UpdateKind, VulnerabilityCandidate, VulnerabilityFeedState,
         VulnerabilityImportSummary, VulnerabilityMatch,
@@ -279,6 +279,22 @@ impl Database {
                 .execute_batch(include_str!("../migrations/0016_file_preview_settings.sql"))?;
             transaction.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(16, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
+        let markdown_preview_settings_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 17)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !markdown_preview_settings_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!(
+                "../migrations/0017_markdown_preview_settings.sql"
+            ))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(17, ?1)",
                 [utc_now()],
             )?;
             transaction.commit()?;
@@ -1231,6 +1247,18 @@ impl Database {
         })
     }
 
+    pub fn markdown_preview_mode(&self) -> Result<MarkdownPreviewMode, AppError> {
+        let connection = self.connect()?;
+        let value: String = connection.query_row(
+            "SELECT value FROM app_settings WHERE key='markdown_preview_mode'",
+            [],
+            |row| row.get(0),
+        )?;
+        MarkdownPreviewMode::from_db(&value).ok_or_else(|| {
+            AppError::storage(format!("Ongeldige Markdown-previewinstelling: {value}"))
+        })
+    }
+
     pub fn save_settings(&self, settings: &AppSettings) -> Result<(), AppError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
@@ -1242,6 +1270,10 @@ impl Database {
         transaction.execute(
             "INSERT INTO app_settings(key,value,updated_at) VALUES('file_preview_mode',?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
             params![settings.file_preview_mode.as_db(), &updated_at],
+        )?;
+        transaction.execute(
+            "INSERT INTO app_settings(key,value,updated_at) VALUES('markdown_preview_mode',?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            params![settings.markdown_preview_mode.as_db(), &updated_at],
         )?;
         transaction.commit()?;
         Ok(())
@@ -2074,7 +2106,7 @@ mod tests {
     }
 
     #[test]
-    fn file_preview_mode_defaults_and_persists_across_restarts() {
+    fn preview_modes_default_and_persist_across_restarts() {
         let path = std::env::temp_dir().join(format!(
             "wpmm-file-preview-settings-{}.sqlite3",
             Uuid::new_v4()
@@ -2085,11 +2117,16 @@ mod tests {
             database.file_preview_mode().unwrap(),
             FilePreviewMode::Normal
         );
+        assert_eq!(
+            database.markdown_preview_mode().unwrap(),
+            MarkdownPreviewMode::Raw
+        );
 
         database
             .save_settings(&AppSettings {
                 scan_concurrency: 2,
                 file_preview_mode: FilePreviewMode::Fullscreen,
+                markdown_preview_mode: MarkdownPreviewMode::Preview,
             })
             .unwrap();
         drop(database);
@@ -2099,6 +2136,10 @@ mod tests {
         assert_eq!(
             reopened.file_preview_mode().unwrap(),
             FilePreviewMode::Fullscreen
+        );
+        assert_eq!(
+            reopened.markdown_preview_mode().unwrap(),
+            MarkdownPreviewMode::Preview
         );
         drop(reopened);
         let _ = fs::remove_file(path);

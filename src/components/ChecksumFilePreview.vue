@@ -1,25 +1,35 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
-import { Maximize2, Minimize2, Trash2, X } from "@lucide/vue";
-import type { FilePreview } from "../types";
+import { Code2, Eye, Maximize2, Minimize2, Trash2, X } from "@lucide/vue";
+import type { FilePreview, MarkdownPreviewMode } from "../types";
 import { highlightPreviewContent, previewSyntax } from "../services/fileSyntax";
+import { renderMarkdownPreview } from "../services/markdownPreview";
+import { svgPreviewDataUrl } from "../services/svgPreview";
+import { appApi } from "../services/tauri";
 import { formatDate } from "../utils/format";
 
-const props = withDefaults(defineProps<{ preview: FilePreview; defaultFullscreen?: boolean }>(), {
+const props = withDefaults(defineProps<{ preview: FilePreview; defaultFullscreen?: boolean; defaultMarkdownMode?: MarkdownPreviewMode }>(), {
   defaultFullscreen: false,
+  defaultMarkdownMode: "raw",
 });
 const emit = defineEmits<{ close: []; delete: [] }>();
 
 const canDelete = computed(() => props.preview.finding.checksumStatus === "unexpected");
 const syntax = computed(() => previewSyntax(props.preview.fileName, props.preview.extension));
+const isMarkdown = computed(() => syntax.value === "md");
+const isSvg = computed(() => syntax.value === "svg");
+const supportsRenderedPreview = computed(() => isMarkdown.value || isSvg.value);
 const sourceContent = computed(() => props.preview.textContent ?? "");
 const lineCount = computed(() => sourceContent.value.split(/\r\n|\r|\n/).length);
 const lineNumbers = computed(() => Array.from({ length: lineCount.value }, (_, index) => index + 1).join("\n"));
 const lineNumberWidth = computed(() => `${Math.max(3, String(lineCount.value).length) + 4}ch`);
+const contentMode = ref<MarkdownPreviewMode>(isMarkdown.value ? props.defaultMarkdownMode : "raw");
 const highlightedContent = computed(() => {
   if (!syntax.value || props.preview.textContent === undefined) return undefined;
   return highlightPreviewContent(props.preview.textContent, syntax.value);
 });
+const renderedMarkdown = computed(() => isMarkdown.value && contentMode.value === "preview" ? renderMarkdownPreview(sourceContent.value) : "");
+const renderedSvg = computed(() => isSvg.value && contentMode.value === "preview" ? svgPreviewDataUrl(sourceContent.value) : undefined);
 const fullscreen = ref(props.defaultFullscreen);
 const previewScroller = ref<{ scrollTop: number; scrollLeft: number }>();
 let previousBodyOverflow = "";
@@ -56,6 +66,19 @@ async function toggleFullscreen() {
   }
 }
 
+type LinkTarget = { getAttribute: (name: string) => string | null };
+function isLinkTarget(value: unknown): value is LinkTarget {
+  return typeof value === "object" && value !== null && "getAttribute" in value && typeof (value as LinkTarget).getAttribute === "function";
+}
+
+function openMarkdownLink(event: { composedPath: () => unknown[]; preventDefault: () => void }) {
+  const link = event.composedPath().find((item) => isLinkTarget(item) && item.getAttribute("href") !== null) as LinkTarget | undefined;
+  if (!link) return;
+  event.preventDefault();
+  const href = link.getAttribute("href");
+  if (href && /^https?:\/\//i.test(href)) void appApi.openExternalUrl(href).catch(() => undefined);
+}
+
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -87,7 +110,16 @@ function checksumLabel(status?: string) {
       </dl>
       <p v-if="preview.truncated" class="preview-warning">De preview is afgekapt op 256 KB.</p>
       <p v-if="preview.binary" class="preview-warning">Dit bestand kan niet veilig als tekst worden weergegeven.</p>
-      <div v-else ref="previewScroller" class="file-preview" role="region" aria-label="Bestandsinhoud met regelnummers" tabindex="0">
+      <div v-if="supportsRenderedPreview && !preview.binary" class="preview-mode-toggle" role="group" :aria-label="isMarkdown ? 'Markdownweergave' : 'SVG-weergave'">
+        <button type="button" :class="{ active: contentMode === 'raw' }" :aria-pressed="contentMode === 'raw'" @click="contentMode = 'raw'"><Code2 :size="14" /> Raw</button>
+        <button type="button" :class="{ active: contentMode === 'preview' }" :aria-pressed="contentMode === 'preview'" @click="contentMode = 'preview'"><Eye :size="14" /> Preview</button>
+      </div>
+      <div v-if="!preview.binary && isMarkdown && contentMode === 'preview'" ref="previewScroller" class="markdown-preview" role="region" aria-label="Gerenderde Markdown-preview" tabindex="0" v-html="renderedMarkdown" @click="openMarkdownLink"></div>
+      <div v-else-if="!preview.binary && isSvg && contentMode === 'preview'" ref="previewScroller" class="svg-preview" role="region" aria-label="Gerenderde SVG-preview" tabindex="0">
+        <img v-if="renderedSvg" :src="renderedSvg" :alt="`Preview van ${preview.fileName}`" />
+        <p v-else class="svg-preview-error">Deze SVG kan niet veilig worden weergegeven. De Raw-weergave blijft beschikbaar.</p>
+      </div>
+      <div v-else-if="!preview.binary" ref="previewScroller" class="file-preview" role="region" aria-label="Bestandsinhoud met regelnummers" tabindex="0">
         <pre class="file-preview-line-numbers" aria-hidden="true" :style="{ minWidth: lineNumberWidth }"><code>{{ lineNumbers }}</code></pre>
         <pre class="file-preview-code"><!-- highlight.js escapes the untrusted source before returning markup. --><code v-if="syntax" class="hljs" :data-syntax="syntax" v-html="highlightedContent"></code><code v-else data-syntax="plain">{{ preview.textContent }}</code></pre>
       </div>

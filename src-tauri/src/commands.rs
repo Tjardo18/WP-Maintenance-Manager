@@ -2436,6 +2436,7 @@ pub fn get_settings(
     Ok(AppSettings {
         scan_concurrency: state.scan_concurrency.load(Ordering::SeqCst),
         file_preview_mode: state.database.file_preview_mode()?,
+        markdown_preview_mode: state.database.markdown_preview_mode()?,
     })
 }
 

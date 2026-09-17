@@ -14,6 +14,7 @@ describe("file preview syntax", () => {
     ["template.twig", "twig", "twig"],
     ["theme.scss", "scss", "scss"],
     ["sitemap.xml", "xml", "xml"],
+    ["icon.svg", "svg", "svg"],
   ])("selects highlighting for %s", (fileName, extension, expected) => {
     expect(previewSyntax(fileName, extension)).toBe(expected);
   });
@@ -42,6 +43,7 @@ describe("file preview syntax", () => {
     ["twig", "<h1>{{ title|escape }}</h1>", "hljs-template-variable"],
     ["scss", "$color: #fff;\n.card { color: $color; }", "hljs-variable"],
     ["xml", "<entry id=\"42\"><title>Voorbeeld</title></entry>", "hljs-tag"],
+    ["svg", "<!-- icon --><svg viewBox=\"0 0 10 10\"><path fill=\"red\" d=\"M0 0h10v10z\" /></svg>", "hljs-attr"],
   ])("adds %s token markup", (syntax, source, expectedClass) => {
     expect(highlightPreviewContent(source, syntax)).toContain(expectedClass);
   });
@@ -102,6 +104,16 @@ echo $template;
     expect(highlighted).toContain("hljs-section");
     expect(highlighted).not.toContain("<h1>");
     expect(highlighted).not.toContain("<strong>");
+  });
+
+  it("distinguishes SVG comments, tags, attributes and values", () => {
+    const highlighted = highlightPreviewContent('<!-- logo --><svg viewBox="0 0 10 10"><path fill="red" /></svg>', "svg");
+
+    expect(highlighted).toContain("hljs-comment");
+    expect(highlighted).toContain("hljs-tag");
+    expect(highlighted).toContain("hljs-name");
+    expect(highlighted).toContain("hljs-attr");
+    expect(highlighted).toContain("hljs-string");
   });
 
   it("highlights common access-log fields", () => {

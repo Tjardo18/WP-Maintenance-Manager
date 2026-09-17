@@ -1,8 +1,13 @@
 import { enableAutoUnmount, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const mockOpenExternalUrl = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("../services/tauri", () => ({ appApi: { openExternalUrl: mockOpenExternalUrl } }));
+
 import ChecksumFilePreview from "./ChecksumFilePreview.vue";
 
 enableAutoUnmount(afterEach);
+afterEach(() => mockOpenExternalUrl.mockClear());
 
 describe("ChecksumFilePreview", () => {
   it("renders remote markup as escaped plain text", () => {
@@ -76,6 +81,85 @@ describe("ChecksumFilePreview", () => {
     expect(wrapper.find(".hljs-section").exists()).toBe(true);
     expect(wrapper.find("h1").exists()).toBe(false);
     expect(wrapper.get(".file-preview-code").text()).toBe("# Heading\n\n**bold**");
+    expect(wrapper.get('button[aria-pressed="true"]').text()).toContain("Raw");
+    expect(wrapper.text()).toContain("Preview");
+  });
+
+  it("renders Markdown by default and keeps switching lossless", async () => {
+    const content = "# Heading\n\n- Eerste\n- Tweede met [link](https://example.test)\n\nGebruik `inline()`.\n\n```js\nconst answer = 42;\n```";
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        defaultMarkdownMode: "preview",
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "README.md" },
+          fileName: "README.md", relativePath: "README.md", sizeBytes: content.length, fileType: "md-bestand", extension: "md", textContent: content, binary: false, truncated: false,
+        },
+      },
+    });
+
+    expect(wrapper.get(".markdown-preview h1").text()).toBe("Heading");
+    expect(wrapper.findAll(".markdown-preview li")).toHaveLength(2);
+    expect(wrapper.get(".markdown-preview a").attributes("href")).toBe("https://example.test");
+    expect(wrapper.get(".markdown-preview p code").text()).toBe("inline()");
+    expect(wrapper.get(".markdown-preview pre code").text()).toContain("const answer = 42;");
+    expect(wrapper.find(".file-preview").exists()).toBe(false);
+    await wrapper.get(".markdown-preview a").trigger("click");
+    expect(mockOpenExternalUrl).toHaveBeenCalledWith("https://example.test");
+
+    await wrapper.get(".preview-mode-toggle button:first-child").trigger("click");
+    expect(wrapper.get(".file-preview-code").text()).toBe(content);
+    expect(wrapper.find(".markdown-preview").exists()).toBe(false);
+
+    await wrapper.get(".preview-mode-toggle button:last-child").trigger("click");
+    expect(wrapper.get(".markdown-preview h1").text()).toBe("Heading");
+  });
+
+  it("does not show Markdown controls for other file types", () => {
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        defaultMarkdownMode: "preview",
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "notes.txt" },
+          fileName: "notes.txt", relativePath: "notes.txt", sizeBytes: 4, fileType: "txt-bestand", extension: "txt", textContent: "text", binary: false, truncated: false,
+        },
+      },
+    });
+
+    expect(wrapper.find(".preview-mode-toggle").exists()).toBe(false);
+    expect(wrapper.find(".markdown-preview").exists()).toBe(false);
+  });
+
+  it("switches SVG files losslessly between highlighted source and a rendered preview", async () => {
+    const content = `<!-- logo --><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><linearGradient id="paint"><stop offset="0" stop-color="#fff" /></linearGradient></defs><g fill="url(#paint)"><path d="M0 0h100v100z" /></g></svg>`;
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        defaultMarkdownMode: "preview",
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "logo.svg" },
+          fileName: "logo.svg", relativePath: "logo.svg", sizeBytes: content.length, fileType: "svg-bestand", extension: "svg", textContent: content, binary: false, truncated: false,
+        },
+      },
+    });
+
+    expect(wrapper.find('.preview-mode-toggle[aria-label="SVG-weergave"]').exists()).toBe(true);
+    expect(wrapper.get(".file-preview-code code").attributes("data-syntax")).toBe("svg");
+    expect(wrapper.find(".hljs-tag").exists()).toBe(true);
+    expect(wrapper.find(".hljs-attr").exists()).toBe(true);
+    expect(wrapper.find(".hljs-comment").exists()).toBe(true);
+    expect(wrapper.get(".file-preview-code").text()).toBe(content);
+
+    await wrapper.get(".preview-mode-toggle button:last-child").trigger("click");
+    expect(wrapper.find(".file-preview").exists()).toBe(false);
+    expect(wrapper.get(".svg-preview img").attributes("src")).toMatch(/^data:image\/svg\+xml;charset=utf-8,/);
+    expect(wrapper.emitted("close")).toBeUndefined();
+
+    await wrapper.get('button[aria-label="Fullscreen openen"]').trigger("click");
+    expect(wrapper.get(".preview-modal").classes()).toContain("fullscreen");
+    expect(wrapper.find(".svg-preview img").exists()).toBe(true);
+
+    await wrapper.get(".preview-mode-toggle button:first-child").trigger("click");
+    expect(wrapper.get(".file-preview-code").text()).toBe(content);
+    expect(wrapper.get(".preview-modal").classes()).toContain("fullscreen");
   });
 
   it("keeps unsupported text files as plain white text", () => {

@@ -897,6 +897,31 @@ pub struct BulkScanStart {
 pub struct AppSettings {
     pub scan_concurrency: usize,
     pub file_preview_mode: FilePreviewMode,
+    pub markdown_preview_mode: MarkdownPreviewMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkdownPreviewMode {
+    Raw,
+    Preview,
+}
+
+impl MarkdownPreviewMode {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Preview => "preview",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "raw" => Some(Self::Raw),
+            "preview" => Some(Self::Preview),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

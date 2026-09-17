@@ -12,7 +12,7 @@ import scss from "highlight.js/lib/languages/scss";
 import twig from "highlight.js/lib/languages/twig";
 import xml from "highlight.js/lib/languages/xml";
 
-export type PreviewSyntax = "log" | "html" | "css" | "js" | "php" | "htaccess" | "json" | "md" | "twig" | "scss" | "xml";
+export type PreviewSyntax = "log" | "html" | "css" | "js" | "php" | "htaccess" | "json" | "md" | "twig" | "scss" | "xml" | "svg";
 
 const highlighterLanguages: Record<PreviewSyntax, string> = {
   log: "accesslog",
@@ -26,6 +26,7 @@ const highlighterLanguages: Record<PreviewSyntax, string> = {
   twig: "twig",
   scss: "scss",
   xml: "xml",
+  svg: "xml",
 };
 
 hljs.registerLanguage("accesslog", accesslog);

@@ -10,7 +10,7 @@ let sessionToken: string | undefined;
 let browserConfigured = false;
 let browserPasswordHash = "";
 let browserIdleMinutes = 15;
-let browserSettings: AppSettings = { scanConcurrency: 4, filePreviewMode: "normal" };
+let browserSettings: AppSettings = { scanConcurrency: 4, filePreviewMode: "normal", markdownPreviewMode: "raw" };
 const browserTerminalChallenges = new Map<string, { siteId: string; expiresAt: number }>();
 const browserScanJobs = new Map<string, ScanJobState>();
 const browserScanJobListeners = new Set<(job: ScanJobState) => void>();
