@@ -149,6 +149,12 @@ function canTrust(finding: Finding) {
   return Boolean(finding.id && finding.path && !["missing", "scan_error"].includes(finding.checksumStatus ?? "") && finding.disposition !== "trusted");
 }
 
+function canPreview(check: ScanCheck, finding: Finding) {
+  if (!props.isLatestScan || !finding.id || !finding.path) return false;
+  if (["php_uploads", "modified_files"].includes(check.key)) return true;
+  return check.key === "core_checksum" && finding.checksumStatus === "unexpected";
+}
+
 function updateFor(finding: Finding) {
   const vulnerability = finding.vulnerability;
   if (!vulnerability?.updateVersion) return undefined;
@@ -231,7 +237,7 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
             <div v-if="finding.id" class="finding-actions">
               <button v-if="finding.vulnerability" class="button small secondary" :disabled="!!busy" @click="emit('details', finding)"><Info :size="14" /> Details</button>
               <button v-if="isLatestScan && updateFor(finding)" class="button small secondary" :disabled="!!busy" @click="emit('update', updateFor(finding)!)"><RefreshCw :size="14" /> {{ finding.vulnerability?.softwareType === 'core' ? 'WordPress bijwerken' : 'Bijwerken' }}</button>
-              <button v-if="isLatestScan && finding.checksumStatus === 'unexpected'" class="button small secondary" :disabled="!!busy" @click="emit('preview', finding)"><LoaderCircle v-if="busy === `preview-${finding.id}`" class="spin" :size="14" /><Eye v-else :size="14" /> Bekijken</button>
+              <button v-if="canPreview(check, finding)" class="button small secondary" :disabled="!!busy" @click="emit('preview', finding)"><LoaderCircle v-if="busy === `preview-${finding.id}`" class="spin" :size="14" /><Eye v-else :size="14" /> Bekijken</button>
               <button v-if="isLatestScan && (finding.disposition ?? 'active') !== 'ignored' && finding.disposition !== 'trusted'" class="button small ghost" :disabled="!!busy" @click="emit('ignore', finding, false)"><EyeOff :size="14" /> Melding negeren</button>
               <button v-if="isLatestScan && (finding.disposition ?? 'active') !== 'ignored' && finding.disposition !== 'trusted'" class="button small ghost" :disabled="!!busy" @click="emit('ignore', finding, true)"><Clock3 :size="14" /> Tijdelijk negeren</button>
               <button v-if="isLatestScan && canTrust(finding)" class="button small ghost" :disabled="!!busy" @click="emit('trust', finding)"><ShieldCheck :size="14" /> Bestand vertrouwen</button>

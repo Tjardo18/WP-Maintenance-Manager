@@ -58,7 +58,7 @@ async function openSiteUrl() { if (!site.value) return; error.value = undefined;
 async function cancelScan() { if (!scanJob.value || !scanActive.value) return; try { await scanJobs.cancel(scanJob.value.id); } catch (cause) { error.value = errorMessage(cause); } }
 function toggleFinding(id: string) { selectedFindingIds.value = selectedFindingIds.value.includes(id) ? selectedFindingIds.value.filter((item) => item !== id) : [...selectedFindingIds.value, id]; }
 function selectAllUnexpected() { selectedFindingIds.value = unexpectedFindings.value.flatMap((finding) => finding.id ? [finding.id] : []); }
-async function openPreview(finding: Finding) { if (!site.value || !finding.id) return; busy.value = `preview-${finding.id}`; error.value = undefined; try { preview.value = await appApi.previewChecksumFinding(site.value.id, finding.id); } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
+async function openPreview(finding: Finding) { if (!site.value || !finding.id) return; busy.value = `preview-${finding.id}`; error.value = undefined; try { preview.value = await appApi.previewFindingFile(site.value.id, finding.id); } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
 function startIgnore(finding: Finding, temporary: boolean) { pendingPolicyAction.value = { kind: "ignore", finding, temporary }; policyNote.value = ""; policyExpiry.value = "7"; policyExpiryDate.value = ""; }
 function startTrust(finding: Finding) { pendingPolicyAction.value = { kind: "trust", finding, temporary: false }; policyNote.value = ""; }
 function startVulnerabilityUpdate(item: UpdateItem) { if (item.kind === "core") void openCoreOperation("update"); else confirmUpdate.value = item; }

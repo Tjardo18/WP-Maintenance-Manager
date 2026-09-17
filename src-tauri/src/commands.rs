@@ -1759,16 +1759,14 @@ pub fn preview_checksum_finding(
     let result = (|| {
         validate_checksum_ids(&site_id, std::slice::from_ref(&finding_id))?;
         let stored = state.database.get_site(&site_id)?;
-        let record = state
-            .database
-            .current_unexpected_checksum_finding(&site_id, &finding_id)?;
+        let context = state.database.get_finding_context(&site_id, &finding_id)?;
         let credential = stored_credential(&state, &stored)?;
-        checksum_files::preview(state.ssh.as_ref(), &stored, credential.as_deref(), &record)
+        checksum_files::preview(state.ssh.as_ref(), &stored, credential.as_deref(), &context)
     })();
     log_operation_error(
         &state,
         Some(&site_id),
-        "Checksum-bestand bekijken",
+        "Scanbestand bekijken",
         started,
         result,
     )

@@ -92,7 +92,7 @@ pub trait SshExecutor: Send + Sync {
         local_path: &Path,
     ) -> Result<u64, AppError>;
 
-    fn read_checksum_file(
+    fn read_site_file(
         &self,
         _site: &Site,
         _credential: Option<&str>,
@@ -372,12 +372,12 @@ impl Ssh2Executor {
         Ok(session)
     }
 
-    fn resolve_regular_checksum_file(
+    fn resolve_regular_site_file(
         sftp: &ssh2::Sftp,
         site: &Site,
         relative_path: &str,
     ) -> Result<(String, ssh2::FileStat), AppError> {
-        validate_checksum_file_action_path(relative_path)?;
+        validate_checksum_relative_path(relative_path)?;
         let canonical_root = sftp
             .realpath(Path::new(&site.wordpress_path))
             .map_err(|error| {
@@ -397,11 +397,7 @@ impl Ssh2Executor {
         }
         let candidate = format!("{canonical_root}/{relative_path}");
         let initial = sftp.lstat(Path::new(&candidate)).map_err(|error| {
-            map_ssh_error(
-                "sftp_file",
-                "Het checksum-bestand is niet meer beschikbaar.",
-                error,
-            )
+            map_ssh_error("sftp_file", "Het bestand is niet meer beschikbaar.", error)
         })?;
         ensure_regular_file(&initial)?;
         let canonical_target = sftp
@@ -409,7 +405,7 @@ impl Ssh2Executor {
             .map_err(|error| {
                 map_ssh_error(
                     "sftp_path",
-                    "Het checksum-bestand kon niet veilig worden bepaald.",
+                    "Het bestand kon niet veilig worden bepaald.",
                     error,
                 )
             })?
@@ -419,7 +415,7 @@ impl Ssh2Executor {
         let final_stat = sftp.lstat(Path::new(&canonical_target)).map_err(|error| {
             map_ssh_error(
                 "sftp_file",
-                "Het checksum-bestand is tijdens de controle gewijzigd.",
+                "Het bestand is tijdens de controle gewijzigd.",
                 error,
             )
         })?;
@@ -825,7 +821,7 @@ impl SshExecutor for Ssh2Executor {
         Ok(copied)
     }
 
-    fn read_checksum_file(
+    fn read_site_file(
         &self,
         site: &Site,
         credential: Option<&str>,
@@ -839,12 +835,11 @@ impl SshExecutor for Ssh2Executor {
         let sftp = session
             .sftp()
             .map_err(|error| map_ssh_error("sftp", "SFTP kon niet worden gestart.", error))?;
-        let (canonical_target, stat) =
-            Self::resolve_regular_checksum_file(&sftp, site, relative_path)?;
+        let (canonical_target, stat) = Self::resolve_regular_site_file(&sftp, site, relative_path)?;
         let mut file = sftp.open(Path::new(&canonical_target)).map_err(|error| {
             map_ssh_error(
                 "sftp_file",
-                "Het checksum-bestand kon niet alleen-lezen worden geopend.",
+                "Het bestand kon niet alleen-lezen worden geopend.",
                 error,
             )
         })?;
@@ -893,12 +888,12 @@ impl SshExecutor for Ssh2Executor {
         credential: Option<&str>,
         relative_path: &str,
     ) -> Result<(), AppError> {
+        validate_checksum_file_action_path(relative_path)?;
         let session = self.verified_session(site, credential, Duration::from_secs(60))?;
         let sftp = session
             .sftp()
             .map_err(|error| map_ssh_error("sftp", "SFTP kon niet worden gestart.", error))?;
-        let (canonical_target, stat) =
-            Self::resolve_regular_checksum_file(&sftp, site, relative_path)?;
+        let (canonical_target, stat) = Self::resolve_regular_site_file(&sftp, site, relative_path)?;
         let before_delete = sftp.lstat(Path::new(&canonical_target)).map_err(|error| {
             map_ssh_error(
                 "sftp_file",

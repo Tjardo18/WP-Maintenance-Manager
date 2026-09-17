@@ -91,6 +91,33 @@ describe("SecurityChecks", () => {
     expect(wrapper.emitted("trust")).toEqual([[actionable[0]!.findings[0]]]);
   });
 
+  it("opens files from PHP uploads and recently modified files", async () => {
+    const uploadFinding = { ...finding("wp-content/uploads/2026/suspicious.php", "uploads", "attention"), id: "upload-finding" };
+    const modifiedFinding = { ...finding("wp-content/themes/demo/functions.php", "themes"), id: "modified-finding" };
+    const previewChecks: ScanCheck[] = [
+      { key: "php_uploads", label: "PHP in uploads", status: "warning", summary: "1 bestand gevonden", findings: [uploadFinding] },
+      { key: "modified_files", label: "Gewijzigde bestanden", status: "warning", summary: "1 bestand gewijzigd", findings: [modifiedFinding] },
+    ];
+    const wrapper = mount(SecurityChecks, { props: { checks: previewChecks, finishedAt: "2026-09-07T11:42:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: true } });
+
+    await wrapper.get("#security-check-php_uploads .finding-actions .secondary").trigger("click");
+    await wrapper.get("#security-check-modified_files .security-accordion-header").trigger("click");
+    const modifiedPreview = wrapper.findAll("#security-check-modified_files .finding-actions button").find((button) => button.text().includes("Bekijken"));
+    await modifiedPreview!.trigger("click");
+
+    expect(wrapper.emitted("preview")).toEqual([[uploadFinding], [modifiedFinding]]);
+    expect(wrapper.findAll(".finding-actions button").some((button) => button.text().includes("Verwijderen"))).toBe(false);
+  });
+
+  it("does not offer file previews for old scans or unrelated checks", async () => {
+    const unrelated: ScanCheck[] = [{ key: "permissions", label: "Bestandsrechten", status: "warning", summary: "Controleer", findings: [{ ...finding("wp-content/test.php", "other"), id: "permission-finding" }] }];
+    const current = mount(SecurityChecks, { props: { checks: unrelated, finishedAt: "2026-09-07T11:42:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: true } });
+    const historical = mount(SecurityChecks, { props: { checks: [{ key: "php_uploads", label: "PHP in uploads", status: "warning", summary: "Controleer", findings: [{ ...finding("wp-content/uploads/test.php", "uploads"), id: "upload-finding" }] }], finishedAt: "2026-09-06T11:42:00Z", truncated: false, isLatestScan: false, selectedFindingIds: [], showSummary: true } });
+
+    expect(current.text()).not.toContain("Bekijken");
+    expect(historical.text()).not.toContain("Bekijken");
+  });
+
   it("shows vulnerability context and uses the existing typed update action", async () => {
     const vulnerability: Finding = {
       id: "vulnerability-finding",
