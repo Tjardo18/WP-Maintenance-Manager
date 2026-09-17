@@ -786,6 +786,8 @@ mod tests {
                 status: SiteStatus::Healthy,
                 wordpress_version: Some("6.8.2".into()),
                 php_version: Some("8.3".into()),
+                wp_cli_version: Some("WP-CLI 2.12.0".into()),
+                wp_cli_version_checked_at: Some("now".into()),
                 update_count: 0,
                 security_status: None,
                 last_scan_at: None,

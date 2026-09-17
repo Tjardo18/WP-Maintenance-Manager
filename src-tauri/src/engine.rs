@@ -30,6 +30,7 @@ pub struct ScanOutcome {
     pub security_status: String,
     pub wordpress_version: String,
     pub php_version: String,
+    pub wp_cli_version: Option<String>,
     pub updates: Option<Vec<UpdateItem>>,
     pub inventory: Vec<InstalledSoftware>,
     pub snapshot_sections: ScanSnapshotSections,
@@ -104,6 +105,9 @@ pub fn scan_site_with_progress(
                 .trim()
                 .to_owned(),
         ))
+    })?;
+    let wp_cli_version = measured_wp_cli_version(progress, || {
+        connection_text_action(connection.as_mut(), stored, RemoteAction::GetWpCliVersion)
     })?;
     let mut truncated = false;
     let mut checks = Vec::new();
@@ -390,6 +394,7 @@ pub fn scan_site_with_progress(
         security_status,
         wordpress_version: wordpress_version.clone(),
         php_version: php_version.clone(),
+        wp_cli_version,
         updates,
         inventory,
         snapshot_sections: ScanSnapshotSections {
@@ -558,6 +563,61 @@ fn measured_result<T>(
         ),
     }
     result
+}
+
+fn measured_wp_cli_version(
+    progress: &mut dyn ScanProgress,
+    operation: impl FnOnce() -> Result<String, AppError>,
+) -> Result<Option<String>, AppError> {
+    if progress.is_cancelled() {
+        return Err(cancelled_error());
+    }
+    progress.step_started("wp_cli_version");
+    let started = Instant::now();
+    let result = operation();
+    let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match result {
+        Ok(output) => {
+            let version = normalize_wp_cli_version(&output);
+            let (status, detail) = version.as_ref().map_or_else(
+                || {
+                    (
+                        StepStatus::Warning,
+                        "WP-CLI-versie is niet beschikbaar.".to_owned(),
+                    )
+                },
+                |version| (StepStatus::Success, version.clone()),
+            );
+            progress.step_finished("wp_cli_version", status, duration, Some(detail));
+            Ok(version)
+        }
+        Err(error) => {
+            progress.step_finished(
+                "wp_cli_version",
+                StepStatus::Warning,
+                duration,
+                Some("WP-CLI-versie kon niet worden opgehaald; de scan gaat door.".into()),
+            );
+            eprintln!(
+                "wp_cli_version_probe_failed diagnostic={}",
+                error
+                    .safe_diagnostic()
+                    .unwrap_or_else(|| error.category.clone())
+            );
+            Ok(None)
+        }
+    }
+}
+
+pub fn normalize_wp_cli_version(output: &str) -> Option<String> {
+    let value = output.trim();
+    if value.is_empty() {
+        None
+    } else if value.starts_with("WP-CLI ") {
+        Some(value.to_owned())
+    } else {
+        Some(format!("WP-CLI {value}"))
+    }
 }
 
 fn measured_check(
@@ -999,6 +1059,8 @@ mod tests {
                 status: SiteStatus::Unscanned,
                 wordpress_version: None,
                 php_version: None,
+                wp_cli_version: None,
+                wp_cli_version_checked_at: None,
                 update_count: 0,
                 security_status: None,
                 last_scan_at: None,
@@ -1101,6 +1163,7 @@ mod tests {
                 ("GetWordPressVersion", output("6.8.2")),
                 ("DetectWordPress", output("1")),
                 ("GetPhpVersion", output("8.3.12")),
+                ("GetWpCliVersion", output("WP-CLI 2.12.0")),
                 (
                     "VerifyCoreChecksums",
                     output("Success: WordPress installation verifies against checksums."),
@@ -1143,6 +1206,7 @@ mod tests {
 
         assert_eq!(ssh.authentications.load(Ordering::SeqCst), 1);
         assert_eq!(outcome.wordpress_version, "6.8.2");
+        assert_eq!(outcome.wp_cli_version.as_deref(), Some("WP-CLI 2.12.0"));
         assert!(outcome.updates.as_ref().is_some_and(Vec::is_empty));
         assert!(outcome.inventory.iter().any(|item| {
             item.slug == "object-cache.php"
@@ -1164,10 +1228,43 @@ mod tests {
         eprintln!("synthetic_scan_timings={:?}", progress.finished);
     }
 
+    #[test]
+    fn wp_cli_version_is_normalized_for_storage_and_display() {
+        assert_eq!(
+            normalize_wp_cli_version("2.12.0\n").as_deref(),
+            Some("WP-CLI 2.12.0")
+        );
+        assert_eq!(
+            normalize_wp_cli_version("WP-CLI 2.12.0\n").as_deref(),
+            Some("WP-CLI 2.12.0")
+        );
+        assert_eq!(normalize_wp_cli_version("  "), None);
+    }
+
+    #[test]
+    fn wp_cli_version_failure_is_a_non_blocking_warning() {
+        let mut progress = RecordingProgress::default();
+        let version = measured_wp_cli_version(&mut progress, || {
+            Err(AppError::command_failed(
+                "GetWpCliVersion",
+                127,
+                "wp: command not found",
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(version, None);
+        assert_eq!(progress.started, ["wp_cli_version"]);
+        assert!(matches!(
+            progress.finished.as_slice(),
+            [(key, StepStatus::Warning, _)] if key == "wp_cli_version"
+        ));
+    }
+
     #[derive(Default)]
     struct RecordingProgress {
         started: Vec<String>,
-        finished: Vec<(String, u64)>,
+        finished: Vec<(String, StepStatus, u64)>,
     }
 
     impl ScanProgress for RecordingProgress {
@@ -1178,11 +1275,11 @@ mod tests {
         fn step_finished(
             &mut self,
             key: &str,
-            _status: StepStatus,
+            status: StepStatus,
             duration_ms: u64,
             _detail: Option<String>,
         ) {
-            self.finished.push((key.into(), duration_ms));
+            self.finished.push((key.into(), status, duration_ms));
         }
     }
 

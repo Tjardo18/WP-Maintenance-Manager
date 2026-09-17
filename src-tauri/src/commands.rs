@@ -964,6 +964,7 @@ const SITE_SCAN_STEPS: &[(&str, &str)] = &[
     ("ssh_connect", "SSH-verbinding"),
     ("wordpress_detection", "WordPress detecteren"),
     ("wordpress", "WordPress-informatie"),
+    ("wp_cli_version", "WP-CLI-versie"),
     ("checksum", "WordPress core checksum"),
     ("users", "Gebruikersaccounts"),
     ("php", "PHP-bestanden"),
@@ -2297,9 +2298,12 @@ fn scan_site_internal_with_progress(
             })
             .transpose()?
     };
-    state
-        .database
-        .update_versions(site_id, &outcome.wordpress_version, &outcome.php_version)?;
+    state.database.update_versions(
+        site_id,
+        &outcome.wordpress_version,
+        &outcome.php_version,
+        outcome.wp_cli_version.as_deref(),
+    )?;
     if let Some(updates) = &outcome.updates {
         state.database.save_updates(site_id, updates)?;
     }
@@ -3143,9 +3147,17 @@ fn run_update_internal(
         credential.as_deref(),
         RemoteAction::GetPhpVersion,
     )?;
+    let wp_cli = engine::text_action(
+        state.ssh.as_ref(),
+        &stored,
+        credential.as_deref(),
+        RemoteAction::GetWpCliVersion,
+    )
+    .ok()
+    .and_then(|value| engine::normalize_wp_cli_version(&value));
     state
         .database
-        .update_versions(site_id, wordpress.trim(), php.trim())?;
+        .update_versions(site_id, wordpress.trim(), php.trim(), wp_cli.as_deref())?;
     Ok(())
 }
 
@@ -3257,9 +3269,12 @@ fn run_core_operation(
         state
             .database
             .save_scan(&scan.result, &scan.security_status)?;
-        state
-            .database
-            .update_versions(site_id, &scan.wordpress_version, &scan.php_version)?;
+        state.database.update_versions(
+            site_id,
+            &scan.wordpress_version,
+            &scan.php_version,
+            scan.wp_cli_version.as_deref(),
+        )?;
     }
     let updates_refreshed = outcome.run.steps.iter().any(|step| {
         step.key == "updates" && matches!(step.status, StepStatus::Success | StepStatus::Warning)
@@ -3466,9 +3481,12 @@ fn run_maintenance_internal(
         } else if source == SnapshotSource::PreMaintenance {
             pre_maintenance_snapshot = snapshot;
         }
-        state
-            .database
-            .update_versions(site_id, &scan.wordpress_version, &scan.php_version)?;
+        state.database.update_versions(
+            site_id,
+            &scan.wordpress_version,
+            &scan.php_version,
+            scan.wp_cli_version.as_deref(),
+        )?;
     }
     if outcome.run.before_versions.is_some() {
         state
@@ -3536,6 +3554,9 @@ fn site_from_input(input: &SiteInput, existing: Option<&StoredSite>) -> Site {
         status: existing.map_or(SiteStatus::Unscanned, |stored| stored.site.status),
         wordpress_version: None,
         php_version: None,
+        wp_cli_version: existing.and_then(|stored| stored.site.wp_cli_version.clone()),
+        wp_cli_version_checked_at: existing
+            .and_then(|stored| stored.site.wp_cli_version_checked_at.clone()),
         update_count: 0,
         security_status: None,
         last_scan_at: None,
@@ -3695,6 +3716,7 @@ mod tests {
             let stdout = match command.action_name {
                 "GetWordPressVersion" => b"6.8.2\n".to_vec(),
                 "GetPhpVersion" => b"8.3.12\n".to_vec(),
+                "GetWpCliVersion" => b"WP-CLI 2.12.0\n".to_vec(),
                 "VerifyCoreChecksums" => {
                     b"Success: WordPress installation verifies against checksums.\n".to_vec()
                 }

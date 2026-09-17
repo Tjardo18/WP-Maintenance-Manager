@@ -22,7 +22,7 @@ import DashboardView from "./DashboardView.vue";
 const site: Site = {
   id: "site-a", name: "Site A", url: "https://site-a.test", sshHost: "ssh.site-a.test",
   sshPort: 22, sshUsername: "deploy", authMethod: "keyFile", wordpressPath: "/srv/site-a",
-  status: "healthy", updateCount: 0, createdAt: "2026-09-08T10:00:00.000Z", updatedAt: "2026-09-08T10:00:00.000Z",
+  status: "healthy", wordpressVersion: "6.8.2", phpVersion: "8.3.12", wpCliVersion: "WP-CLI 2.12.0", wpCliVersionCheckedAt: "2026-09-08T10:00:00.000Z", updateCount: 0, createdAt: "2026-09-08T10:00:00.000Z", updatedAt: "2026-09-08T10:00:00.000Z",
   vulnerabilitySummary: { criticalCount: 1, highCount: 2, mediumCount: 1, lowCount: 0, infoCount: 0, unknownCount: 0, lastCheckedAt: "2026-09-08T10:00:00.000Z", feedUpdatedAt: "2026-09-08T09:00:00.000Z", inventoryObservedAt: "2026-09-08T10:00:00.000Z", inventoryStale: false },
 };
 
@@ -58,6 +58,16 @@ describe("dashboard background scans", () => {
     await vulnerabilityCard?.trigger("click");
     expect(wrapper.findAll(".table-card tbody tr")).toHaveLength(1);
     expect(wrapper.get(".table-card tbody").text()).toContain("Site A");
+  });
+
+  it("keeps WP-CLI details out of the compact dashboard table", () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useSitesStore().sites = [site];
+    const wrapper = mount(DashboardView, { global: { plugins: [pinia], stubs: { RouterLink: { template: "<a><slot /></a>" } } } });
+
+    expect(wrapper.get(".table-card thead").text()).toContain("WordPress / PHP");
+    expect(wrapper.get(".table-card").text()).not.toContain("WP-CLI");
   });
 
   it("labels findings based on stale cached versions as possible and asks for a rescan", () => {

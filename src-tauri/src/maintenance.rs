@@ -579,6 +579,8 @@ mod tests {
                 status: SiteStatus::Unscanned,
                 wordpress_version: None,
                 php_version: None,
+                wp_cli_version: None,
+                wp_cli_version_checked_at: None,
                 update_count: 0,
                 security_status: None,
                 last_scan_at: None,

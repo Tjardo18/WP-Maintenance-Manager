@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 import { ArrowRight, Bug, CheckCircle2, CircleAlert, GitCompare, Globe2, Plus, RefreshCw, Search, ShieldAlert, WifiOff } from "@lucide/vue";
 import StatusBadge from "../components/StatusBadge.vue";
@@ -27,6 +27,14 @@ const vulnerabilityTotals = computed(() => store.sites.reduce((totals, site) => 
 const totalVulnerabilities = computed(() => Object.values(vulnerabilityTotals.value).reduce((total, value) => total + value, 0));
 const priorityVulnerabilitySites = computed(() => [...store.sites].filter((site) => (site.vulnerabilitySummary?.criticalCount ?? 0) + (site.vulnerabilitySummary?.highCount ?? 0) > 0).sort((left, right) => (right.vulnerabilitySummary?.criticalCount ?? 0) - (left.vulnerabilitySummary?.criticalCount ?? 0) || (right.vulnerabilitySummary?.highCount ?? 0) - (left.vulnerabilitySummary?.highCount ?? 0)).slice(0, 5));
 const changeSummary = (siteId: string) => store.changeSummaries.get(siteId);
+const refreshedJobIds = new Set<string>();
+
+watch(batchJobs, async (jobs) => {
+  const newlyCompleted = jobs.filter((job) => job.status === "completed" && !refreshedJobIds.has(job.id));
+  if (!newlyCompleted.length) return;
+  newlyCompleted.forEach((job) => refreshedJobIds.add(job.id));
+  await store.load();
+}, { deep: true });
 
 async function scanAll() {
   scanError.value = undefined;

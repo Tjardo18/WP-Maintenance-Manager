@@ -16,6 +16,8 @@ export interface Site {
   status: SiteStatus;
   wordpressVersion?: string | null;
   phpVersion?: string | null;
+  wpCliVersion?: string | null;
+  wpCliVersionCheckedAt?: string | null;
   updateCount: number;
   securityStatus?: string | null;
   lastScanAt?: string | null;

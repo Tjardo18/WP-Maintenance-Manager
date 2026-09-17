@@ -270,6 +270,8 @@ pub struct Site {
     pub status: SiteStatus,
     pub wordpress_version: Option<String>,
     pub php_version: Option<String>,
+    pub wp_cli_version: Option<String>,
+    pub wp_cli_version_checked_at: Option<String>,
     pub update_count: u32,
     pub security_status: Option<String>,
     pub last_scan_at: Option<String>,

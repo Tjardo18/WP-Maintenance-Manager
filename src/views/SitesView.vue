@@ -5,7 +5,7 @@ import { ExternalLink, Plus, Search, Server } from "@lucide/vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import { useSitesStore } from "../stores/sites";
-import { formatDate } from "../utils/format";
+import { formatDate, formatWpCliVersion } from "../utils/format";
 import { errorMessage } from "../utils/errors";
 
 const store = useSitesStore();
@@ -24,7 +24,7 @@ async function confirmRemove() { if (!removing.value) return; busy.value = true;
     <article v-for="site in filtered" :key="site.id" class="site-card card">
       <div class="site-card-top"><span class="site-avatar large">{{ site.name.slice(0, 2).toUpperCase() }}</span><StatusBadge :status="site.status" /></div>
       <h3>{{ site.name }}</h3><span class="site-url">{{ site.url }} <ExternalLink :size="13" /></span>
-      <dl><div><dt><Server :size="14" /> SSH-server</dt><dd>{{ site.sshUsername }}@{{ site.sshHost }}:{{ site.sshPort }}</dd></div><div><dt>WordPress</dt><dd>{{ site.wordpressVersion ?? 'Nog niet gedetecteerd' }}</dd></div><div><dt>Laatste scan</dt><dd>{{ formatDate(site.lastScanAt) }}</dd></div></dl>
+      <dl><div><dt><Server :size="14" /> SSH-server</dt><dd>{{ site.sshUsername }}@{{ site.sshHost }}:{{ site.sshPort }}</dd></div><div><dt>WordPress</dt><dd>{{ site.wordpressVersion ?? 'Nog niet gedetecteerd' }}</dd></div><div><dt>WP-CLI-versie</dt><dd>{{ formatWpCliVersion(site.wpCliVersion, site.wpCliVersionCheckedAt) }}</dd></div><div><dt>Laatste scan</dt><dd>{{ formatDate(site.lastScanAt) }}</dd></div></dl>
       <div class="site-card-actions"><RouterLink class="button secondary grow" :to="`/websites/${site.id}`">Openen</RouterLink><RouterLink class="button ghost" :to="`/websites/${site.id}/bewerken`">Bewerken</RouterLink><button class="button danger-text" @click="removing = site.id">Verwijderen</button></div>
     </article>
   </div>

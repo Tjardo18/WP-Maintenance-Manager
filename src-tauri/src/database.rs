@@ -253,6 +253,20 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let wp_cli_version_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 15)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !wp_cli_version_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!("../migrations/0015_wp_cli_version.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(15, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -266,7 +280,7 @@ impl Database {
 
     pub fn list_sites(&self) -> Result<Vec<Site>, AppError> {
         let connection = self.connect()?;
-        let mut statement = connection.prepare("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,vulnerability_critical_count,vulnerability_high_count,vulnerability_medium_count,vulnerability_low_count,vulnerability_info_count,vulnerability_unknown_count,vulnerability_last_checked_at,vulnerability_feed_updated_at,vulnerability_inventory_observed_at,vulnerability_inventory_stale FROM sites ORDER BY name COLLATE NOCASE")?;
+        let mut statement = connection.prepare("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,vulnerability_critical_count,vulnerability_high_count,vulnerability_medium_count,vulnerability_low_count,vulnerability_info_count,vulnerability_unknown_count,vulnerability_last_checked_at,vulnerability_feed_updated_at,vulnerability_inventory_observed_at,vulnerability_inventory_stale,wp_cli_version,wp_cli_version_checked_at FROM sites ORDER BY name COLLATE NOCASE")?;
         let rows = statement.query_map([], row_to_stored_site)?;
         rows.map(|row| row.map(|stored| stored.site).map_err(AppError::from))
             .collect()
@@ -274,7 +288,7 @@ impl Database {
 
     pub fn get_site(&self, id: &str) -> Result<StoredSite, AppError> {
         let connection = self.connect()?;
-        connection.query_row("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,vulnerability_critical_count,vulnerability_high_count,vulnerability_medium_count,vulnerability_low_count,vulnerability_info_count,vulnerability_unknown_count,vulnerability_last_checked_at,vulnerability_feed_updated_at,vulnerability_inventory_observed_at,vulnerability_inventory_stale FROM sites WHERE id = ?1", [id], row_to_stored_site).optional()?.ok_or_else(|| AppError::not_found("Website"))
+        connection.query_row("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,vulnerability_critical_count,vulnerability_high_count,vulnerability_medium_count,vulnerability_low_count,vulnerability_info_count,vulnerability_unknown_count,vulnerability_last_checked_at,vulnerability_feed_updated_at,vulnerability_inventory_observed_at,vulnerability_inventory_stale,wp_cli_version,wp_cli_version_checked_at FROM sites WHERE id = ?1", [id], row_to_stored_site).optional()?.ok_or_else(|| AppError::not_found("Website"))
     }
 
     pub fn save_site(
@@ -1060,11 +1074,13 @@ impl Database {
         site_id: &str,
         wordpress: &str,
         php: &str,
+        wp_cli: Option<&str>,
     ) -> Result<(), AppError> {
         let connection = self.connect()?;
+        let now = utc_now();
         connection.execute(
-            "UPDATE sites SET wordpress_version=?1,php_version=?2,updated_at=?3 WHERE id=?4",
-            params![wordpress, php, utc_now(), site_id],
+            "UPDATE sites SET wordpress_version=?1,php_version=?2,wp_cli_version=?3,wp_cli_version_checked_at=?4,updated_at=?4 WHERE id=?5",
+            params![wordpress, php, wp_cli, now, site_id],
         )?;
         Ok(())
     }
@@ -1922,6 +1938,8 @@ fn row_to_stored_site(row: &Row<'_>) -> rusqlite::Result<StoredSite> {
             status: SiteStatus::from_db(&row.get::<_, String>(11)?),
             wordpress_version: row.get(12)?,
             php_version: row.get(13)?,
+            wp_cli_version: row.get(30)?,
+            wp_cli_version_checked_at: row.get(31)?,
             update_count: row.get(14)?,
             security_status: row.get(15)?,
             last_scan_at: row.get(16)?,
@@ -2050,6 +2068,28 @@ mod tests {
         let database = Database::initialize(path.clone()).unwrap();
         let saved = database.save_site(&input(), Some("test-ref")).unwrap();
         assert_eq!(saved.name, "Voorbeeld");
+        assert_eq!(saved.wp_cli_version, None);
+        assert_eq!(saved.wp_cli_version_checked_at, None);
+        database
+            .update_versions(&saved.id, "6.8.2", "8.3.12", Some("WP-CLI 2.12.0"))
+            .unwrap();
+        assert_eq!(
+            database
+                .get_site(&saved.id)
+                .unwrap()
+                .site
+                .wp_cli_version
+                .as_deref(),
+            Some("WP-CLI 2.12.0")
+        );
+        assert!(
+            database
+                .get_site(&saved.id)
+                .unwrap()
+                .site
+                .wp_cli_version_checked_at
+                .is_some()
+        );
         assert_eq!(database.list_sites().unwrap().len(), 1);
         assert_eq!(
             database.delete_site(&saved.id).unwrap().as_deref(),

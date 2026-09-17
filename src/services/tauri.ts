@@ -53,6 +53,7 @@ function browserSiteChanges(siteId: string): SiteChangeHistory {
 const demoScanSteps: ScanJobState["steps"] = [
   ["ssh_connect", "SSH-verbinding"], ["wordpress_detection", "WordPress detecteren"],
   ["wordpress", "WordPress controleren"],
+  ["wp_cli_version", "WP-CLI-versie"],
   ["checksum", "Core-checksums"], ["users", "Gebruikers"],
   ["php", "PHP-bestanden"], ["uploads", "Uploads"],
   ["modified", "Gewijzigde bestanden"], ["permissions", "Bestandsrechten"],
@@ -82,6 +83,10 @@ function startBrowserScanJob(site: Site): ScanJobState {
   window.setTimeout(() => {
     const current = browserScanJobs.get(job.id);
     if (!current || current.status === "cancelled") return;
+    site.wpCliVersion = "WP-CLI 2.12.0";
+    site.wpCliVersionCheckedAt = new Date().toISOString();
+    site.lastScanAt = site.wpCliVersionCheckedAt;
+    site.updatedAt = site.lastScanAt;
     current.status = "completed"; current.finishedAt = new Date().toISOString(); current.currentStep = undefined; current.completedSteps = current.totalSteps; current.resultScanId = crypto.randomUUID(); current.steps = current.steps.map((step) => ({ ...step, status: "success", durationMs: 20 })); emitBrowserScanJob(current);
   }, 300);
   return structuredClone(job);
