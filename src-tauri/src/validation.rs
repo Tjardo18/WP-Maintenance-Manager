@@ -131,6 +131,21 @@ pub fn validate_slug(slug: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn validate_software_identifier(identifier: &str) -> Result<(), AppError> {
+    if identifier.is_empty()
+        || identifier.len() > 200
+        || matches!(identifier, "." | "..")
+        || !identifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(AppError::validation(
+            "WP-CLI retourneerde een ongeldige plugin- of thema-identiteit.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_user_id(user_id: u64) -> Result<(), AppError> {
     if user_id == 0 {
         return Err(AppError::validation("De WordPress user-id is ongeldig."));
@@ -247,8 +262,17 @@ mod tests {
     #[test]
     fn validates_plugin_and_theme_slugs() {
         assert!(validate_slug("wordpress-seo").is_ok());
+        assert!(validate_slug("object-cache.php").is_err());
         assert!(validate_slug("seo;reboot").is_err());
         assert!(validate_slug("../plugin").is_err());
+    }
+    #[test]
+    fn validates_read_only_software_identifiers() {
+        assert!(validate_software_identifier("object-cache.php").is_ok());
+        assert!(validate_software_identifier("Plugin_Loader-1.php").is_ok());
+        assert!(validate_software_identifier("..").is_err());
+        assert!(validate_software_identifier("../plugin.php").is_err());
+        assert!(validate_software_identifier("plugin;reboot").is_err());
     }
     #[test]
     fn validates_user_edits() {

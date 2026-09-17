@@ -177,9 +177,10 @@ fn normalize_plugins(items: Vec<InstalledSoftware>) -> Result<Vec<SnapshotPlugin
         let slug = normalize_slug(&item.slug)?;
         ensure_unique(&mut seen, &slug, "plugin")?;
         let available_version = normalize_optional_text(item.update_version, "updateversie", 200)?;
+        let name = normalize_software_name(&item.name, &slug, "pluginnaam")?;
         normalized.push(SnapshotPlugin {
             slug,
-            name: bounded_text(&item.name, "pluginnaam", 250)?,
+            name,
             version: bounded_text(&item.version, "pluginversie", 200)?,
             status: normalize_status(&item.status),
             auto_update: None,
@@ -204,9 +205,10 @@ fn normalize_themes(items: Vec<InstalledSoftware>) -> Result<Vec<SnapshotTheme>,
         ensure_unique(&mut seen, &slug, "thema")?;
         let status = normalize_status(&item.status);
         let available_version = normalize_optional_text(item.update_version, "updateversie", 200)?;
+        let name = normalize_software_name(&item.name, &slug, "themanaam")?;
         normalized.push(SnapshotTheme {
             slug,
-            name: bounded_text(&item.name, "themanaam", 250)?,
+            name,
             version: bounded_text(&item.version, "themaversie", 200)?,
             active: status == "active",
             status,
@@ -362,12 +364,19 @@ fn normalize_sha256(value: Option<String>) -> Result<Option<String>, AppError> {
 
 fn normalize_slug(value: &str) -> Result<String, AppError> {
     let slug = value.trim().to_ascii_lowercase();
-    crate::validation::validate_slug(&slug)?;
+    crate::validation::validate_software_identifier(&slug)?;
     Ok(slug)
 }
 
 fn normalize_status(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+fn normalize_software_name(value: &str, slug: &str, field: &str) -> Result<String, AppError> {
+    if value.trim().is_empty() {
+        return Ok(slug.to_owned());
+    }
+    bounded_text(value, field, 250)
 }
 
 fn bounded_text(value: &str, field: &str, maximum: usize) -> Result<String, AppError> {
@@ -631,5 +640,17 @@ mod tests {
         let error = SnapshotBuilder::build(input).unwrap_err();
         assert_eq!(error.category, "snapshot_build");
         assert!(error.user_message.contains("dubbele plugin-identiteit"));
+    }
+
+    #[test]
+    fn accepts_wordpress_drop_in_file_names_as_snapshot_identities() {
+        let mut input = input();
+        let mut drop_in = software("plugin", "Object-Cache.php", "dropin");
+        drop_in.name.clear();
+        input.plugins = SnapshotBuildSection::Complete(vec![drop_in]);
+        let snapshot = SnapshotBuilder::build(input).unwrap();
+        assert_eq!(snapshot.plugins[0].slug, "object-cache.php");
+        assert_eq!(snapshot.plugins[0].name, "object-cache.php");
+        assert_eq!(snapshot.plugins[0].status, "dropin");
     }
 }

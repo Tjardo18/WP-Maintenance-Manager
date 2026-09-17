@@ -1124,7 +1124,12 @@ mod tests {
                 ),
                 ("CheckDatabase", output("Success: Database checked.")),
                 ("CheckCoreUpdates", output("[]")),
-                ("ListPluginUpdates", output("[]")),
+                (
+                    "ListPluginUpdates",
+                    output(
+                        r#"[{"name":"object-cache.php","title":"","status":"dropin","version":"","update":"none","update_version":""}]"#,
+                    ),
+                ),
                 ("ListThemeUpdates", output("[]")),
             ]),
             authentications: AtomicUsize::new(0),
@@ -1138,6 +1143,13 @@ mod tests {
 
         assert_eq!(ssh.authentications.load(Ordering::SeqCst), 1);
         assert_eq!(outcome.wordpress_version, "6.8.2");
+        assert!(outcome.updates.as_ref().is_some_and(Vec::is_empty));
+        assert!(outcome.inventory.iter().any(|item| {
+            item.slug == "object-cache.php"
+                && item.name == "object-cache.php"
+                && item.status == "dropin"
+                && item.version == "onbekend"
+        }));
         assert!(matches!(
             outcome.snapshot_sections.cron,
             SnapshotBuildSection::Complete(ref events) if events.len() == 1

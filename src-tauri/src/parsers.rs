@@ -6,7 +6,10 @@ use crate::{
         WordPressRole, WordPressUser,
     },
     snapshot_builder::SnapshotCronInput,
-    validation::{validate_checksum_relative_path, validate_role, validate_slug, validate_user_id},
+    validation::{
+        validate_checksum_relative_path, validate_role, validate_slug,
+        validate_software_identifier, validate_user_id,
+    },
 };
 use chrono::{DateTime, Duration, NaiveDateTime, SecondsFormat, Utc};
 use serde_json::Value;
@@ -763,8 +766,6 @@ pub fn parse_update_list(output: &str, kind: UpdateKind) -> Result<Vec<UpdateIte
     };
     let mut updates = Vec::with_capacity(rows.len());
     for row in rows {
-        let slug = string_field(&row, "name", "");
-        validate_slug(&slug)?;
         let update_version = string_field(&row, "update_version", "");
         let update_state = string_field(&row, "update", "");
         if update_version.is_empty()
@@ -773,6 +774,8 @@ pub fn parse_update_list(output: &str, kind: UpdateKind) -> Result<Vec<UpdateIte
         {
             continue;
         }
+        let slug = string_field(&row, "name", "");
+        validate_slug(&slug)?;
         updates.push(UpdateItem {
             kind: kind.clone(),
             name: string_field(&row, "title", &slug),
@@ -813,18 +816,23 @@ pub fn parse_software_inventory(
     };
     rows.into_iter()
         .map(|row| {
-            let slug = string_field(&row, "name", "");
-            validate_slug(&slug)?;
-            let version = string_field(&row, "version", "");
-            if version.is_empty() || version.len() > 200 {
+            let slug = string_field(&row, "name", "").trim().to_ascii_lowercase();
+            validate_software_identifier(&slug)?;
+            let version = string_field(&row, "version", "").trim().to_owned();
+            if version.len() > 200 || version.chars().any(char::is_control) {
                 return Err(AppError::validation(
                     "WP-CLI gaf een ongeldige softwareversie terug.",
                 ));
             }
+            let version = if version.is_empty() {
+                "onbekend".into()
+            } else {
+                version
+            };
             let update_version = string_field(&row, "update_version", "");
             Ok(InstalledSoftware {
                 software_type: software_type.into(),
-                name: string_field(&row, "title", &slug),
+                name: software_display_name(&row, &slug)?,
                 slug,
                 version,
                 status: string_field(&row, "status", "unknown"),
@@ -926,6 +934,19 @@ fn string_field(value: &Value, key: &str, fallback: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or(fallback)
         .to_owned()
+}
+
+fn software_display_name(value: &Value, slug: &str) -> Result<String, AppError> {
+    let name = string_field(value, "title", "").trim().to_owned();
+    if name.is_empty() {
+        return Ok(slug.to_owned());
+    }
+    if name.chars().count() > 250 || name.chars().any(char::is_control) {
+        return Err(AppError::validation(
+            "WP-CLI gaf een ongeldige plugin- of themanaam terug.",
+        ));
+    }
+    Ok(name)
 }
 
 fn required_string_field(value: &Value, key: &str, label: &str) -> Result<String, AppError> {
@@ -1151,6 +1172,7 @@ mod tests {
     fn full_wp_cli_list_yields_inventory_but_only_available_updates() {
         let json = r#"[
             {"name":"safe-plugin","title":"Safe Plugin","status":"active","version":"2.0.0","update":"none","update_version":""},
+            {"name":"object-cache.php","title":"","status":"dropin","version":"","update":"none","update_version":""},
             {"name":"needs-update","title":"Needs Update","status":"inactive","version":"1.2.3","update":"available","update_version":"1.2.4"}
         ]"#;
         let updates = parse_update_list(json, UpdateKind::Plugin).unwrap();
@@ -1158,10 +1180,14 @@ mod tests {
             parse_software_inventory(json, UpdateKind::Plugin, "2026-09-10T08:00:00Z").unwrap();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].slug, "needs-update");
-        assert_eq!(inventory.len(), 2);
+        assert_eq!(inventory.len(), 3);
         assert_eq!(inventory[0].status, "active");
-        assert_eq!(inventory[1].status, "inactive");
-        assert_eq!(inventory[1].update_version.as_deref(), Some("1.2.4"));
+        assert_eq!(inventory[1].slug, "object-cache.php");
+        assert_eq!(inventory[1].name, "object-cache.php");
+        assert_eq!(inventory[1].status, "dropin");
+        assert_eq!(inventory[1].version, "onbekend");
+        assert_eq!(inventory[2].status, "inactive");
+        assert_eq!(inventory[2].update_version.as_deref(), Some("1.2.4"));
     }
 
     #[test]
