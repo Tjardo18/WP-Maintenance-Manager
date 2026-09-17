@@ -38,4 +38,15 @@ describe("Tauri authentication boundary", () => {
 
     window.removeEventListener("wpmm:locked", lockListener);
   });
+
+  it("opens external URLs through the native system-browser command", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    await appApi.openExternalUrl("https://example.test/path");
+
+    expect(invokeMock).toHaveBeenCalledWith("open_vulnerability_reference", {
+      url: "https://example.test/path",
+      sessionToken: "active-app-session",
+    });
+  });
 });
