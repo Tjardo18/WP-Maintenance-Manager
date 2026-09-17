@@ -34,6 +34,20 @@ describe("SecurityChecks", () => {
     expect(wrapper.text()).toContain("In orde");
   });
 
+  it("uses distinct success, warning and failure icons", () => {
+    const statusChecks: ScanCheck[] = [
+      { key: "ok", label: "Geslaagd", status: "success", summary: "In orde", findings: [] },
+      { key: "warn", label: "Waarschuwing", status: "warning", summary: "Iets gevonden", findings: [] },
+      { key: "fail", label: "Mislukt", status: "failed", summary: "Niet uitgevoerd", findings: [] },
+    ];
+    const wrapper = mount(SecurityChecks, { props: { checks: statusChecks, finishedAt: "2026-09-07T11:42:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: true } });
+    const icons = wrapper.findAll(".security-summary-icon");
+
+    expect(icons[0]!.get("[data-status-icon]").attributes("data-status-icon")).toBe("success");
+    expect(icons[1]!.get("[data-status-icon]").attributes("data-status-icon")).toBe("warning");
+    expect(icons[2]!.get("[data-status-icon]").attributes("data-status-icon")).toBe("failed");
+  });
+
   it("opens and closes sections and navigates from the summary", async () => {
     const wrapper = render();
     await wrapper.get("#security-check-php_files .security-accordion-header").trigger("click");

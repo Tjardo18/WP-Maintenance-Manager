@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
-import { CheckCircle2, ChevronDown, CircleAlert, Clock3, Eye, EyeOff, Info, LoaderCircle, RefreshCw, Search, ShieldCheck, Trash2 } from "@lucide/vue";
+import { CheckCircle2, ChevronDown, CircleAlert, CircleX, Clock3, Eye, EyeOff, Info, LoaderCircle, MinusCircle, RefreshCw, Search, ShieldCheck, Trash2 } from "@lucide/vue";
 import type { Finding, ScanCheck, UpdateItem } from "../types";
 import { filterSecurityFindings, noteworthyFindingCount, paginateSecurityFindings, type SecurityCategory, type SecurityDisposition } from "../services/securityResults";
 import { formatDate } from "../utils/format";
@@ -182,7 +182,7 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
     <div class="security-policy-counts"><span><CircleAlert :size="15" /> {{ attentionCount }} actief</span><span><EyeOff :size="15" /> {{ ignoredCount }} genegeerd</span><span><ShieldCheck :size="15" /> {{ trustedCount }} vertrouwd</span></div>
     <div class="security-summary-grid">
       <button v-for="check in checks" :key="check.key" type="button" @click="openAndScroll(check.key)">
-        <span :class="['security-summary-icon', check.status]"><CheckCircle2 v-if="check.status === 'success'" :size="16" /><CircleAlert v-else :size="16" /></span>
+        <span :class="['security-summary-icon', check.status]"><CheckCircle2 v-if="check.status === 'success'" data-status-icon="success" :size="16" /><LoaderCircle v-else-if="check.status === 'running'" data-status-icon="running" class="spin" :size="16" /><CircleX v-else-if="check.status === 'failed'" data-status-icon="failed" :size="16" /><CircleAlert v-else-if="check.status === 'warning'" data-status-icon="warning" :size="16" /><MinusCircle v-else data-status-icon="neutral" :size="16" /></span>
         <span><strong>{{ check.label }}</strong><small>{{ compactSummary(check) }}</small></span>
         <ChevronDown :size="15" />
       </button>
@@ -192,7 +192,7 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
   <div class="security-accordions">
     <article v-for="check in checks" :id="`security-check-${check.key}`" :key="check.key" class="security-accordion card">
       <button class="security-accordion-header" type="button" :aria-expanded="isOpen(check.key)" :aria-controls="`security-panel-${check.key}`" @click="toggle(check.key)">
-        <span :class="['security-accordion-icon', check.status]"><CheckCircle2 v-if="check.status === 'success'" :size="17" /><CircleAlert v-else :size="17" /></span>
+        <span :class="['security-accordion-icon', check.status]"><CheckCircle2 v-if="check.status === 'success'" data-status-icon="success" :size="17" /><LoaderCircle v-else-if="check.status === 'running'" data-status-icon="running" class="spin" :size="17" /><CircleX v-else-if="check.status === 'failed'" data-status-icon="failed" :size="17" /><CircleAlert v-else-if="check.status === 'warning'" data-status-icon="warning" :size="17" /><MinusCircle v-else data-status-icon="neutral" :size="17" /></span>
         <span class="security-accordion-copy"><strong>{{ check.label }}</strong><small>{{ compactSummary(check) }}</small></span>
         <span class="security-scan-time">{{ formatDate(finishedAt) }}</span>
         <StatusBadge :status="check.status" />

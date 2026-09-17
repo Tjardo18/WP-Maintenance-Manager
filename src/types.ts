@@ -118,7 +118,7 @@ export interface CoreOperationInfo { currentVersion: string; locale: string; wor
 export interface CoreOperationResult { run: MaintenanceRun; scan?: ScanResult; updatesAfter: UpdateItem[]; currentVersion: string }
 export interface ScanResult { id: string; siteId: string; startedAt: string; finishedAt: string; status: SiteStatus; checks: ScanCheck[]; truncated: boolean }
 export type ScanJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
-export interface ScanJobStep { key: string; label: string; status: StepStatus; startedAt?: string; durationMs?: number; detail?: string }
+export interface ScanJobStep { key: string; label: string; status: StepStatus; startedAt?: string; durationMs?: number | null; detail?: string }
 export interface ScanJobState { id: string; jobType: string; siteId: string; siteName: string; status: ScanJobStatus; createdAt: string; startedAt?: string; finishedAt?: string; currentStep?: string; completedSteps: number; totalSteps: number; cancellationRequested: boolean; resultScanId?: string; error?: TechnicalError; steps: ScanJobStep[] }
 export interface BulkScanStart { jobs: ScanJobState[] }
 export interface UpdateItem { kind: "core" | "plugin" | "theme" | "language"; slug: string; name: string; currentVersion: string; newVersion: string; status: string }
