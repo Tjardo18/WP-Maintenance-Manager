@@ -2,12 +2,18 @@
 import { computed } from "vue";
 import { Trash2, X } from "@lucide/vue";
 import type { FilePreview } from "../types";
+import { highlightPreviewContent, previewSyntax } from "../services/fileSyntax";
 import { formatDate } from "../utils/format";
 
 const props = defineProps<{ preview: FilePreview }>();
 defineEmits<{ close: []; delete: [] }>();
 
 const canDelete = computed(() => props.preview.finding.checksumStatus === "unexpected");
+const syntax = computed(() => previewSyntax(props.preview.fileName, props.preview.extension));
+const highlightedContent = computed(() => {
+  if (!syntax.value || props.preview.textContent === undefined) return undefined;
+  return highlightPreviewContent(props.preview.textContent, syntax.value);
+});
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -34,7 +40,7 @@ function checksumLabel(status?: string) {
       </dl>
       <p v-if="preview.truncated" class="preview-warning">De preview is afgekapt op 256 KB.</p>
       <p v-if="preview.binary" class="preview-warning">Dit bestand kan niet veilig als tekst worden weergegeven.</p>
-      <pre v-else class="file-preview">{{ preview.textContent }}</pre>
+      <pre v-else class="file-preview"><!-- highlight.js escapes the untrusted source before returning markup. --><code v-if="syntax" class="hljs" :data-syntax="syntax" v-html="highlightedContent"></code><code v-else data-syntax="plain">{{ preview.textContent }}</code></pre>
       <div class="modal-actions"><button class="button secondary" @click="$emit('close')">Sluiten</button><button v-if="canDelete" class="button danger" @click="$emit('delete')"><Trash2 :size="14" /> Bestand verwijderen</button></div>
     </section>
   </div>

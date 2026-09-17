@@ -15,7 +15,7 @@ describe("ChecksumFilePreview", () => {
     });
     expect(wrapper.find("pre").text()).toBe(dangerous);
     expect(wrapper.find("script").exists()).toBe(false);
-    expect(wrapper.html()).toContain("&lt;script&gt;");
+    expect(wrapper.get(".file-preview code").html()).toContain("&lt;");
   });
 
   it("does not render binary bytes as text", () => {
@@ -58,5 +58,38 @@ describe("ChecksumFilePreview", () => {
 
     expect(wrapper.text()).toContain("Hoort niet aanwezig te zijn");
     expect(wrapper.text()).toContain("Bestand verwijderen");
+  });
+
+  it("highlights supported code without rendering Markdown", () => {
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "README.md" },
+          fileName: "README.md", relativePath: "README.md", sizeBytes: 24, fileType: "md-bestand", extension: "md", textContent: "# Heading\n\n**bold**", binary: false, truncated: false,
+        },
+      },
+    });
+
+    expect(wrapper.get(".file-preview code").attributes("data-syntax")).toBe("md");
+    expect(wrapper.find(".hljs-section").exists()).toBe(true);
+    expect(wrapper.find("h1").exists()).toBe(false);
+    expect(wrapper.get(".file-preview").text()).toBe("# Heading\n\n**bold**");
+  });
+
+  it("keeps unsupported text files as plain white text", () => {
+    const content = "<script>not executable</script>\nplain text";
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "notes.txt" },
+          fileName: "notes.txt", relativePath: "notes.txt", sizeBytes: content.length, fileType: "txt-bestand", extension: "txt", textContent: content, binary: false, truncated: false,
+        },
+      },
+    });
+
+    expect(wrapper.get(".file-preview code").attributes("data-syntax")).toBe("plain");
+    expect(wrapper.find(".file-preview .hljs").exists()).toBe(false);
+    expect(wrapper.find("script").exists()).toBe(false);
+    expect(wrapper.get(".file-preview").text()).toBe(content);
   });
 });
