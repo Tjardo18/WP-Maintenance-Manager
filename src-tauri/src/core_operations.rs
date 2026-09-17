@@ -17,6 +17,104 @@ use uuid::Uuid;
 
 const MIN_DISK_MB: u64 = 100;
 
+#[derive(Debug, PartialEq, Eq)]
+struct DiskSpaceCheck {
+    available_kb: Option<u64>,
+    warning: Option<String>,
+}
+
+impl DiskSpaceCheck {
+    fn available(available_kb: u64) -> Self {
+        Self {
+            available_kb: Some(available_kb),
+            warning: None,
+        }
+    }
+
+    fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            available_kb: None,
+            warning: Some(format!(
+                "De vrije schijfruimte kon niet betrouwbaar worden bepaald: {}. De coreactie wordt hierdoor niet geblokkeerd; controleer de beschikbare ruimte zo nodig handmatig.",
+                reason.into()
+            )),
+        }
+    }
+}
+
+fn parse_disk_space(output: &str) -> DiskSpaceCheck {
+    for (prefix, divisor) in [("WPMM_PHP_BYTES:", 1024), ("WPMM_WP_BYTES:", 1024)] {
+        if let Some(value) = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(prefix))
+        {
+            return value
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .map(|bytes| DiskSpaceCheck::available(bytes / divisor))
+                .unwrap_or_else(|| {
+                    DiskSpaceCheck::unavailable(
+                        "de PHP-fallback gaf geen geldige numerieke waarde terug",
+                    )
+                });
+        }
+    }
+
+    if let Some(statuses) = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("WPMM_DISK_UNAVAILABLE:"))
+    {
+        let provider_status = |key: &str, label: &str| {
+            let status = statuses
+                .split(';')
+                .find_map(|item| item.trim().strip_prefix(&format!("{key}=")))
+                .unwrap_or("onbekend");
+            if status == "127" {
+                format!("{label} niet beschikbaar (exitstatus 127)")
+            } else {
+                format!("{label} mislukt (exitstatus {status})")
+            }
+        };
+        return DiskSpaceCheck::unavailable(format!(
+            "{}; {}; {}",
+            provider_status("df", "df"),
+            provider_status("php", "PHP"),
+            provider_status("wp", "WP-CLI-fallback")
+        ));
+    }
+
+    let Some(data_line) = output
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .last()
+    else {
+        return DiskSpaceCheck::unavailable(
+            "df gaf geen gegevensregel terug voor het opgegeven WordPress-pad",
+        );
+    };
+    let fields = data_line.split_whitespace().collect::<Vec<_>>();
+    let Some(available) = fields
+        .len()
+        .checked_sub(3)
+        .and_then(|index| fields.get(index))
+    else {
+        return DiskSpaceCheck::unavailable(
+            "de gegevensregel van df bevat geen kolom voor beschikbare ruimte",
+        );
+    };
+    available
+        .parse::<u64>()
+        .ok()
+        .map(DiskSpaceCheck::available)
+        .unwrap_or_else(|| {
+            DiskSpaceCheck::unavailable(
+                "de kolom voor beschikbare ruimte in de df-uitvoer is niet numeriek",
+            )
+        })
+}
+
 pub struct CoreOperationOutcome {
     pub run: MaintenanceRun,
     pub backup: Option<BackupResult>,
@@ -47,23 +145,22 @@ pub fn inspect(
         .trim()
         .to_owned();
     validate_wordpress_locale(&locale)?;
-    let available_kb =
-        engine::text_action(executor, stored, credential, RemoteAction::CheckDiskSpace)?
-            .trim()
-            .parse::<u64>()
-            .map_err(|error| {
-                AppError::ssh(
-                    "disk_space_parse_failed",
-                    "De vrije schijfruimte kon niet betrouwbaar worden bepaald.",
-                    error,
-                    false,
-                )
-            })?;
-    let disk_available_mb = available_kb / 1024;
-    if disk_available_mb < MIN_DISK_MB {
+    let disk_output =
+        engine::text_action(executor, stored, credential, RemoteAction::CheckDiskSpace)?;
+    let disk_space = parse_disk_space(&disk_output);
+    let disk_available_mb = disk_space
+        .available_kb
+        .map(|available_kb| available_kb / 1024);
+    if disk_available_mb.is_some_and(|available_mb| available_mb < MIN_DISK_MB) {
         return Err(AppError::validation(format!(
             "Er is minder dan {MIN_DISK_MB} MB vrije schijfruimte beschikbaar voor de coreactie."
         )));
+    }
+    if let Some(warning) = disk_space.warning.as_deref() {
+        eprintln!(
+            "site_id={} action=CheckDiskSpace status=unavailable detail={warning}",
+            stored.site.id
+        );
     }
     let updates = engine::check_updates(executor, stored, credential)?;
     let available_version = updates
@@ -79,6 +176,7 @@ pub fn inspect(
         wordpress_path: stored.site.wordpress_path.clone(),
         available_version,
         disk_available_mb,
+        disk_space_warning: disk_space.warning,
     })
 }
 
@@ -212,21 +310,30 @@ where
         "WordPress {} · locale {}",
         info.current_version, info.locale
     ));
+    let disk_summary = info.disk_available_mb.map_or_else(
+        || "vrije ruimte niet vastgesteld (niet blokkerend)".into(),
+        |available_mb| format!("{available_mb} MB vrij"),
+    );
+    let disk_warning = info
+        .disk_space_warning
+        .as_deref()
+        .map_or_else(String::new, |warning| format!(" Waarschuwing: {warning}"));
     set_step(
         &mut run,
         "preflight",
         StepStatus::Success,
         Some(format!(
-            "WordPress {}; locale {}; root {}; {} MB vrij{}.",
+            "WordPress {}; locale {}; root {}; {}{}.{}",
             info.current_version,
             info.locale,
             info.wordpress_path,
-            info.disk_available_mb,
+            disk_summary,
             info.available_version
                 .as_deref()
                 .map_or_else(String::new, |version| format!(
                     "; update {version} beschikbaar"
-                ))
+                )),
+            disk_warning
         )),
         &mut progress,
     )?;
@@ -675,6 +782,7 @@ mod tests {
         backup_fails: bool,
         mutation_fails: bool,
         checksum: String,
+        disk_output: String,
         update_available: bool,
         updated: Mutex<bool>,
     }
@@ -723,7 +831,7 @@ mod tests {
                 }
                 "GetWpCliVersion" => "WP-CLI 2.12.0".into(),
                 "GetCoreLocale" => "nl_NL".into(),
-                "CheckDiskSpace" => "1048576".into(),
+                "CheckDiskSpace" => self.disk_output.clone(),
                 "CheckCoreUpdates" => {
                     if self.update_available && !updated {
                         r#"[{"version":"6.9.0"}]"#.into()
@@ -807,6 +915,7 @@ mod tests {
             backup_fails,
             mutation_fails,
             checksum: "Success: WordPress installation verifies against checksums.".into(),
+            disk_output: "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 2097152 1048576 1048576 50% /srv/site\n".into(),
             update_available,
             updated: Mutex::new(false),
         }
@@ -819,6 +928,115 @@ mod tests {
             response_time_ms: 10,
             detail: "Homepage bereikbaar met HTTP 200.".into(),
         })
+    }
+
+    #[test]
+    fn parses_available_space_from_standard_df_output() {
+        let output = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 4194304 1048576 3145728 25% /srv/site\n";
+        assert_eq!(
+            parse_disk_space(output),
+            DiskSpaceCheck::available(3_145_728)
+        );
+    }
+
+    #[test]
+    fn parses_available_space_when_df_wraps_the_filesystem_name() {
+        let output = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/mapper/a-very-long-filesystem-name\n 4194304 1048576 3145728 25% /srv/site\n";
+        assert_eq!(
+            parse_disk_space(output),
+            DiskSpaceCheck::available(3_145_728)
+        );
+    }
+
+    #[test]
+    fn parses_available_space_from_php_fallback() {
+        assert_eq!(
+            parse_disk_space("WPMM_PHP_BYTES:3221225472\n"),
+            DiskSpaceCheck::available(3_145_728)
+        );
+        assert_eq!(
+            parse_disk_space("notice\nWPMM_WP_BYTES:3221225472\n"),
+            DiskSpaceCheck::available(3_145_728)
+        );
+    }
+
+    #[test]
+    fn recognizes_exit_127_as_an_unavailable_disk_provider() {
+        let result = parse_disk_space("WPMM_DISK_UNAVAILABLE:df=127;php=127;wp=66\n");
+        assert_eq!(result.available_kb, None);
+        let warning = result.warning.unwrap();
+        assert!(warning.contains("df niet beschikbaar (exitstatus 127)"));
+        assert!(warning.contains("PHP niet beschikbaar (exitstatus 127)"));
+        assert!(warning.contains("WP-CLI-fallback mislukt (exitstatus 66)"));
+        assert!(warning.contains("niet geblokkeerd"));
+    }
+
+    #[test]
+    fn malformed_disk_output_becomes_a_non_blocking_warning() {
+        let result =
+            parse_disk_space("Filesystem 1024-blocks Used Available Capacity Mounted on\n");
+        assert_eq!(result.available_kb, None);
+        assert!(result.warning.unwrap().contains("geen gegevensregel"));
+    }
+
+    #[test]
+    fn inspect_continues_when_all_disk_space_providers_are_unavailable() {
+        let mut executor = mock(false, false, false);
+        executor.disk_output = "WPMM_DISK_UNAVAILABLE:df=127;php=127;wp=66\n".into();
+        let info = inspect(&executor, &stored(), None).unwrap();
+        assert_eq!(info.disk_available_mb, None);
+        assert!(
+            info.disk_space_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("df niet beschikbaar (exitstatus 127)"))
+        );
+    }
+
+    #[test]
+    fn repair_continues_when_disk_space_cannot_be_measured() {
+        let mut executor = mock(false, false, false);
+        executor.disk_output = "WPMM_DISK_UNAVAILABLE:df=127;php=127;wp=66\n".into();
+        let stored = stored();
+        let root = std::env::temp_dir().join(format!("wpmm-core-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let result = execute_with_health(
+            &executor,
+            &stored,
+            None,
+            &root,
+            CoreOperationKind::Repair,
+            new_run(&stored, CoreOperationKind::Repair),
+            |_| Ok(()),
+            healthy,
+        )
+        .unwrap();
+        assert_eq!(result.run.status, StepStatus::Success);
+        assert!(
+            executor
+                .actions
+                .lock()
+                .unwrap()
+                .contains(&"RepairCore".into())
+        );
+        assert!(
+            result
+                .run
+                .steps
+                .iter()
+                .find(|step| step.key == "preflight")
+                .and_then(|step| step.detail.as_deref())
+                .is_some_and(|detail| detail.contains("niet blokkerend"))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn known_low_disk_space_still_blocks_the_core_action() {
+        let mut executor = mock(false, false, false);
+        executor.disk_output = "WPMM_PHP_BYTES:52428800\n".into();
+        let error = inspect(&executor, &stored(), None).unwrap_err();
+        assert_eq!(error.category, "validation");
+        assert!(error.user_message.contains("minder dan 100 MB"));
     }
 
     #[test]

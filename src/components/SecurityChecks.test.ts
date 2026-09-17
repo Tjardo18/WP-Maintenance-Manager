@@ -59,6 +59,30 @@ describe("SecurityChecks", () => {
     expect(wrapper.find("#security-check-modified_files .security-accordion-body").exists()).toBe(true);
   });
 
+  it("shows readable modified dates and the explanatory notice only once", () => {
+    const legacyDetail = "Gewijzigd op Unix-tijd 1789627074.9670225510 met permissiemodus 644. Een recente wijziging is niet automatisch kwaadaardig.";
+    const modifiedChecks: ScanCheck[] = [{
+      key: "modified_files",
+      label: "Gewijzigde bestanden",
+      status: "warning",
+      summary: "2 bestanden gewijzigd",
+      findings: [
+        { ...finding("wp-content/themes/demo/one.php", "themes"), detail: legacyDetail },
+        { ...finding("wp-content/themes/demo/two.php", "themes"), detail: legacyDetail },
+      ],
+    }];
+    const wrapper = mount(SecurityChecks, { props: { checks: modifiedChecks, finishedAt: "2026-09-17T08:40:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: false } });
+
+    expect(wrapper.findAll(".modified-files-context")).toHaveLength(1);
+    expect(wrapper.get(".modified-files-context").text()).toBe("Een recente wijziging betekent niet automatisch dat het bestand kwaadaardig is.");
+    expect(wrapper.text()).not.toContain("Unix-tijd");
+    expect(wrapper.text()).not.toContain("Een recente wijziging is niet automatisch kwaadaardig.");
+    expect(wrapper.findAll(".finding-copy p").map((paragraph) => paragraph.text())).toEqual([
+      "Gewijzigd op 17 september 2026 om 08:37 uur en heeft permissies 644.",
+      "Gewijzigd op 17 september 2026 om 08:37 uur en heeft permissies 644.",
+    ]);
+  });
+
   it("filters and paginates thousands of findings without creating a giant DOM", async () => {
     vi.useFakeTimers();
     const wrapper = render();

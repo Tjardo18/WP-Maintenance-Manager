@@ -11,7 +11,8 @@ use crate::{
         validate_software_identifier, validate_user_id,
     },
 };
-use chrono::{DateTime, Duration, NaiveDateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDateTime, SecondsFormat, Timelike, Utc};
+use chrono_tz::Europe::Amsterdam;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
@@ -293,6 +294,22 @@ pub fn parse_modified_files(output: &[u8], wordpress_path: &str) -> (Vec<Finding
             || lower == ".htaccess"
             || (category == "root" && lower.ends_with(".php"))
             || (category == "uploads" && lower.ends_with(".php"));
+        let modified_at = parse_find_unix_timestamp(record[1]);
+        let permission_mode = String::from_utf8_lossy(record[2]);
+        let permission_mode = permission_mode.trim();
+        let permission_mode = if (3..=4).contains(&permission_mode.len())
+            && permission_mode
+                .chars()
+                .all(|character| matches!(character, '0'..='7'))
+        {
+            permission_mode
+        } else {
+            "onbekend"
+        };
+        let modified_label = modified_at.as_ref().map_or_else(
+            || "een onbekend tijdstip".into(),
+            format_dutch_modified_timestamp,
+        );
         findings.push(Finding {
             id: None,
             category,
@@ -306,11 +323,7 @@ pub fn parse_modified_files(output: &[u8], wordpress_path: &str) -> (Vec<Finding
             } else {
                 "Recent gewijzigd bestand".into()
             },
-            detail: format!(
-                "Gewijzigd op Unix-tijd {} met permissiemodus {}. Een recente wijziging is niet automatisch kwaadaardig.",
-                String::from_utf8_lossy(record[1]),
-                String::from_utf8_lossy(record[2])
-            ),
+            detail: format!("Gewijzigd op {modified_label} en heeft permissies {permission_mode}."),
             path: Some(display),
             checksum_status: None,
             disposition: crate::models::FindingDisposition::Active,
@@ -319,10 +332,56 @@ pub fn parse_modified_files(output: &[u8], wordpress_path: &str) -> (Vec<Finding
             policy_reason: None,
             policy_target: None,
             vulnerability: None,
-            observed_at: None,
+            observed_at: modified_at
+                .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true)),
         });
     }
     (findings, truncated)
+}
+
+fn parse_find_unix_timestamp(value: &[u8]) -> Option<DateTime<Utc>> {
+    let value = std::str::from_utf8(value).ok()?.trim();
+    let (seconds, fraction) = value.split_once('.').unwrap_or((value, ""));
+    let seconds = seconds.parse::<i64>().ok()?;
+    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mut nanoseconds = fraction.chars().take(9).collect::<String>();
+    while nanoseconds.len() < 9 {
+        nanoseconds.push('0');
+    }
+    let nanoseconds = if nanoseconds.is_empty() {
+        0
+    } else {
+        nanoseconds.parse::<u32>().ok()?
+    };
+    DateTime::<Utc>::from_timestamp(seconds, nanoseconds)
+}
+
+fn format_dutch_modified_timestamp(timestamp: &DateTime<Utc>) -> String {
+    const MONTHS: [&str; 12] = [
+        "januari",
+        "februari",
+        "maart",
+        "april",
+        "mei",
+        "juni",
+        "juli",
+        "augustus",
+        "september",
+        "oktober",
+        "november",
+        "december",
+    ];
+    let local = timestamp.with_timezone(&Amsterdam);
+    format!(
+        "{} {} {} om {:02}:{:02} uur",
+        local.day(),
+        MONTHS[local.month0() as usize],
+        local.year(),
+        local.hour(),
+        local.minute()
+    )
 }
 
 pub fn parse_checksum_output(output: &str, observed_at: &str) -> Result<Vec<Finding>, AppError> {
@@ -1325,6 +1384,25 @@ mod tests {
             "/var/www",
         );
         assert_eq!(items[0].severity, FindingSeverity::Attention);
-        assert!(items[0].detail.contains("niet automatisch kwaadaardig"));
+        assert!(items[0].detail.contains("heeft permissies 644"));
+        assert!(!items[0].detail.contains("Unix-tijd"));
+        assert!(!items[0].detail.contains("kwaadaardig"));
+    }
+
+    #[test]
+    fn modified_file_timestamp_is_shown_in_dutch_amsterdam_time() {
+        let (items, _) = parse_modified_files(
+            b"/var/www/wp-content/example.php\x001789627074.9670225510\x00644\0",
+            "/var/www",
+        );
+
+        assert_eq!(
+            items[0].detail,
+            "Gewijzigd op 17 september 2026 om 08:37 uur en heeft permissies 644."
+        );
+        assert_eq!(
+            items[0].observed_at.as_deref(),
+            Some("2026-09-17T06:37:54.967022551Z")
+        );
     }
 }

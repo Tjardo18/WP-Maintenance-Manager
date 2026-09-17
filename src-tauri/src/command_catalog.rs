@@ -142,13 +142,23 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
             normal,
             16 * 1024,
         ),
-        RemoteAction::CheckDiskSpace => (
-            "CheckDiskSpace",
-            format!("df -Pk {path} | awk 'NR==2 {{print $4}}'"),
-            false,
-            normal,
-            16 * 1024,
-        ),
+        RemoteAction::CheckDiskSpace => {
+            let php_probe = shell_escape(
+                "if(!function_exists('disk_free_space')){exit(66);}$bytes=@disk_free_space($argv[1]);if($bytes===false||!is_finite($bytes)||$bytes<0){exit(66);}echo 'WPMM_PHP_BYTES:',sprintf('%.0f',floor($bytes)),PHP_EOL;",
+            );
+            let wp_probe = shell_escape(
+                "if(!function_exists('disk_free_space')){exit(66);}$bytes=@disk_free_space(ABSPATH);if($bytes===false||!is_finite($bytes)||$bytes<0){exit(66);}echo 'WPMM_WP_BYTES:',sprintf('%.0f',floor($bytes)),PHP_EOL;",
+            );
+            (
+                "CheckDiskSpace",
+                format!(
+                    "if command -v df >/dev/null 2>&1; then df_output=$(LC_ALL=C df -Pk {path} 2>&1); df_status=$?; if [ \"$df_status\" -eq 0 ] && [ -n \"$df_output\" ]; then printf '%s\\n' \"$df_output\"; exit 0; fi; [ \"$df_status\" -ne 0 ] || df_status=65; else df_status=127; fi; if command -v php >/dev/null 2>&1; then php_output=$(LC_ALL=C php -r {php_probe} -- {path} 2>&1); php_status=$?; if [ \"$php_status\" -eq 0 ] && [ -n \"$php_output\" ]; then printf '%s\\n' \"$php_output\"; exit 0; fi; [ \"$php_status\" -ne 0 ] || php_status=65; else php_status=127; fi; wp_output=$({wp} eval {wp_probe} 2>&1); wp_status=$?; if [ \"$wp_status\" -eq 0 ] && [ -n \"$wp_output\" ]; then printf '%s\\n' \"$wp_output\"; exit 0; fi; [ \"$wp_status\" -ne 0 ] || wp_status=65; printf 'WPMM_DISK_UNAVAILABLE:df=%s;php=%s;wp=%s\\n' \"$df_status\" \"$php_status\" \"$wp_status\"; exit 0"
+                ),
+                false,
+                normal,
+                16 * 1024,
+            )
+        }
         RemoteAction::VerifyCoreChecksums => (
             "VerifyCoreChecksums",
             format!(
@@ -550,6 +560,22 @@ mod tests {
     fn bounds_file_scan_days() {
         assert!(build("/var/www", RemoteAction::FindModifiedFiles { days: 0 }).is_err());
         assert!(build("/var/www", RemoteAction::FindModifiedFiles { days: 30 }).is_ok());
+    }
+
+    #[test]
+    fn disk_space_command_has_php_and_wp_cli_fallbacks() {
+        let command = build("/srv/example site", RemoteAction::CheckDiskSpace).unwrap();
+        assert!(command.command.contains("command -v df"));
+        assert!(command.command.contains("df -Pk '/srv/example site'"));
+        assert!(command.command.contains("command -v php"));
+        assert!(command.command.contains("disk_free_space"));
+        assert!(
+            command
+                .command
+                .contains("wp --no-color --path='/srv/example site' eval")
+        );
+        assert!(command.command.contains("WPMM_DISK_UNAVAILABLE"));
+        assert!(command.command.contains("df_status=127"));
     }
 
     #[test]

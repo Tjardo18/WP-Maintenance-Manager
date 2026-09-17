@@ -729,7 +729,8 @@ pub struct CoreOperationInfo {
     pub locale: String,
     pub wordpress_path: String,
     pub available_version: Option<String>,
-    pub disk_available_mb: u64,
+    pub disk_available_mb: Option<u64>,
+    pub disk_space_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -3,7 +3,7 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
 import { CheckCircle2, ChevronDown, CircleAlert, CircleX, Clock3, Eye, EyeOff, Info, LoaderCircle, MinusCircle, RefreshCw, Search, ShieldCheck, Trash2 } from "@lucide/vue";
 import type { Finding, ScanCheck, UpdateItem } from "../types";
 import { filterSecurityFindings, noteworthyFindingCount, paginateSecurityFindings, type SecurityCategory, type SecurityDisposition } from "../services/securityResults";
-import { formatDate } from "../utils/format";
+import { formatDate, formatModifiedFileDetail } from "../utils/format";
 import StatusBadge from "./StatusBadge.vue";
 
 const props = defineProps<{
@@ -207,6 +207,7 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
 
       <div v-if="isOpen(check.key)" :id="`security-panel-${check.key}`" class="security-accordion-body">
         <p class="security-check-description">{{ check.summary }}</p>
+        <p v-if="check.key === 'modified_files'" class="modified-files-context"><Info :size="14" /><span>Een recente wijziging betekent niet automatisch dat het bestand kwaadaardig is.</span></p>
         <details v-if="check.status === 'failed' && check.technicalDetails" class="scan-diagnostic"><summary>Technische details</summary><pre>{{ check.technicalDetails }}</pre></details>
 
         <div class="security-disposition-tabs" aria-label="Meldingstatus">
@@ -231,7 +232,7 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
             <label v-if="finding.checksumStatus === 'unexpected' && finding.id" class="finding-select"><input type="checkbox" :checked="selectedFindingIds.includes(finding.id)" :disabled="!isLatestScan" :aria-label="`${finding.path} selecteren`" @change="emit('toggleFinding', finding.id)" /></label>
             <div class="finding-copy">
               <template v-if="finding.vulnerability"><div class="vulnerability-finding-heading"><div><strong>{{ finding.vulnerability.softwareName }}</strong><code>{{ finding.vulnerability.softwareSlug }}</code></div><span :class="['vulnerability-rating', (finding.vulnerability.cvssRating ?? 'unknown').toLowerCase()]">{{ vulnerabilityRating(finding) }}<template v-if="finding.vulnerability.cvssScore !== undefined"> · {{ finding.vulnerability.cvssScore }}</template></span></div><p class="vulnerability-title">{{ finding.vulnerability.title }}</p><div class="vulnerability-meta"><span>Geïnstalleerd: <strong>{{ finding.vulnerability.installedVersion }}</strong></span><span v-if="finding.vulnerability.installedStatus === 'inactive'">Inactief</span><span v-if="finding.vulnerability.cve">{{ finding.vulnerability.cve }}</span><span>{{ finding.vulnerability.patchedVersions.length ? `Opgelost: ${finding.vulnerability.patchedVersions.join(', ')}` : finding.vulnerability.patched ? 'Oplossing gemeld' : 'Geen bekende patch beschikbaar' }}</span></div></template>
-              <template v-else><span v-if="finding.checksumStatus" :class="['checksum-status', finding.checksumStatus]">{{ checksumLabel(finding) }}</span><strong v-else>{{ finding.title }}</strong><p>{{ finding.detail }}</p><code v-if="finding.path">{{ finding.path }}</code></template>
+              <template v-else><span v-if="finding.checksumStatus" :class="['checksum-status', finding.checksumStatus]">{{ checksumLabel(finding) }}</span><strong v-else>{{ finding.title }}</strong><p>{{ check.key === 'modified_files' ? formatModifiedFileDetail(finding.detail) : finding.detail }}</p><code v-if="finding.path">{{ finding.path }}</code></template>
               <span v-if="dispositionLabel(finding)" :class="['finding-disposition', finding.disposition]">{{ dispositionLabel(finding) }}</span><small v-if="finding.policyReason" class="finding-policy-reason">{{ finding.policyReason }}</small>
             </div>
             <div v-if="finding.id" class="finding-actions">
