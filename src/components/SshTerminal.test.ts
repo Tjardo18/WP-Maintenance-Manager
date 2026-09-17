@@ -102,6 +102,26 @@ describe("SshTerminal", () => {
     expect(mockApi.closeTerminal).toHaveBeenCalledWith("terminal-1", "authorization-1");
   });
 
+  it("resets to the login screen when the remote shell exits", async () => {
+    globalThis.localStorage.setItem("wpmm:terminal-warning-v1", "acknowledged");
+    const wrapper = mount(SshTerminal, { props: { site }, global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    await wrapper.get('[data-testid="terminal-app-auth"] input').setValue("app-secret");
+    await wrapper.get('[data-testid="terminal-app-auth"]').trigger("submit");
+    await flushPromises();
+    await wrapper.get('[data-testid="terminal-ssh-auth"] input').setValue("ssh-secret");
+    await wrapper.get('[data-testid="terminal-ssh-auth"]').trigger("submit");
+    await flushPromises();
+
+    callbacks.status!({ sessionId: "terminal-1", status: "disconnected" });
+    await flushPromises();
+
+    expect(mockApi.closeTerminal).toHaveBeenCalledWith("terminal-1", "authorization-1");
+    expect(wrapper.find('[data-testid="terminal-xterm"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="terminal-app-auth"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("Terminal ontgrendelen");
+  });
+
   it("shows WP autocomplete only for a new line beginning with wp", async () => {
     globalThis.localStorage.setItem("wpmm:terminal-warning-v1", "acknowledged");
     const wrapper = mount(SshTerminal, { props: { site }, global: { stubs: { RouterLink: true } } });

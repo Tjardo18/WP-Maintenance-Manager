@@ -275,6 +275,10 @@ function flushTerminalOutput() {
 function handleStatus(payload: TerminalStatusEvent) {
   if (terminalSessionId.value ? payload.sessionId !== terminalSessionId.value : connectionStatus.value !== "connecting") return;
   if (payload.status === "connected") return;
+  if (payload.status === "disconnected") {
+    void closeAndReset();
+    return;
+  }
   const id = terminalSessionId.value;
   const authorization = terminalAuthorization.value;
   terminalSessionId.value = undefined;
