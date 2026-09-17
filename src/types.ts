@@ -124,7 +124,8 @@ export interface BulkScanStart { jobs: ScanJobState[] }
 export interface UpdateItem { kind: "core" | "plugin" | "theme" | "language"; slug: string; name: string; currentVersion: string; newVersion: string; status: string }
 export interface MaintenanceStep { key: string; label: string; status: StepStatus; detail?: string }
 export interface MaintenanceRun { id: string; siteId: string; siteName?: string; startedAt: string; finishedAt?: string; status: StepStatus; durationMs?: number; backupPath?: string; steps: MaintenanceStep[]; beforeVersions?: string; afterVersions?: string }
-export interface AppSettings { scanConcurrency: number }
+export type FilePreviewMode = "normal" | "fullscreen";
+export interface AppSettings { scanConcurrency: number; filePreviewMode: FilePreviewMode }
 export interface WordfenceIntegrationStatus { configured: boolean; connectionStatus: "not_tested" | "connected" | "failed"; feedStatus: "missing" | "current" | "stale" | "refreshing" | "failed"; lastSuccessfulUpdateAt?: string; nextAutomaticUpdateAt?: string; vulnerabilityCount: number; softwareRecordCount: number; refreshRunning: boolean; refreshPhase?: string; cooldownRemainingSeconds: number; lastError?: string }
 export interface VulnerabilityRefreshJobState { id: string; status: "queued" | "running" | "completed" | "failed"; phase?: "download" | "validate" | "process" | "database" | "complete"; createdAt: string; startedAt?: string; finishedAt?: string; downloadedBytes: number; vulnerabilityCount: number; softwareRecordCount: number; automatic: boolean; error?: TechnicalError }
 export interface AuthStatus { configured: boolean; authenticated: boolean; idleTimeoutMinutes: number; retryAfterSeconds: number }

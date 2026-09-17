@@ -1,6 +1,8 @@
-import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { enableAutoUnmount, mount } from "@vue/test-utils";
+import { afterEach, describe, expect, it } from "vitest";
 import ChecksumFilePreview from "./ChecksumFilePreview.vue";
+
+enableAutoUnmount(afterEach);
 
 describe("ChecksumFilePreview", () => {
   it("renders remote markup as escaped plain text", () => {
@@ -13,9 +15,9 @@ describe("ChecksumFilePreview", () => {
         },
       },
     });
-    expect(wrapper.find("pre").text()).toBe(dangerous);
+    expect(wrapper.get(".file-preview-code").text()).toBe(dangerous);
     expect(wrapper.find("script").exists()).toBe(false);
-    expect(wrapper.get(".file-preview code").html()).toContain("&lt;");
+    expect(wrapper.get(".file-preview-code code").html()).toContain("&lt;");
   });
 
   it("does not render binary bytes as text", () => {
@@ -70,10 +72,10 @@ describe("ChecksumFilePreview", () => {
       },
     });
 
-    expect(wrapper.get(".file-preview code").attributes("data-syntax")).toBe("md");
+    expect(wrapper.get(".file-preview-code code").attributes("data-syntax")).toBe("md");
     expect(wrapper.find(".hljs-section").exists()).toBe(true);
     expect(wrapper.find("h1").exists()).toBe(false);
-    expect(wrapper.get(".file-preview").text()).toBe("# Heading\n\n**bold**");
+    expect(wrapper.get(".file-preview-code").text()).toBe("# Heading\n\n**bold**");
   });
 
   it("keeps unsupported text files as plain white text", () => {
@@ -87,9 +89,90 @@ describe("ChecksumFilePreview", () => {
       },
     });
 
-    expect(wrapper.get(".file-preview code").attributes("data-syntax")).toBe("plain");
+    expect(wrapper.get(".file-preview-code code").attributes("data-syntax")).toBe("plain");
     expect(wrapper.find(".file-preview .hljs").exists()).toBe(false);
     expect(wrapper.find("script").exists()).toBe(false);
-    expect(wrapper.get(".file-preview").text()).toBe(content);
+    expect(wrapper.get(".file-preview-code").text()).toBe(content);
+  });
+
+  it("shows correctly sequenced line numbers for long files", () => {
+    const content = Array.from({ length: 125 }, (_, index) => `regel ${index + 1}`).join("\n");
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "large.log" },
+          fileName: "large.log", relativePath: "large.log", sizeBytes: content.length, fileType: "log-bestand", extension: "log", textContent: content, binary: false, truncated: false,
+        },
+      },
+    });
+
+    const numbers = wrapper.get(".file-preview-line-numbers").text().split("\n");
+    expect(numbers).toHaveLength(125);
+    expect(numbers[0]).toBe("1");
+    expect(numbers[124]).toBe("125");
+    expect(wrapper.get(".file-preview-code").text()).toBe(content);
+  });
+
+  it("toggles fullscreen without replacing the file or losing the scroll position", async () => {
+    const content = "<?php\necho 'test';";
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "test.php" },
+          fileName: "test.php", relativePath: "test.php", sizeBytes: content.length, fileType: "php-bestand", extension: "php", textContent: content, binary: false, truncated: false,
+        },
+      },
+    });
+    const scroller = wrapper.get(".file-preview").element as HTMLElement;
+    scroller.scrollTop = 80;
+    scroller.scrollLeft = 24;
+
+    expect(wrapper.get(".preview-modal").classes()).not.toContain("fullscreen");
+    await wrapper.get('button[aria-label="Fullscreen openen"]').trigger("click");
+    expect(wrapper.get(".preview-modal").classes()).toContain("fullscreen");
+    expect(scroller.scrollTop).toBe(80);
+    expect(scroller.scrollLeft).toBe(24);
+    expect(wrapper.get(".file-preview-code").text()).toBe(content);
+
+    await wrapper.get('button[aria-label="Fullscreen verlaten"]').trigger("click");
+    expect(wrapper.get(".preview-modal").classes()).not.toContain("fullscreen");
+    expect(wrapper.get(".file-preview-code").text()).toBe(content);
+    expect(window.document.body.style.overflow).toBe("hidden");
+    expect(window.document.documentElement.style.overflow).toBe("hidden");
+    wrapper.unmount();
+    expect(window.document.body.style.overflow).toBe("");
+    expect(window.document.documentElement.style.overflow).toBe("");
+  });
+
+  it("opens immediately in fullscreen when that is the saved default", () => {
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        defaultFullscreen: true,
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "test.js" },
+          fileName: "test.js", relativePath: "test.js", sizeBytes: 12, fileType: "js-bestand", extension: "js", textContent: "const x = 1;", binary: false, truncated: false,
+        },
+      },
+    });
+
+    expect(wrapper.get(".preview-modal").classes()).toContain("fullscreen");
+    expect(wrapper.get('button[aria-label="Fullscreen verlaten"]').attributes("title")).toBe("Fullscreen verlaten");
+  });
+
+  it.each([{ label: "normal", defaultFullscreen: false }, { label: "fullscreen", defaultFullscreen: true }])("closes a $label preview with Escape", async ({ defaultFullscreen }) => {
+    const wrapper = mount(ChecksumFilePreview, {
+      props: {
+        defaultFullscreen,
+        preview: {
+          finding: { id: "finding", category: "recent", severity: "info", title: "Gewijzigd", detail: "Recent gewijzigd", path: "test.php" },
+          fileName: "test.php", relativePath: "test.php", sizeBytes: 16, fileType: "php-bestand", extension: "php", textContent: "<?php echo 1;", binary: false, truncated: false,
+        },
+      },
+    });
+
+    window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.emitted("close")).toHaveLength(1);
   });
 });

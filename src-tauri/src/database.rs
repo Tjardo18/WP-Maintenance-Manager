@@ -1,12 +1,13 @@
 use crate::{
     error::AppError,
     models::{
-        AffectedVersionRange, AuditEvent, AuthConfig, AuthMethod, ChecksumFindingRecord,
-        ChecksumStatus, ErrorCategory, ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity,
-        ExceptionScope, Finding, FindingContext, FindingDisposition, FindingException,
-        FindingSeverity, InstalledSoftware, MaintenanceRun, MaintenanceStep, ScanCheck, ScanResult,
-        Site, SiteInput, SiteStatus, SiteVulnerabilitySummary, StepStatus, StoredSite, TrustedFile,
-        TrustedFileStatus, UpdateItem, UpdateKind, VulnerabilityCandidate, VulnerabilityFeedState,
+        AffectedVersionRange, AppSettings, AuditEvent, AuthConfig, AuthMethod,
+        ChecksumFindingRecord, ChecksumStatus, ErrorCategory, ErrorLogFilter, ErrorLogPage,
+        ErrorLogRecord, ErrorSeverity, ExceptionScope, FilePreviewMode, Finding, FindingContext,
+        FindingDisposition, FindingException, FindingSeverity, InstalledSoftware, MaintenanceRun,
+        MaintenanceStep, ScanCheck, ScanResult, Site, SiteInput, SiteStatus,
+        SiteVulnerabilitySummary, StepStatus, StoredSite, TrustedFile, TrustedFileStatus,
+        UpdateItem, UpdateKind, VulnerabilityCandidate, VulnerabilityFeedState,
         VulnerabilityImportSummary, VulnerabilityMatch,
     },
     snapshot_repository::persist_snapshot_in_transaction,
@@ -263,6 +264,21 @@ impl Database {
             transaction.execute_batch(include_str!("../migrations/0015_wp_cli_version.sql"))?;
             transaction.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(15, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
+        let file_preview_settings_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 16)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !file_preview_settings_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(include_str!("../migrations/0016_file_preview_settings.sql"))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(16, ?1)",
                 [utc_now()],
             )?;
             transaction.commit()?;
@@ -1203,12 +1219,31 @@ impl Database {
             .map_err(AppError::storage)
     }
 
-    pub fn set_scan_concurrency(&self, value: usize) -> Result<(), AppError> {
+    pub fn file_preview_mode(&self) -> Result<FilePreviewMode, AppError> {
         let connection = self.connect()?;
-        connection.execute(
-            "INSERT INTO app_settings(key,value,updated_at) VALUES('scan_concurrency',?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
-            params![value.to_string(), utc_now()],
+        let value: String = connection.query_row(
+            "SELECT value FROM app_settings WHERE key='file_preview_mode'",
+            [],
+            |row| row.get(0),
         )?;
+        FilePreviewMode::from_db(&value).ok_or_else(|| {
+            AppError::storage(format!("Ongeldige bestandenpreview-instelling: {value}"))
+        })
+    }
+
+    pub fn save_settings(&self, settings: &AppSettings) -> Result<(), AppError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let updated_at = utc_now();
+        transaction.execute(
+            "INSERT INTO app_settings(key,value,updated_at) VALUES('scan_concurrency',?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            params![settings.scan_concurrency.to_string(), &updated_at],
+        )?;
+        transaction.execute(
+            "INSERT INTO app_settings(key,value,updated_at) VALUES('file_preview_mode',?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            params![settings.file_preview_mode.as_db(), &updated_at],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -2036,6 +2071,37 @@ mod tests {
         format!(
             r#"{{"{vulnerability_id}":{{"id":"{vulnerability_id}","title":"Fixture vulnerability","software":[{software_json}],"informational":false,"description":"Stored XSS fixture","references":["https://www.wordfence.com/threat-intel/vulnerabilities/example"],"cwe":{{"id":79,"name":"XSS","description":"Fixture"}},"cvss":{{"vector":"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N","score":6.1,"rating":"Medium"}},"cve":"CVE-2026-1234","cve_link":"https://www.cve.org/CVERecord?id=CVE-2026-1234","researchers":["Researcher"],"published":"2026-09-01 10:00:00","updated":"2026-09-02 11:00:00","copyrights":{{"message":"Copyright applies","mitre":{{"notice":"MITRE notice","license":"License text","license_url":"https://www.cve.org/Legal/TermsOfUse"}}}}}}}}"#
         )
+    }
+
+    #[test]
+    fn file_preview_mode_defaults_and_persists_across_restarts() {
+        let path = std::env::temp_dir().join(format!(
+            "wpmm-file-preview-settings-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let database = Database::initialize(path.clone()).unwrap();
+        assert_eq!(database.scan_concurrency().unwrap(), 4);
+        assert_eq!(
+            database.file_preview_mode().unwrap(),
+            FilePreviewMode::Normal
+        );
+
+        database
+            .save_settings(&AppSettings {
+                scan_concurrency: 2,
+                file_preview_mode: FilePreviewMode::Fullscreen,
+            })
+            .unwrap();
+        drop(database);
+
+        let reopened = Database::initialize(path.clone()).unwrap();
+        assert_eq!(reopened.scan_concurrency().unwrap(), 2);
+        assert_eq!(
+            reopened.file_preview_mode().unwrap(),
+            FilePreviewMode::Fullscreen
+        );
+        drop(reopened);
+        let _ = fs::remove_file(path);
     }
 
     #[test]

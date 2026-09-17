@@ -10,6 +10,7 @@ let sessionToken: string | undefined;
 let browserConfigured = false;
 let browserPasswordHash = "";
 let browserIdleMinutes = 15;
+let browserSettings: AppSettings = { scanConcurrency: 4, filePreviewMode: "normal" };
 const browserTerminalChallenges = new Map<string, { siteId: string; expiresAt: number }>();
 const browserScanJobs = new Map<string, ScanJobState>();
 const browserScanJobListeners = new Set<(job: ScanJobState) => void>();
@@ -304,8 +305,8 @@ export const appApi = {
   async runMaintenance(siteId: string): Promise<MaintenanceRun> { return isTauri() ? call("run_maintenance", { siteId }) : { ...structuredClone(demoHistory[0]), id: crypto.randomUUID(), siteId }; },
   async listHistory(siteId?: string): Promise<MaintenanceRun[]> { return isTauri() ? call("list_maintenance_runs", { siteId: siteId ?? null }) : structuredClone(demoHistory.filter((run) => !siteId || run.siteId === siteId)); },
   async onMaintenanceProgress(handler: (payload: { siteId: string; runId: string; step: MaintenanceStep }) => void): Promise<UnlistenFn> { if (!isTauri()) return () => undefined; return listen("maintenance-progress", (event) => handler(event.payload as { siteId: string; runId: string; step: MaintenanceStep })); },
-  async getSettings(): Promise<AppSettings> { return isTauri() ? call("get_settings") : { scanConcurrency: 4 }; },
-  async saveSettings(settings: AppSettings): Promise<AppSettings> { return isTauri() ? call("save_settings", { settings }) : settings; },
+  async getSettings(): Promise<AppSettings> { return isTauri() ? call("get_settings") : structuredClone(browserSettings); },
+  async saveSettings(settings: AppSettings): Promise<AppSettings> { if (isTauri()) return call("save_settings", { settings }); browserSettings = structuredClone(settings); return structuredClone(browserSettings); },
   async getWordfenceStatus(): Promise<WordfenceIntegrationStatus> { return isTauri() ? call("get_wordfence_status") : { configured: browserWordfenceConfigured, connectionStatus: "not_tested", feedStatus: "missing", vulnerabilityCount: 0, softwareRecordCount: 0, refreshRunning: false, cooldownRemainingSeconds: 0 }; },
   async saveWordfenceApiKey(apiKey: string): Promise<WordfenceIntegrationStatus> { if (isTauri()) return call("save_wordfence_api_key", { apiKey }); browserWordfenceConfigured = Boolean(apiKey.trim()); return appApi.getWordfenceStatus(); },
   async removeWordfenceApiKey(): Promise<WordfenceIntegrationStatus> { if (isTauri()) return call("remove_wordfence_api_key"); browserWordfenceConfigured = false; return appApi.getWordfenceStatus(); },

@@ -896,6 +896,31 @@ pub struct BulkScanStart {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub scan_concurrency: usize,
+    pub file_preview_mode: FilePreviewMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilePreviewMode {
+    Normal,
+    Fullscreen,
+}
+
+impl FilePreviewMode {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Fullscreen => "fullscreen",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "normal" => Some(Self::Normal),
+            "fullscreen" => Some(Self::Fullscreen),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

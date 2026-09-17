@@ -8,9 +8,11 @@ import json from "highlight.js/lib/languages/json";
 import markdown from "highlight.js/lib/languages/markdown";
 import php from "highlight.js/lib/languages/php";
 import phpTemplate from "highlight.js/lib/languages/php-template";
+import scss from "highlight.js/lib/languages/scss";
+import twig from "highlight.js/lib/languages/twig";
 import xml from "highlight.js/lib/languages/xml";
 
-export type PreviewSyntax = "log" | "html" | "css" | "js" | "php" | "htaccess" | "json" | "md";
+export type PreviewSyntax = "log" | "html" | "css" | "js" | "php" | "htaccess" | "json" | "md" | "twig" | "scss" | "xml";
 
 const highlighterLanguages: Record<PreviewSyntax, string> = {
   log: "accesslog",
@@ -21,6 +23,9 @@ const highlighterLanguages: Record<PreviewSyntax, string> = {
   htaccess: "apache",
   json: "json",
   md: "markdown",
+  twig: "twig",
+  scss: "scss",
+  xml: "xml",
 };
 
 hljs.registerLanguage("accesslog", accesslog);
@@ -30,6 +35,7 @@ hljs.registerLanguage("javascript", javascript);
 hljs.registerLanguage("json", json);
 hljs.registerLanguage("markdown", markdown);
 hljs.registerLanguage("php", php);
+hljs.registerLanguage("scss", scss);
 const xmlWithEmbeddedJson: LanguageFn = (api) => {
   const language = xml(api);
   language.contains?.unshift({
@@ -46,6 +52,7 @@ const xmlWithEmbeddedJson: LanguageFn = (api) => {
 };
 hljs.registerLanguage("xml", xmlWithEmbeddedJson);
 hljs.registerLanguage("php-template", phpTemplate);
+hljs.registerLanguage("twig", twig);
 
 export function previewSyntax(fileName: string, extension?: string): PreviewSyntax | undefined {
   if (fileName.toLowerCase() === ".htaccess") return "htaccess";

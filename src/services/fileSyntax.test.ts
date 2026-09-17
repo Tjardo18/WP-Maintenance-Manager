@@ -11,13 +11,16 @@ describe("file preview syntax", () => {
     [".htaccess", undefined, "htaccess"],
     ["data.json", "json", "json"],
     ["README.md", "md", "md"],
+    ["template.twig", "twig", "twig"],
+    ["theme.scss", "scss", "scss"],
+    ["sitemap.xml", "xml", "xml"],
   ])("selects highlighting for %s", (fileName, extension, expected) => {
     expect(previewSyntax(fileName, extension)).toBe(expected);
   });
 
   it("leaves text and unsupported extensions unhighlighted", () => {
     expect(previewSyntax("notes.txt", "txt")).toBeUndefined();
-    expect(previewSyntax("archive.xml", "xml")).toBeUndefined();
+    expect(previewSyntax("archive.yaml", "yaml")).toBeUndefined();
     expect(previewSyntax("no-extension", undefined)).toBeUndefined();
   });
 
@@ -36,6 +39,9 @@ describe("file preview syntax", () => {
     ["php", "<?php function demo() { return true; }", "hljs-meta"],
     ["json", '{"enabled": true}', "hljs-attr"],
     ["htaccess", "RewriteEngine On\nRewriteRule ^old$ /new [R=301,L]", "hljs-attribute"],
+    ["twig", "<h1>{{ title|escape }}</h1>", "hljs-template-variable"],
+    ["scss", "$color: #fff;\n.card { color: $color; }", "hljs-variable"],
+    ["xml", "<entry id=\"42\"><title>Voorbeeld</title></entry>", "hljs-tag"],
   ])("adds %s token markup", (syntax, source, expectedClass) => {
     expect(highlightPreviewContent(source, syntax)).toContain(expectedClass);
   });

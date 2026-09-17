@@ -2435,6 +2435,7 @@ pub fn get_settings(
     require_auth(&state, &session_token)?;
     Ok(AppSettings {
         scan_concurrency: state.scan_concurrency.load(Ordering::SeqCst),
+        file_preview_mode: state.database.file_preview_mode()?,
     })
 }
 
@@ -2450,9 +2451,7 @@ pub fn save_settings(
             "Gelijktijdige scans moeten tussen 1 en 5 liggen.",
         ));
     }
-    state
-        .database
-        .set_scan_concurrency(settings.scan_concurrency)?;
+    state.database.save_settings(&settings)?;
     state
         .scan_concurrency
         .store(settings.scan_concurrency, Ordering::SeqCst);
