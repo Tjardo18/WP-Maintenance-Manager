@@ -45,6 +45,8 @@ Alle remote uitvoering loopt via Rust. Voorgedefinieerde beheeracties gebruiken 
 
 Commands draaien met `LC_ALL=C` voor stabiele parsing. Stderr en exitstatus blijven gescheiden. Niet-nul exitcodes worden typed failures; onleesbare, ongeldige of te grote output faalt gesloten. `CheckDiskSpace` vormt één bewuste uitzondering: providerstatussen worden intern verzameld zodat ontbrekende `df`/PHP-tools als expliciete niet-blokkerende unavailable-status kunnen terugkomen. SSH-/kanaalfouten blijven wel hard falen. Time-outs sluiten het kanaal en iedere SSH-sessie wordt altijd opgeruimd.
 
+`CreateDatabaseBackup` exporteert ongecomprimeerde SQL naar de servertempdir; de app downloadt dit pad daarna via SFTP en schrijft lokaal direct gzipgecomprimeerd. `DeleteTemporaryBackup` kan uitsluitend het gevalideerde tijdelijke patroon verwijderen. De onderhoudsmutatie start pas wanneer overdracht én cleanup slagen. Er is geen omgekeerde upload/importactie in de catalogus en dus geen beheerde restoreflow. Zie [BACKUPS.md](BACKUPS.md) voor opslag, retentie en handmatig herstel.
+
 ## Gecontroleerde WP-CLI-executor
 
 `execute_wp_cli_command` blijft een afzonderlijk gecontroleerd WP-CLI-endpoint en is geen shell. De frontend stuurt uitsluitend een geldige app-sessietoken, `site_id`, commandtekst en eventuele bevestiging. Host, SSH-configuratie, credentials en WordPress-root zijn niet overschrijfbaar vanuit deze payload. Dit endpoint is architectonisch gescheiden van de interactieve Terminal.

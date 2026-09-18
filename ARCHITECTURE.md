@@ -36,6 +36,12 @@ De bestandspreview ontvangt uitsluitend een backend-opgebouwd `FilePreview` voor
 
 De Rust-backend is opgesplitst in domeinmodellen, SQLite-repositories, runtime-authenticatie, credentialopslag, SSH-adapter, managed commandcatalogus, interactieve terminalmanager, centrale error-logservice, checksum-bestandsservice, userservice, scan-/update-engine en maintenance-/core-orchestratie. De normale SSH-executor is een trait zodat managed flows mocks kunnen gebruiken.
 
+### Databaseback-ups
+
+Onderhoud, core-update en core-reparatie gebruiken dezelfde `create_database_backup`-service. De catalogus maakt met `wp db export` een backend-benoemd `/tmp/wpmm-XXXXXXXX.sql`-bestand buiten de documentroot. De SSH-adapter streamt maximaal 20 GiB brondata via SFTP naar een lokale gzipencoder onder `<app-data>/backups/<site-id>/<UTC>-<uuid>.sql.gz`; de export wordt niet volledig in geheugen geladen. Daarna verwijdert een afzonderlijke streng gevalideerde catalogusactie de tijdelijke serverkopie. Download en cleanup moeten beide slagen voordat de mutatie doorgaat.
+
+Na succes worden absoluut lokaal pad, gecomprimeerde grootte en SHA-256 samen met de onderhoudsrun in `backup_records` opgeslagen. De bytes staan niet in SQLite. Er bestaat geen backuprepository voor listing, retentie, openen of restore: historie leest alleen het nieuwste geregistreerde pad per run, lokale bestanden worden niet automatisch verwijderd en siteverwijdering ruimt de fysieke map niet op. Zie [docs/BACKUPS.md](docs/BACKUPS.md) voor de gebruikersgerichte werkwijze.
+
 ## Wordfence Intelligence V3
 
 ```text
