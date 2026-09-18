@@ -47,8 +47,8 @@ export const demoHistory: MaintenanceRun[] = [{
 }];
 
 export const demoChanges: SiteChangeHistory = {
-  baselineSnapshot: { snapshotId: "snapshot-baseline", siteId: "demo-1", createdAt: isoAgo(27), scanRunId: "scan-baseline", maintenanceRunId: null, source: "baseline", schemaVersion: 1, status: "complete", wordpressRootIdentity: "sha256:demo", scanTimestamp: isoAgo(27), appVersion: "0.11.0-beta.1", isBaseline: true, previousSnapshotId: null },
-  latestSnapshot: { snapshotId: "snapshot-current", siteId: "demo-1", createdAt: isoAgo(3), scanRunId: "scan-demo", maintenanceRunId: null, source: "scan", schemaVersion: 1, status: "partial", wordpressRootIdentity: "sha256:demo", scanTimestamp: isoAgo(3), appVersion: "0.11.0-beta.1", isBaseline: false, previousSnapshotId: "snapshot-baseline" },
+  baselineSnapshot: { snapshotId: "snapshot-baseline", siteId: "demo-1", createdAt: isoAgo(27), scanRunId: "scan-baseline", maintenanceRunId: null, source: "baseline", schemaVersion: 1, status: "complete", wordpressRootIdentity: "sha256:demo", scanTimestamp: isoAgo(27), appVersion: "0.12.0-beta.1", isBaseline: true, previousSnapshotId: null },
+  latestSnapshot: { snapshotId: "snapshot-current", siteId: "demo-1", createdAt: isoAgo(3), scanRunId: "scan-demo", maintenanceRunId: null, source: "scan", schemaVersion: 1, status: "partial", wordpressRootIdentity: "sha256:demo", scanTimestamp: isoAgo(3), appVersion: "0.12.0-beta.1", isBaseline: false, previousSnapshotId: "snapshot-baseline" },
   comparison: {
     id: "diff-demo", siteId: "demo-1", fromSnapshotId: "snapshot-baseline", toSnapshotId: "snapshot-current", createdAt: isoAgo(3), schemaVersion: 1, origin: "scan", maintenanceRunId: null,
     sections: [

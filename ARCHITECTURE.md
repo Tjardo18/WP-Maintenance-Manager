@@ -30,6 +30,8 @@ De Terminal toont vóór iedere shell een lokale tweestaps-gate. Passwordvelden 
 
 De WP-CLI autocomplete-index wordt één keer uit de recursieve resource opgebouwd en vervolgens lokaal geraadpleegd. Alleen een eenvoudige nieuwe regel die met `wp` begint activeert suggesties en help. De JSON is nooit een uitvoerautorisatiebron.
 
+De bestandspreview ontvangt uitsluitend een backend-opgebouwd `FilePreview` voor een actuele toegestane finding. Tekst gebruikt een begrensde editorweergave met regelnummers en geregistreerde highlight.js-talen; PHP gebruikt de templategrammar zodat PHP, HTML, CSS, JavaScript en JSON binnen één bestand gescheiden blijven. Markdown-rendering schakelt raw HTML uit en opent alleen HTTP(S)-links via de gevalideerde backendopener. SVG-rendering verwijdert actieve/externe inhoud voordat een data-URL ontstaat. Binaire afbeeldingen krijgen geen kunstmatige syntax highlighting: Raw gebruikt een begrensde byte-inspector en Preview uitsluitend een allowlist van lokale image-MIME-types. Fullscreen en Markdownstandaard zijn lokale persistente app-instellingen.
+
 ## Backend
 
 De Rust-backend is opgesplitst in domeinmodellen, SQLite-repositories, runtime-authenticatie, credentialopslag, SSH-adapter, managed commandcatalogus, interactieve terminalmanager, centrale error-logservice, checksum-bestandsservice, userservice, scan-/update-engine en maintenance-/core-orchestratie. De normale SSH-executor is een trait zodat managed flows mocks kunnen gebruiken.
@@ -151,8 +153,8 @@ De reproduceerbare vóór/na-metingen, performancebudgetten en beperkingen staan
 - Ieder dynamisch pad, slug, ID, aantal dagen, versie en locale wordt vóór commandbouw gevalideerd.
 - De uiteindelijke remote commandstring wordt alleen in Rust gebouwd en heeft per actie een timeout en outputlimiet.
 - De afzonderlijke gecontroleerde WP-CLI argv-executor accepteert alleen `wp`, quote argumenten opnieuw en kent read-only/mutating/high-risk bevestigingsbeleid. Dit endpoint is niet de interactieve Terminal.
-- Checksum-preview/delete gebruikt SFTP zonder vrij pad-IPC. Root/doel worden gecanonicaliseerd; symlinks, niet-reguliere bestanden, configuratie en `wp-content` worden geweigerd.
-- Core repair/update en onderhoud stoppen vóór mutaties wanneer preflight of verplichte databasebackup faalt.
+- Bestandspreview en checksum-delete gebruiken SFTP zonder vrij pad-IPC. Preview is beperkt tot actuele `unexpected` core-, PHP-in-uploads- en modified-files-findings; delete blijft uitsluitend voor actuele `unexpected` corebestanden. Root/doel worden gecanonicaliseerd en symlinks en niet-reguliere bestanden worden geweigerd; delete weigert daarnaast configuratie en heel `wp-content`.
+- Core repair/update en onderhoud stoppen vóór mutaties wanneer een kritieke preflight of verplichte databasebackup faalt. Een betrouwbaar gemeten tekort aan schijfruimte is kritisch; wanneer `df`, PHP `disk_free_space()` en de WP-CLI-fallback allemaal niet beschikbaar zijn, blijft de preflight met een expliciete waarschuwing doorgaan.
 
 ### Interactive SSH Terminal
 
@@ -168,7 +170,7 @@ De reproduceerbare vóór/na-metingen, performancebudgetten en beperkingen staan
 
 De shell ontvangt direct een veilig gequote `cd -- <wordpress-root>`. De directory is vooraf met dezelfde SSH-session gecontroleerd; een ontbrekend pad resulteert in een fout, niet in een stille fallback. Alle volgende bytes — inclusief arbitrary Linux commands en shelloperators — gaan naar hetzelfde channel. Daarom blijft de working directory behouden.
 
-De manager genereert per verbinding een apart random TerminalAuthorization-token en bewaart daarvan alleen de hash, samen met de hash van de app-sessie en de site-id. Iedere input-, resize- en close-call moet terminal-id, app-sessie en TerminalAuthorization combineren. De manager houdt maximaal één actieve terminal per site in deze app-instantie. Sluiten, remote disconnect-cleanup, tab/site verlaten, site verwijderen, manual/idle lock, wachtwoordwijziging en procesafsluiting sluiten het kanaal en verwijderen het record. Oude terminal-id's of authorizations zijn niet herbruikbaar; opnieuw openen begint weer bij app-reauthenticatie.
+De manager genereert per verbinding een apart random TerminalAuthorization-token en bewaart daarvan alleen de hash, samen met de hash van de app-sessie en de site-id. Iedere input-, resize- en close-call moet terminal-id, app-sessie en TerminalAuthorization combineren. De manager houdt maximaal één actieve terminal per site in deze app-instantie. Sluiten, een normale remote EOF zoals `exit`, remote disconnect-cleanup, tab/site verlaten, site verwijderen, manual/idle lock, wachtwoordwijziging en procesafsluiting sluiten het kanaal en verwijderen het record. De frontend verwerkt zo'n remote afsluiting via hetzelfde sluit- en resetpad als de knop **Sluiten**. Oude terminal-id's of authorizations zijn niet herbruikbaar; opnieuw openen begint weer bij app-reauthenticatie.
 
 Het app-wachtwoord en SSH-wachtwoord komen in Rust direct in `zeroize::Zeroizing<String>`. Het SSH-wachtwoord wordt meteen na de authenticatiepoging overschreven. Geen van beide komt in database-, audit- of errorlogvelden. Door eigenschappen van IPC, JavaScript en het OS is dit best-effort memory hygiene en geen garantie tegen een debugger of volledig gecompromitteerd systeem.
 

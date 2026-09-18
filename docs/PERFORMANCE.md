@@ -44,6 +44,9 @@ slow hosting step without logging command output, paths or credentials.
 - IPC warning threshold in development: 1 MiB.
 - Security-result page sizes: 25, 50 or 100 rows; normal PHP inventory entries are
   summarized rather than sent to Vue.
+- Text and decompressed SVGZ previews are capped at 256 KiB. Supported raster
+  images are capped at 10 MiB; binary inspection bounds readable text, suspicious
+  matches and hex ranges so long files do not create an unbounded DOM.
 - Wordfence Production Feed refresh: at most once automatically per 24 hours and
   never from a normal site scan. The response streams to disk and is parsed with
   `BufReader`; only compact job progress crosses IPC.

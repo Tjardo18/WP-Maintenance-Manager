@@ -2909,7 +2909,7 @@ mod tests {
 
         connection
             .execute(
-                "INSERT INTO site_snapshots(id,site_id,created_at,scan_run_id,maintenance_run_id,source,schema_version,status,wordpress_root_identity,scan_timestamp,app_version,section_status_json,payload_encoding,payload,is_baseline,previous_snapshot_id) VALUES('baseline',?1,'2026-09-15T08:00:00Z',NULL,NULL,'baseline',1,'partial',NULL,'2026-09-15T08:00:00Z','0.11.0-beta.1','{}','json_utf8',X'7B7D',1,NULL)",
+                "INSERT INTO site_snapshots(id,site_id,created_at,scan_run_id,maintenance_run_id,source,schema_version,status,wordpress_root_identity,scan_timestamp,app_version,section_status_json,payload_encoding,payload,is_baseline,previous_snapshot_id) VALUES('baseline',?1,'2026-09-15T08:00:00Z',NULL,NULL,'baseline',1,'partial',NULL,'2026-09-15T08:00:00Z','0.12.0-beta.1','{}','json_utf8',X'7B7D',1,NULL)",
                 [&site.id],
             )
             .unwrap();

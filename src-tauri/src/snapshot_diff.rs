@@ -1074,7 +1074,7 @@ mod tests {
                 status: SnapshotStatus::Complete,
                 wordpress_root_identity: Some("sha256:root".into()),
                 scan_timestamp: format!("2026-09-15T0{}:00:00Z", if id == "a" { 8 } else { 9 }),
-                app_version: Some("0.11.0-beta.1".into()),
+                app_version: Some("0.12.0-beta.1".into()),
                 is_baseline: id == "a",
                 previous_snapshot_id: None,
             },
