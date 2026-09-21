@@ -8,6 +8,8 @@ Een lokale, Nederlandstalige Windows-desktopapp voor beheer en onderhoud van mee
 
 Websitecontroles en bulkscans draaien als begrensde achtergrondtaken. Cached pagina's en navigatie blijven daardoor tijdens een scan bruikbaar, terwijl echte stapvoortgang en annulering beschikbaar blijven.
 
+Op Windows claimt de ingebedde WebView geen hardwarematige mediatoetsen. Herkende Play/Pauze-, Volgende-, Vorige-, Stop- en volumetoetsen van fysieke toetsenborden en programmeerbare keypads worden bij WebView-focus bovendien als een begrensde Windows-mediaopdracht doorgestuurd. Daardoor blijven Spotify en andere mediaspelers bedienbaar wanneer WP Maintenance Manager focus heeft. De globale app-handler gebruikt een expliciete allowlist en reserveert daarnaast alleen de getoonde app-sneltoetsen.
+
 ## Geneste WordPress-installaties
 
 Bij het toevoegen van een website controleert de verbindingstest ook de directe mappen in de ingestelde WordPress-root. Voor iedere onverwachte map kiest de gebruiker expliciet **Subdomein**, **Subdirectory** of **Geen aparte website**. De app stelt voor gekoppelde installaties een bewerkbare naam en URL voor, bouwt het vaste directe child-pad op en neemt de SSH-verbinding plus gepinde serveridentiteit van de parent over. Iedere gekozen installatie wordt meteen op dezelfde manier gecontroleerd, zodat subdomeinen én subdirectories over meerdere niveaus in één toevoegflow kunnen worden verwerkt.

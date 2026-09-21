@@ -5,7 +5,8 @@ import { Activity, CircleAlert, Globe2, History, LayoutDashboard, ListChecks, Lo
 import { useSitesStore } from "./stores/sites";
 import { useAuthStore } from "./stores/auth";
 import { useScanJobsStore } from "./stores/scanJobs";
-import { appApi } from "./services/tauri";
+import { appApi, systemInputApi } from "./services/tauri";
+import { handleAppShortcut, handleMediaKey } from "./services/keyboardShortcuts";
 import AuthView from "./views/AuthView.vue";
 
 const route = useRoute();
@@ -14,20 +15,27 @@ const auth = useAuthStore();
 const scanJobs = useScanJobsStore();
 const pageTitle = computed(() => String(route.meta.title ?? "WP Maintenance Manager"));
 let unlistenWordfenceRefresh: (() => void) | undefined;
+const handleGlobalKeydown = (event: globalThis.KeyboardEvent) => {
+  if (event.isTrusted && systemInputApi.isAvailable() && handleMediaKey(event, (command) => {
+    void systemInputApi.forwardMediaKey(command).catch((error) => {
+      globalThis.console.warn("Media key could not be forwarded to Windows.", error);
+    });
+  })) return;
+  if (!auth.authenticated) return;
+  handleAppShortcut(event, () => { void auth.lock(); });
+};
 
 onMounted(() => {
   void auth.initialize();
   void appApi.onWordfenceFeedRefreshUpdated((job) => {
     if (job.status === "completed" && auth.authenticated) void sites.load();
   }).then((unlisten) => { unlistenWordfenceRefresh = unlisten; });
-  window.addEventListener("keydown", (event) => {
-    if (event.ctrlKey && event.key.toLowerCase() === "l" && auth.authenticated) {
-      event.preventDefault();
-      void auth.lock();
-    }
-  });
+  window.addEventListener("keydown", handleGlobalKeydown, true);
 });
-onUnmounted(() => unlistenWordfenceRefresh?.());
+onUnmounted(() => {
+  window.removeEventListener("keydown", handleGlobalKeydown, true);
+  unlistenWordfenceRefresh?.();
+});
 watch(() => auth.authenticated, (unlocked) => {
   if (unlocked) {
     void sites.load();

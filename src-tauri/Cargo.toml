@@ -41,3 +41,6 @@ thiserror = "2"
 url = "2"
 uuid = { version = "1.25", features = ["v4", "serde"] }
 zeroize = "1.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }

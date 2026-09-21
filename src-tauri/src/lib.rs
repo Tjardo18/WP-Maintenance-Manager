@@ -11,6 +11,7 @@ mod error;
 mod error_log;
 mod health;
 mod maintenance;
+mod media_keys;
 mod models;
 mod parsers;
 mod scan_jobs;
@@ -76,6 +77,7 @@ pub fn run() {
             commands::lock_app,
             commands::change_password,
             commands::set_idle_timeout,
+            media_keys::forward_media_key,
             commands::list_audit_events,
             commands::list_error_logs,
             commands::get_wp_cli_catalog,
@@ -141,4 +143,27 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn windows_webview_does_not_claim_hardware_media_keys() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let arguments = config["app"]["windows"][0]["additionalBrowserArgs"]
+            .as_str()
+            .unwrap();
+        let disabled_features = arguments
+            .split_whitespace()
+            .find_map(|argument| argument.strip_prefix("--disable-features="))
+            .unwrap()
+            .split(',')
+            .collect::<Vec<_>>();
+
+        assert!(disabled_features.contains(&"HardwareMediaKeyHandling"));
+        assert!(disabled_features.contains(&"msWebOOUI"));
+        assert!(disabled_features.contains(&"msPdfOOUI"));
+        assert!(disabled_features.contains(&"msSmartScreenProtection"));
+    }
 }

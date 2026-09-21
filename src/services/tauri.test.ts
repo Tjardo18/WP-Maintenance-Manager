@@ -4,7 +4,7 @@ const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
-import { appApi, authApi } from "./tauri";
+import { appApi, authApi, systemInputApi } from "./tauri";
 
 describe("Tauri authentication boundary", () => {
   beforeEach(() => {
@@ -47,6 +47,16 @@ describe("Tauri authentication boundary", () => {
     expect(invokeMock).toHaveBeenCalledWith("open_vulnerability_reference", {
       url: "https://example.test/path",
       sessionToken: "active-app-session",
+    });
+  });
+
+  it("forwards a media key without exposing or requiring the app session", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    await systemInputApi.forwardMediaKey("play-pause");
+
+    expect(invokeMock).toHaveBeenCalledWith("forward_media_key", {
+      command: "play-pause",
     });
   });
 });

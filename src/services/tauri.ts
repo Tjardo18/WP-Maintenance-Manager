@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteChangeSummary, SiteInput, SnapshotDiff, SnapshotHistoryItem, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { MediaKeyCommand } from "./keyboardShortcuts";
 import { demoChanges, demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -139,6 +140,13 @@ export const authApi = {
   async lock(): Promise<void> { try { if (isTauri() && sessionToken) await call("lock_app"); } finally { sessionToken = undefined; } },
   async changePassword(input: PasswordChangeInput): Promise<void> { if (isTauri()) await call("change_password", { input }); else { if (await demoHash(input.currentPassword) !== browserPasswordHash) throw { category: "invalid_password", userMessage: "Het huidige wachtwoord is niet correct.", retryable: false }; browserPasswordHash = await demoHash(input.newPassword); } sessionToken = undefined; },
   async setIdleTimeout(minutes: number): Promise<AuthStatus> { if (isTauri()) return call("set_idle_timeout", { minutes }); browserIdleMinutes = minutes; return { configured: true, authenticated: true, idleTimeoutMinutes: minutes, retryAfterSeconds: 0 }; },
+};
+
+export const systemInputApi = {
+  isAvailable: isTauri,
+  async forwardMediaKey(command: MediaKeyCommand): Promise<void> {
+    if (isTauri()) await publicCall("forward_media_key", { command });
+  },
 };
 
 export const appApi = {
