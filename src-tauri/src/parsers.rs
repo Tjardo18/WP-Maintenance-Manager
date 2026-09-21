@@ -530,6 +530,10 @@ fn checksum_finding(path: &str, message: &str, observed_at: &str) -> Result<Find
     })
 }
 
+pub fn unexpected_checksum_finding(path: &str, observed_at: &str) -> Result<Finding, AppError> {
+    checksum_finding(path, "File should not exist", observed_at)
+}
+
 #[cfg(test)]
 pub fn parse_users(output: &str) -> Result<Vec<Finding>, AppError> {
     Ok(user_findings(&parse_wordpress_users(output)?))

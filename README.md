@@ -8,6 +8,12 @@ Een lokale, Nederlandstalige Windows-desktopapp voor beheer en onderhoud van mee
 
 Websitecontroles en bulkscans draaien als begrensde achtergrondtaken. Cached pagina's en navigatie blijven daardoor tijdens een scan bruikbaar, terwijl echte stapvoortgang en annulering beschikbaar blijven.
 
+## Geneste WordPress-installaties
+
+Bij het toevoegen van een website controleert de verbindingstest ook de directe mappen in de ingestelde WordPress-root. Voor iedere onverwachte map kiest de gebruiker expliciet **Subdomein**, **Subdirectory** of **Geen aparte website**. De app stelt voor gekoppelde installaties een bewerkbare naam en URL voor, bouwt het vaste directe child-pad op en neemt de SSH-verbinding plus gepinde serveridentiteit van de parent over. Een gekozen subdomein wordt meteen op dezelfde manier gecontroleerd, zodat meerdere niveaus en meerdere installaties in één toevoegflow kunnen worden verwerkt.
+
+Parent-childrelaties worden in SQLite bewaard. De backend weigert cirkels, afwijkende SSH-identiteiten, een child-pad buiten de gekozen directe parentmap en dubbele installaties op basis van server/pad of URL. Bij een parentscan worden bevestigde childmappen al vóór de aanvullende rootcontrole uitgesloten, zodat die controle de child niet doorloopt of als parent-core behandelt. Een map met **Geen aparte website** blijft normaal in de scan zichtbaar; de child zelf wordt altijd vanuit zijn eigen opgeslagen WordPress-root gecontroleerd.
+
 ## Momentopnames en wijzigingen
 
 Na een volledige websitecontrole bewaart WP Maintenance Manager een genormaliseerde momentopname van de belangrijke WordPress-toestand. Daarin staan Core- en PHP-versie, plugins, thema's, gebruikers en rollen, een expliciet toegestane set veilige configuratiewaarden, semantische cronmetadata en alleen relevante bestandsmetadata. De eerste bruikbare controle wordt als baseline opgeslagen zonder alle bestaande onderdelen als nieuw te melden.
@@ -183,6 +189,7 @@ Geslaagde lokale back-ups hebben momenteel geen automatische bewaartermijn. Er i
 
 - First-run applicatiewachtwoord met Argon2id, één willekeurige geheugensessie, backend-autorisatie, login-rate-limiting, handmatige lock en instelbare idle lock (standaard 15 minuten).
 - Dashboard voor tientallen websites met status, zoeken en filters. Websitekaarten en detailpagina's tonen de automatisch uitgelezen WP-CLI-versie; de URL op de detailpagina opent via de gevalideerde OS-browseropener.
+- Toevoegflow voor meerdere geneste WordPress-installaties met handmatige subdomein-/subdirectorykeuze, recursieve subdomeincontrole, opgeslagen parentrelaties en automatische checksumuitsluiting bij de parent.
 - Genormaliseerde site-momentopnames met eerste baseline, centrale deterministische diff-engine, partial-sectieveiligheid, previous/baseline/datumvergelijking, compacte Dashboardstatus en momentopnamehistorie.
 - Website toevoegen/bewerken/verwijderen en veilige authenticatiekeuze.
 - Persistente SQLite-siteopslag met UUID's, UTC-timestamps en cascading historie-tabellen.
@@ -192,7 +199,7 @@ Geslaagde lokale back-ups hebben momenteel geen automatische bewaartermijn. Er i
 - Gecachete vulnerabilitytellingen op het Dashboard en lokale herberekening na een feedupdate zonder SSH; inventaris ouder dan zeven dagen wordt expliciet als mogelijk verouderd gemarkeerd.
 - SSH key/password-authenticatie met time-outs, SHA-256-host-key-pinning en een blokkerende mismatchmelding.
 - Centrale Rust-commandcatalogus met pad-, slug- en dagenvalidatie en begrensde remote output.
-- Securityscan met vanuit de WordPress-root uitgevoerde `--include-root`-corechecksums, getypeerde modified/missing/unexpected-resultaten, accounts, intelligente statische PHP-classificatie, PHP in uploads, recente bestanden, world-writable permissions, geselecteerde configuratie en databasecheck. Normale plugin-/theme-PHP blijft standaard verborgen; opvallende locatie-, naam- en inhoudscombinaties worden met redenen getoond.
+- Securityscan met officiële WP-CLI-corechecksums plus een afzonderlijke begrensde rootcontrole die bevestigde child-installaties vóór traversal overslaat, getypeerde modified/missing/unexpected-resultaten, accounts, intelligente statische PHP-classificatie, PHP in uploads, recente bestanden, world-writable permissions, geselecteerde configuratie en databasecheck. Normale plugin-/theme-PHP blijft standaard verborgen; opvallende locatie-, naam- en inhoudscombinaties worden met redenen getoond.
 - Centrale severity- en statuspolicy met site-specifieke exacte uitzonderingen, tijdelijke verloopdata en filters voor actief, genegeerd, vertrouwd en alles.
 - Hash-based vertrouwde bestanden via streaming SHA-256/SFTP, met hernieuwde waarschuwing bij gewijzigde inhoud, beheerbare status bij verwijdering en auditbare trustintrekking of -vernieuwing.
 - Alleen-lezen SFTP-preview van actuele `unexpected` corebestanden, PHP in uploads en recent gewijzigde bestanden, met editorweergave, fullscreen, syntax highlighting, veilige Markdown/SVG-rendering, afbeeldingspreview en binaire inspectie. Verwijdering blijft uitsluitend beschikbaar voor `unexpected` corebestanden en wordt gevolgd door één automatische nacontrole.

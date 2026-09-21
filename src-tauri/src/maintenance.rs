@@ -62,11 +62,35 @@ pub fn new_run(stored: &StoredSite) -> MaintenanceRun {
     }
 }
 
+#[cfg(test)]
 pub fn execute<F>(
     executor: &dyn SshExecutor,
     stored: &StoredSite,
     credential: Option<&str>,
     backup_root: &Path,
+    run: MaintenanceRun,
+    progress: F,
+) -> Result<MaintenanceOutcome, AppError>
+where
+    F: FnMut(&MaintenanceStep) -> Result<(), AppError>,
+{
+    execute_with_exclusions(
+        executor,
+        stored,
+        credential,
+        backup_root,
+        &[],
+        run,
+        progress,
+    )
+}
+
+pub fn execute_with_exclusions<F>(
+    executor: &dyn SshExecutor,
+    stored: &StoredSite,
+    credential: Option<&str>,
+    backup_root: &Path,
+    excluded_root_directories: &[String],
     mut run: MaintenanceRun,
     mut progress: F,
 ) -> Result<MaintenanceOutcome, AppError>
@@ -146,7 +170,13 @@ where
         None,
         &mut progress,
     )?;
-    match engine::scan_site(executor, stored, credential, 30) {
+    match engine::scan_site_with_exclusions(
+        executor,
+        stored,
+        credential,
+        30,
+        excluded_root_directories,
+    ) {
         Ok(scan) => {
             let status = match scan.result.status {
                 SiteStatus::Healthy | SiteStatus::Updates => StepStatus::Success,
@@ -297,7 +327,13 @@ where
         None,
         &mut progress,
     )?;
-    match engine::scan_site(executor, stored, credential, 30) {
+    match engine::scan_site_with_exclusions(
+        executor,
+        stored,
+        credential,
+        30,
+        excluded_root_directories,
+    ) {
         Ok(scan) => {
             let status = match scan.result.status {
                 SiteStatus::Healthy | SiteStatus::Updates => StepStatus::Success,
@@ -575,6 +611,9 @@ mod tests {
                 auth_method: AuthMethod::Password,
                 key_path: None,
                 wordpress_path: "/var/www".into(),
+                parent_site_id: None,
+                relation_type: None,
+                parent_directory: None,
                 pinned_host_key: Some("SHA256:test".into()),
                 status: SiteStatus::Unscanned,
                 wordpress_version: None,

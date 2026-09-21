@@ -189,7 +189,7 @@ export const appApi = {
   async testConnection(input: SiteInput): Promise<ConnectionTestResult> {
     if (isTauri()) return call("test_connection", { input });
     await new Promise((resolve) => setTimeout(resolve, 600));
-    return { success: true, requiresHostKeyAcceptance: false, fingerprint: "SHA256:demo-fingerprint", wordpressVersion: "6.8.2", phpVersion: "8.3.12", wpCliVersion: "2.12.0", detectedUrl: input.url, steps: ["SSH bereikbaar", "Host fingerprint gecontroleerd", "Authenticatie geslaagd", "WordPress-pad gevonden", "WP-CLI werkt", "WordPress-installatie gevonden", "Database bereikbaar"].map((label, index) => ({ key: String(index), label, status: "success" })) };
+    return { success: true, requiresHostKeyAcceptance: false, fingerprint: "SHA256:demo-fingerprint", wordpressVersion: "6.8.2", phpVersion: "8.3.12", wpCliVersion: "2.12.0", detectedUrl: input.url, unexpectedDirectories: [], unexpectedDirectoriesTruncated: false, steps: ["SSH bereikbaar", "Host fingerprint gecontroleerd", "Authenticatie geslaagd", "WordPress-pad gevonden", "WP-CLI werkt", "WordPress-installatie gevonden", "Database bereikbaar", "Onbekende hoofdmappen gecontroleerd"].map((label, index) => ({ key: String(index), label, status: "success" })) };
   },
   async acceptHostKey(siteId: string, fingerprint: string): Promise<void> { if (isTauri()) await call("accept_host_key", { siteId, fingerprint }); },
   async startSiteScan(siteId: string, modifiedDays = 30): Promise<ScanJobState> {

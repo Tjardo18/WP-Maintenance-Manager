@@ -1014,6 +1014,10 @@ mod tests {
                     key_path: Some("C:/keys/example".into()),
                     wordpress_path: "/var/www/public_html".into(),
                     credential_secret: None,
+                    pinned_host_key: None,
+                    parent_site_id: None,
+                    relation_type: None,
+                    parent_directory: None,
                 },
                 None,
             )

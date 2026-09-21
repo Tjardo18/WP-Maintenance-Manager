@@ -25,11 +25,11 @@ use crate::{
     state::AppState,
     terminal::{TerminalConnectRequest, TerminalConnectionInfo, TerminalOpenInput},
     terminal_auth::TerminalChallengeInfo,
-    validation::validate_site,
+    validation::{validate_direct_child_directory, validate_site},
     vulnerability_matcher, wordfence, wordpress_users, wp_cli, wp_cli_catalog,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fs,
@@ -663,6 +663,7 @@ pub fn save_site(
 ) -> Result<Site, AppError> {
     require_auth(&state, &session_token)?;
     validate_site(&input)?;
+    validate_site_identity_and_relationship(&state.database, &mut input)?;
     let is_new = input.id.is_none();
     let is_new_password =
         is_new && matches!(input.auth_method, crate::models::AuthMethod::Password);
@@ -674,6 +675,38 @@ pub fn save_site(
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     input.id = Some(provisional_id.clone());
+    let existing = if is_new {
+        None
+    } else {
+        Some(state.database.get_site(&provisional_id)?)
+    };
+    let endpoint_changed = existing.as_ref().is_some_and(|stored| {
+        !stored
+            .site
+            .ssh_host
+            .eq_ignore_ascii_case(input.ssh_host.trim())
+            || stored.site.ssh_port != input.ssh_port
+    });
+    if (is_new || endpoint_changed) && input.pinned_host_key.is_none() {
+        return Err(AppError::validation(
+            "Test eerst de SSH-verbinding en accepteer de serverfingerprint.",
+        ));
+    }
+    if let Some(expected) = input.pinned_host_key.as_deref()
+        && (is_new || endpoint_changed)
+    {
+        validate_host_fingerprint(expected)?;
+        let candidate = site_from_input(&input, existing.as_ref());
+        let actual = state.ssh.fingerprint(&candidate)?;
+        if actual != expected {
+            return Err(AppError::ssh(
+                "host_key_changed_before_save",
+                "De serveridentiteit veranderde vóór het opslaan. Test de verbinding opnieuw.",
+                format!("Verwacht {expected}; ontvangen {actual}"),
+                false,
+            ));
+        }
+    }
     let credential_ref = format!("site:{provisional_id}:ssh");
     let has_secret = input
         .credential_secret
@@ -727,17 +760,7 @@ pub fn accept_host_key(
     require_auth(&state, &session_token)?;
     uuid::Uuid::parse_str(&site_id)
         .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
-    if !fingerprint.starts_with("SHA256:")
-        || fingerprint.len() < 20
-        || fingerprint.len() > 100
-        || !fingerprint[7..]
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"+/=_-".contains(&byte))
-    {
-        return Err(AppError::validation(
-            "De SSH-fingerprint heeft een ongeldig formaat.",
-        ));
-    }
+    validate_host_fingerprint(&fingerprint)?;
     let stored = state.database.get_site(&site_id)?;
     let actual = state.ssh.fingerprint(&stored.site)?;
     if actual != fingerprint {
@@ -766,7 +789,13 @@ pub fn test_connection(
     };
     let mut site = site_from_input(&input, existing.as_ref());
     if existing.as_ref().is_some_and(|stored| {
-        stored.site.ssh_host != input.ssh_host || stored.site.ssh_port != input.ssh_port
+        let endpoint_changed = !stored
+            .site
+            .ssh_host
+            .eq_ignore_ascii_case(input.ssh_host.trim())
+            || stored.site.ssh_port != input.ssh_port;
+        let still_uses_previous_fingerprint = input.pinned_host_key == stored.site.pinned_host_key;
+        endpoint_changed && still_uses_previous_fingerprint
     }) {
         site.pinned_host_key = None;
     }
@@ -810,6 +839,8 @@ pub fn test_connection(
                 php_version: None,
                 wp_cli_version: None,
                 detected_url: None,
+                unexpected_directories: Vec::new(),
+                unexpected_directories_truncated: false,
                 error: None,
             });
         }
@@ -947,6 +978,55 @@ pub fn test_connection(
     )?
     .trim()
     .to_owned();
+    let directory_output = match run_readonly(
+        state.ssh.as_ref(),
+        &site,
+        credential.as_deref(),
+        build(
+            &site.wordpress_path,
+            RemoteAction::ListUnexpectedRootDirectories,
+        )?,
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            steps[7].status = StepStatus::Failed;
+            return Ok(failed_connection_with_log(
+                &state,
+                &site,
+                started,
+                steps,
+                Some(fingerprint),
+                error,
+            ));
+        }
+    };
+    let directories = match parse_unexpected_root_directories(&directory_output) {
+        Ok(directories) => directories,
+        Err(error) => {
+            steps[7].status = StepStatus::Failed;
+            return Ok(failed_connection_with_log(
+                &state,
+                &site,
+                started,
+                steps,
+                Some(fingerprint),
+                error,
+            ));
+        }
+    };
+    steps[7].status = if directories.truncated {
+        StepStatus::Warning
+    } else {
+        StepStatus::Success
+    };
+    steps[7].detail = Some(if directories.truncated {
+        "De eerste 200 onbekende hoofdmappen zijn geladen; de lijst is begrensd.".into()
+    } else {
+        format!(
+            "{} onbekende hoofdmappen gevonden.",
+            directories.directories.len()
+        )
+    });
     Ok(ConnectionTestResult {
         success: true,
         steps,
@@ -956,6 +1036,8 @@ pub fn test_connection(
         php_version: Some(php_version),
         wp_cli_version: Some(wp_cli_version),
         detected_url: Some(detected_url),
+        unexpected_directories: directories.directories,
+        unexpected_directories_truncated: directories.truncated,
         error: None,
     })
 }
@@ -1280,18 +1362,6 @@ impl engine::ScanProgress for JobScanProgress<'_> {
         duration_ms: u64,
         detail: Option<String>,
     ) {
-        if status == StepStatus::Failed {
-            let message = detail.as_deref().unwrap_or("De scanstap is mislukt.");
-            let _ = error_log::persist_error(
-                &self.state.database,
-                Some(self.site_id),
-                Some(self.site_name),
-                &format!("Scan · {key}"),
-                Some(duration_ms),
-                None,
-                AppError::ssh("scan_step_failed", message, key, true),
-            );
-        }
         if let Ok(job) =
             self.state
                 .scan_jobs
@@ -1299,6 +1369,27 @@ impl engine::ScanProgress for JobScanProgress<'_> {
         {
             emit_scan_job(self.app, &job);
         }
+    }
+
+    fn step_failed_diagnostic(
+        &mut self,
+        key: &str,
+        user_message: &str,
+        technical_details: Option<&str>,
+        duration_ms: u64,
+    ) {
+        let diagnostic = technical_details.map(str::to_owned).unwrap_or_else(|| {
+            format!("Scanonderdeel: {key}; geen aanvullende details ontvangen.")
+        });
+        let _ = error_log::persist_error(
+            &self.state.database,
+            Some(self.site_id),
+            Some(self.site_name),
+            &format!("Scan · {key}"),
+            Some(duration_ms),
+            None,
+            AppError::ssh("scan_step_failed", user_message, diagnostic, true),
+        );
     }
 }
 
@@ -2188,11 +2279,13 @@ fn scan_site_internal_with_progress(
     crate::validation::validate_days(modified_days)?;
     let stored = state.database.get_site(site_id)?;
     let credential = stored_credential_from_state(state, &stored)?;
-    let mut outcome = match engine::scan_site_with_progress(
+    let excluded_root_directories = state.database.child_installation_directories(site_id)?;
+    let mut outcome = match engine::scan_site_with_progress_and_exclusions(
         state.ssh.as_ref(),
         &stored,
         credential.as_deref(),
         modified_days,
+        &excluded_root_directories,
         progress,
     ) {
         Ok(outcome) => outcome,
@@ -3239,16 +3332,18 @@ fn run_core_operation(
         .map_err(|_| AppError::validation("De website-id is ongeldig."))?;
     let stored = state.database.get_site(site_id)?;
     let credential = stored_credential_from_state(state, &stored)?;
+    let excluded_root_directories = state.database.child_installation_directories(site_id)?;
     let run = core_operations::new_run(&stored, kind);
     state.database.start_maintenance(&run)?;
     let run_id = run.id.clone();
     let event_site_id = site_id.to_owned();
-    let outcome = core_operations::execute(
+    let outcome = core_operations::execute_with_exclusions(
         state.ssh.as_ref(),
         &stored,
         credential.as_deref(),
         &state.backup_directory,
         kind,
+        &excluded_root_directories,
         run,
         |step| {
             state.database.update_maintenance_step(&run_id, step)?;
@@ -3348,15 +3443,17 @@ fn run_maintenance_internal(
 ) -> Result<MaintenanceRun, AppError> {
     let stored = state.database.get_site(site_id)?;
     let credential = stored_credential_from_state(state, &stored)?;
+    let excluded_root_directories = state.database.child_installation_directories(site_id)?;
     let run = maintenance::new_run(&stored);
     state.database.start_maintenance(&run)?;
     let run_id = run.id.clone();
     let event_site_id = site_id.to_owned();
-    let outcome = maintenance::execute(
+    let outcome = maintenance::execute_with_exclusions(
         state.ssh.as_ref(),
         &stored,
         credential.as_deref(),
         &state.backup_directory,
+        &excluded_root_directories,
         run,
         |step| {
             state.database.update_maintenance_step(&run_id, step)?;
@@ -3536,6 +3633,200 @@ fn run_readonly(
     output.stdout_text()
 }
 
+#[derive(Deserialize)]
+struct UnexpectedRootDirectoryOutput {
+    directories: Vec<String>,
+    truncated: bool,
+}
+
+fn parse_unexpected_root_directories(
+    output: &str,
+) -> Result<UnexpectedRootDirectoryOutput, AppError> {
+    let mut parsed: UnexpectedRootDirectoryOutput =
+        serde_json::from_str(output.trim()).map_err(|error| AppError {
+            error_id: None,
+            category: "parse".into(),
+            user_message: "De lijst met onbekende hoofdmappen kon niet worden gelezen.".into(),
+            technical_details: Some(error.to_string()),
+            retryable: true,
+        })?;
+    if parsed.directories.len() > 200 {
+        return Err(AppError::validation(
+            "De server retourneerde te veel onbekende hoofdmappen.",
+        ));
+    }
+    let mut unique = HashSet::new();
+    for directory in &parsed.directories {
+        validate_direct_child_directory(directory)?;
+        if !unique.insert(directory.clone()) {
+            return Err(AppError::validation(
+                "De server retourneerde een dubbele onbekende hoofdmap.",
+            ));
+        }
+    }
+    parsed.directories.sort();
+    Ok(parsed)
+}
+
+fn validate_host_fingerprint(fingerprint: &str) -> Result<(), AppError> {
+    if !fingerprint.starts_with("SHA256:")
+        || fingerprint.len() < 20
+        || fingerprint.len() > 100
+        || !fingerprint[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"+/=_-".contains(&byte))
+    {
+        return Err(AppError::validation(
+            "De SSH-fingerprint heeft een ongeldig formaat.",
+        ));
+    }
+    Ok(())
+}
+
+fn normalized_wordpress_path(path: &str) -> String {
+    let trimmed = path.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".into()
+    } else {
+        trimmed.into()
+    }
+}
+
+fn child_wordpress_path(parent_path: &str, directory: &str) -> String {
+    let parent = normalized_wordpress_path(parent_path);
+    if parent == "/" {
+        format!("/{directory}")
+    } else {
+        format!("{parent}/{directory}")
+    }
+}
+
+fn normalized_site_url(value: &str) -> Result<String, AppError> {
+    let mut url = url::Url::parse(value.trim())
+        .map_err(|_| AppError::validation("Vul een geldige website-URL in."))?;
+    url.set_fragment(None);
+    url.set_query(None);
+    let normalized = url.to_string();
+    Ok(normalized.trim_end_matches('/').to_owned())
+}
+
+fn validate_site_identity_and_relationship(
+    database: &crate::database::Database,
+    input: &mut SiteInput,
+) -> Result<(), AppError> {
+    let existing = input
+        .id
+        .as_deref()
+        .map(|id| database.get_site(id))
+        .transpose()?;
+    if let Some(stored) = &existing {
+        let has_children = !database
+            .child_installation_directories(&stored.site.id)?
+            .is_empty();
+        let connection_changed = !stored
+            .site
+            .ssh_host
+            .eq_ignore_ascii_case(input.ssh_host.trim())
+            || stored.site.ssh_port != input.ssh_port
+            || stored.site.ssh_username != input.ssh_username.trim()
+            || stored.site.auth_method != input.auth_method
+            || stored.site.key_path.as_deref().unwrap_or_default()
+                != input.key_path.as_deref().unwrap_or_default()
+            || normalized_wordpress_path(&stored.site.wordpress_path)
+                != normalized_wordpress_path(&input.wordpress_path);
+        if has_children && connection_changed {
+            return Err(AppError::validation(
+                "Deze website heeft gekoppelde child-installaties. Pas eerst die relaties aan voordat je de SSH-verbinding of WordPress-root wijzigt.",
+            ));
+        }
+    }
+
+    match (
+        input.parent_site_id.clone(),
+        input.relation_type,
+        input.parent_directory.clone(),
+    ) {
+        (None, None, None) => {}
+        (Some(parent_id), Some(_relation_type), Some(directory)) => {
+            uuid::Uuid::parse_str(&parent_id)
+                .map_err(|_| AppError::validation("De parentwebsite-id is ongeldig."))?;
+            validate_direct_child_directory(&directory)?;
+            if matches!(
+                directory.to_ascii_lowercase().as_str(),
+                "wp-admin" | "wp-content" | "wp-includes"
+            ) {
+                return Err(AppError::validation(
+                    "Een vaste WordPress-coremap kan niet als child-installatie worden gekoppeld.",
+                ));
+            }
+            if input.id.as_deref() == Some(parent_id.as_str()) {
+                return Err(AppError::validation(
+                    "Een website kan niet haar eigen parent zijn.",
+                ));
+            }
+            let parent = database.get_site(&parent_id)?;
+            if !parent
+                .site
+                .ssh_host
+                .eq_ignore_ascii_case(input.ssh_host.trim())
+                || parent.site.ssh_port != input.ssh_port
+                || parent.site.ssh_username != input.ssh_username.trim()
+                || parent.site.auth_method != input.auth_method
+                || parent.site.key_path.as_deref().unwrap_or_default()
+                    != input.key_path.as_deref().unwrap_or_default()
+            {
+                return Err(AppError::validation(
+                    "Een child-installatie moet exact dezelfde SSH-verbinding als de parent gebruiken.",
+                ));
+            }
+            let expected_path = child_wordpress_path(&parent.site.wordpress_path, &directory);
+            if normalized_wordpress_path(&input.wordpress_path) != expected_path {
+                return Err(AppError::validation(
+                    "Het WordPress-pad van de child-installatie is niet de gekozen directe parentmap.",
+                ));
+            }
+            input.wordpress_path = expected_path;
+            input.parent_directory = Some(directory);
+            input.pinned_host_key = parent.site.pinned_host_key.clone();
+
+            let mut ancestor_id = Some(parent_id);
+            let mut visited = HashSet::new();
+            while let Some(id) = ancestor_id {
+                if !visited.insert(id.clone()) || input.id.as_deref() == Some(id.as_str()) {
+                    return Err(AppError::validation(
+                        "De gekozen parentrelatie zou een cirkel veroorzaken.",
+                    ));
+                }
+                ancestor_id = database.get_site(&id)?.site.parent_site_id;
+            }
+        }
+        _ => {
+            return Err(AppError::validation(
+                "Parentwebsite, relatietype en parentmap moeten samen worden ingesteld.",
+            ));
+        }
+    }
+
+    let input_url = normalized_site_url(&input.url)?;
+    let input_path = normalized_wordpress_path(&input.wordpress_path);
+    for site in database.list_sites()? {
+        if input.id.as_deref() == Some(site.id.as_str()) {
+            continue;
+        }
+        let same_installation = site.ssh_host.eq_ignore_ascii_case(input.ssh_host.trim())
+            && site.ssh_port == input.ssh_port
+            && normalized_wordpress_path(&site.wordpress_path) == input_path;
+        let same_url = normalized_site_url(&site.url)? == input_url;
+        if same_installation || same_url {
+            return Err(AppError::validation(format!(
+                "Deze WordPress-installatie bestaat al als ‘{}’.",
+                site.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn site_from_input(input: &SiteInput, existing: Option<&StoredSite>) -> Site {
     let now = crate::database::utc_now();
     Site {
@@ -3548,7 +3839,13 @@ fn site_from_input(input: &SiteInput, existing: Option<&StoredSite>) -> Site {
         auth_method: input.auth_method,
         key_path: input.key_path.clone(),
         wordpress_path: input.wordpress_path.clone(),
-        pinned_host_key: existing.and_then(|stored| stored.site.pinned_host_key.clone()),
+        parent_site_id: input.parent_site_id.clone(),
+        relation_type: input.relation_type,
+        parent_directory: input.parent_directory.clone(),
+        pinned_host_key: input
+            .pinned_host_key
+            .clone()
+            .or_else(|| existing.and_then(|stored| stored.site.pinned_host_key.clone())),
         status: existing.map_or(SiteStatus::Unscanned, |stored| stored.site.status),
         wordpress_version: None,
         php_version: None,
@@ -3575,6 +3872,7 @@ fn connection_steps() -> Vec<ConnectionStep> {
         ("wp_cli", "WP-CLI werkt"),
         ("wordpress", "WordPress-installatie gevonden"),
         ("database", "Database bereikbaar"),
+        ("root_directories", "Onbekende hoofdmappen gecontroleerd"),
     ]
     .into_iter()
     .map(|(key, label)| ConnectionStep {
@@ -3600,6 +3898,8 @@ fn failed_connection(
         php_version: None,
         wp_cli_version: None,
         detected_url: None,
+        unexpected_directories: Vec::new(),
+        unexpected_directories_truncated: false,
         error: Some(error),
     }
 }
@@ -3718,6 +4018,9 @@ mod tests {
                 "VerifyCoreChecksums" => {
                     b"Success: WordPress installation verifies against checksums.\n".to_vec()
                 }
+                "FindUnexpectedRootFiles" => {
+                    b"{\"files\":[],\"truncated\":false,\"scanned_entries\":12}".to_vec()
+                }
                 "ListUsers" | "CheckCoreUpdates" | "ListPluginUpdates"
                 | "ListThemeUpdates" => b"[]".to_vec(),
                 "CheckSelectedWpConfigConstants" => b"{\"WP_DEBUG\":false,\"DISALLOW_FILE_EDIT\":true,\"WP_ENVIRONMENT_TYPE\":\"production\"}".to_vec(),
@@ -3769,6 +4072,10 @@ mod tests {
             key_path: Some("C:\\keys\\id_ed25519".into()),
             wordpress_path: "/srv/site".into(),
             credential_secret: None,
+            pinned_host_key: None,
+            parent_site_id: None,
+            relation_type: None,
+            parent_directory: None,
         }
     }
 
@@ -3830,6 +4137,84 @@ mod tests {
                 "{unsafe_url}"
             );
         }
+    }
+
+    #[test]
+    fn unexpected_root_directory_output_is_sorted_and_strictly_validated() {
+        let parsed = parse_unexpected_root_directories(
+            r#"{"directories":["portal","academy","dev"],"truncated":false}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.directories, ["academy", "dev", "portal"]);
+        assert!(!parsed.truncated);
+
+        for invalid in [
+            r#"{"directories":["dev","dev"],"truncated":false}"#,
+            r#"{"directories":["../dev"],"truncated":false}"#,
+            r#"{"directories":["nested/dev"],"truncated":false}"#,
+        ] {
+            assert!(parse_unexpected_root_directories(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn child_wordpress_paths_never_duplicate_the_joining_separator() {
+        assert_eq!(
+            child_wordpress_path("/home/ctlvu/domains/ctl-vu.nl/public_html/", "edudatabase"),
+            "/home/ctlvu/domains/ctl-vu.nl/public_html/edudatabase"
+        );
+        assert_eq!(
+            child_wordpress_path("/home/ctlvu/domains/ctl-vu.nl/public_html", "edudatabase"),
+            "/home/ctlvu/domains/ctl-vu.nl/public_html/edudatabase"
+        );
+        assert_eq!(
+            child_wordpress_path(
+                "/home/ctlvu/domains/ctl-vu.nl/public_html/edudatabase/",
+                "portal"
+            ),
+            "/home/ctlvu/domains/ctl-vu.nl/public_html/edudatabase/portal"
+        );
+    }
+
+    #[test]
+    fn child_relationship_inherits_the_parent_identity_and_rejects_duplicates() {
+        let path = std::env::temp_dir().join(format!("wpmm-relations-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let mut parent_input = site_input();
+        parent_input.pinned_host_key = Some("SHA256:abcdefghijklmnopqrstuv".into());
+        let parent = database.save_site(&parent_input, None).unwrap();
+
+        let mut child = site_input();
+        child.id = None;
+        child.name = "dev example".into();
+        child.url = "https://dev.example.test/".into();
+        child.wordpress_path = "/srv/site/dev/".into();
+        child.parent_site_id = Some(parent.id.clone());
+        child.relation_type = Some(crate::models::SiteRelationType::Subdomain);
+        child.parent_directory = Some("dev".into());
+        validate_site_identity_and_relationship(&database, &mut child).unwrap();
+        assert_eq!(child.wordpress_path, "/srv/site/dev");
+        assert_eq!(child.pinned_host_key, parent_input.pinned_host_key);
+        database.save_site(&child, None).unwrap();
+
+        let mut duplicate = site_input();
+        duplicate.id = None;
+        duplicate.name = "Duplicate".into();
+        let error = validate_site_identity_and_relationship(&database, &mut duplicate).unwrap_err();
+        assert!(error.user_message.contains("bestaat al"));
+
+        let mut wrong_path = site_input();
+        wrong_path.id = None;
+        wrong_path.name = "portal example".into();
+        wrong_path.url = "https://portal.example.test/".into();
+        wrong_path.wordpress_path = "/srv/elsewhere".into();
+        wrong_path.parent_site_id = Some(parent.id);
+        wrong_path.relation_type = Some(crate::models::SiteRelationType::Subdomain);
+        wrong_path.parent_directory = Some("portal".into());
+        assert!(validate_site_identity_and_relationship(&database, &mut wrong_path).is_err());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

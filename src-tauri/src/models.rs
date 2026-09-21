@@ -231,6 +231,30 @@ pub enum SiteStatus {
     Unreachable,
     Unscanned,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SiteRelationType {
+    Subdomain,
+    Subdirectory,
+}
+
+impl SiteRelationType {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Subdomain => "subdomain",
+            Self::Subdirectory => "subdirectory",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "subdomain" => Some(Self::Subdomain),
+            "subdirectory" => Some(Self::Subdirectory),
+            _ => None,
+        }
+    }
+}
 impl SiteStatus {
     pub fn as_db(self) -> &'static str {
         match self {
@@ -266,6 +290,9 @@ pub struct Site {
     pub auth_method: AuthMethod,
     pub key_path: Option<String>,
     pub wordpress_path: String,
+    pub parent_site_id: Option<String>,
+    pub relation_type: Option<SiteRelationType>,
+    pub parent_directory: Option<String>,
     pub pinned_host_key: Option<String>,
     pub status: SiteStatus,
     pub wordpress_version: Option<String>,
@@ -310,6 +337,10 @@ pub struct SiteInput {
     pub key_path: Option<String>,
     pub wordpress_path: String,
     pub credential_secret: Option<String>,
+    pub pinned_host_key: Option<String>,
+    pub parent_site_id: Option<String>,
+    pub relation_type: Option<SiteRelationType>,
+    pub parent_directory: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +405,8 @@ pub struct ConnectionTestResult {
     pub php_version: Option<String>,
     pub wp_cli_version: Option<String>,
     pub detected_url: Option<String>,
+    pub unexpected_directories: Vec<String>,
+    pub unexpected_directories_truncated: bool,
     pub error: Option<crate::error::AppError>,
 }
 

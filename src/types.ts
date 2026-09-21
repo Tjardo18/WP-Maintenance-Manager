@@ -1,5 +1,6 @@
 export type SiteStatus = "healthy" | "updates" | "attention" | "problem" | "unreachable" | "unscanned";
 export type AuthMethod = "keyFile" | "password";
+export type SiteRelationType = "subdomain" | "subdirectory";
 export type StepStatus = "pending" | "running" | "success" | "warning" | "failed" | "skipped";
 
 export interface Site {
@@ -12,6 +13,9 @@ export interface Site {
   authMethod: AuthMethod;
   keyPath?: string | null;
   wordpressPath: string;
+  parentSiteId?: string | null;
+  relationType?: SiteRelationType | null;
+  parentDirectory?: string | null;
   pinnedHostKey?: string | null;
   status: SiteStatus;
   wordpressVersion?: string | null;
@@ -67,6 +71,10 @@ export interface SiteInput {
   keyPath?: string | null;
   wordpressPath: string;
   credentialSecret?: string;
+  pinnedHostKey?: string | null;
+  parentSiteId?: string | null;
+  relationType?: SiteRelationType | null;
+  parentDirectory?: string | null;
 }
 
 export interface TechnicalError { errorId?: string; category: string; userMessage: string; technicalDetails?: string; retryable: boolean }
@@ -88,6 +96,8 @@ export interface ConnectionTestResult {
   phpVersion?: string;
   wpCliVersion?: string;
   detectedUrl?: string;
+  unexpectedDirectories: string[];
+  unexpectedDirectoriesTruncated: boolean;
   error?: TechnicalError;
 }
 

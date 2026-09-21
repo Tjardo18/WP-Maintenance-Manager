@@ -1,9 +1,9 @@
 use crate::{
     error::AppError,
     validation::{
-        validate_days, validate_display_name, validate_email, validate_role, validate_slug,
-        validate_user_id, validate_wordpress_locale, validate_wordpress_path,
-        validate_wordpress_version,
+        validate_days, validate_direct_child_directory, validate_display_name, validate_email,
+        validate_role, validate_slug, validate_user_id, validate_wordpress_locale,
+        validate_wordpress_path, validate_wordpress_version,
     },
 };
 use std::time::Duration;
@@ -20,10 +20,14 @@ pub enum RemoteAction {
     GetPhpVersion,
     GetWpCliVersion,
     GetSiteUrl,
+    ListUnexpectedRootDirectories,
     GetCoreLocale,
     CheckDiskSpace,
     VerifyCoreChecksums,
     VerifyCoreChecksumsPlain,
+    FindUnexpectedRootFiles {
+        excluded_directories: Vec<String>,
+    },
     ListUsers,
     ListRoles,
     DetectMultisite,
@@ -135,6 +139,18 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
             normal,
             16 * 1024,
         ),
+        RemoteAction::ListUnexpectedRootDirectories => {
+            let code = shell_escape(
+                "$root=$argv[1];$entries=@scandir($root);if($entries===false){fwrite(STDERR,'root_directory_unreadable');exit(1);}$skip=array_flip(array('.','..','wp-admin','wp-content','wp-includes'));$directories=array();$truncated=false;foreach($entries as $name){if(isset($skip[$name])){continue;}$full=rtrim($root,'/').'/'.$name;if(!is_dir($full)){continue;}if(count($directories)>=200){$truncated=true;break;}$directories[]=$name;}sort($directories,SORT_STRING);echo json_encode(array('directories'=>$directories,'truncated'=>$truncated),JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);",
+            );
+            (
+                "ListUnexpectedRootDirectories",
+                format!("LC_ALL=C php -r {code} -- {path}"),
+                false,
+                normal,
+                256 * 1024,
+            )
+        }
         RemoteAction::GetCoreLocale => (
             "GetCoreLocale",
             format!("{wp} eval {}", shell_escape("echo determine_locale();")),
@@ -161,20 +177,38 @@ pub fn build(wordpress_path: &str, action: RemoteAction) -> Result<RemoteCommand
         }
         RemoteAction::VerifyCoreChecksums => (
             "VerifyCoreChecksums",
-            format!(
-                "{wp} core is-installed && {wp} core verify-checksums --include-root --format=json"
-            ),
+            format!("{wp} core is-installed && {wp} core verify-checksums --format=json"),
             false,
             scan,
             512 * 1024,
         ),
         RemoteAction::VerifyCoreChecksumsPlain => (
             "VerifyCoreChecksumsPlain",
-            format!("{wp} core is-installed && {wp} core verify-checksums --include-root"),
+            format!("{wp} core is-installed && {wp} core verify-checksums"),
             false,
             scan,
             512 * 1024,
         ),
+        RemoteAction::FindUnexpectedRootFiles {
+            excluded_directories,
+        } => {
+            for directory in &excluded_directories {
+                validate_direct_child_directory(directory)?;
+            }
+            let excluded_json = serde_json::to_string(&excluded_directories)
+                .map_err(|error| AppError::storage(error.to_string()))?;
+            let excluded = shell_escape(&excluded_json);
+            let code = shell_escape(
+                "$root=rtrim($argv[1],'/');$excluded=json_decode($argv[2],true);if(!is_array($excluded)){fwrite(STDERR,'invalid_exclusions');exit(64);}$skip=array_fill_keys(array_merge(array('wp-admin','wp-content','wp-includes'),$excluded),true);$skipFiles=array_fill_keys(array('.htaccess','.maintenance','index.php','license.txt','readme.html','wp-config.php','xmlrpc.php'),true);$files=array();$stack=array('');$scanned=0;$truncated=false;$deadline=microtime(true)+20.0;while($stack){if(microtime(true)>$deadline){$truncated=true;break;}$relative=array_pop($stack);$directory=$relative===''?$root:$root.'/'.$relative;$entries=@scandir($directory);if($entries===false){fwrite(STDERR,'root_directory_unreadable:'.$relative);exit(65);}foreach($entries as $name){if($name==='.'||$name==='..'){continue;}$scanned++;if($scanned>20000||count($files)>=5000||microtime(true)>$deadline){$truncated=true;break 2;}$child=$relative===''?$name:$relative.'/'.$name;$full=$root.'/'.$child;if(is_link($full)){continue;}if(is_dir($full)){if($relative===''&&isset($skip[$name])){continue;}$stack[]=$child;continue;}if(!is_file($full)){continue;}if($relative===''&&(isset($skipFiles[$name])||preg_match('/^wp-[^\\/]*$/D',$name)===1)){continue;}$files[]=$child;}}sort($files,SORT_STRING);echo json_encode(array('files'=>$files,'truncated'=>$truncated,'scanned_entries'=>$scanned),JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);",
+            );
+            (
+                "FindUnexpectedRootFiles",
+                format!("LC_ALL=C php -r {code} -- {path} {excluded}"),
+                false,
+                Duration::from_secs(30),
+                2 * 1024 * 1024,
+            )
+        }
         RemoteAction::ListUsers => (
             "ListUsers",
             format!(
@@ -579,6 +613,21 @@ mod tests {
     }
 
     #[test]
+    fn unexpected_root_directory_discovery_is_direct_bounded_and_path_safe() {
+        let command = build(
+            "/srv/site with ' quote",
+            RemoteAction::ListUnexpectedRootDirectories,
+        )
+        .unwrap();
+        assert!(!command.mutating);
+        assert!(command.command.contains("scandir"));
+        assert!(command.command.contains("wp-admin"));
+        assert!(command.command.contains("count($directories)>=200"));
+        assert!(command.command.contains("'/srv/site with '\"'\"' quote'"));
+        assert_eq!(command.max_output_bytes, 256 * 1024);
+    }
+
+    #[test]
     fn file_scans_use_portable_php_nul_limiter() {
         for action in [
             RemoteAction::FindPhpFiles,
@@ -605,9 +654,43 @@ mod tests {
         let command = build("/srv/example site", RemoteAction::VerifyCoreChecksums).unwrap();
         assert!(command.command.contains("--path='/srv/example site'"));
         assert!(command.command.contains("core is-installed"));
-        assert!(command.command.contains("--include-root"));
+        assert!(!command.command.contains("--include-root"));
         assert!(command.command.contains("--format=json"));
         assert!(!command.mutating);
+    }
+
+    #[test]
+    fn unexpected_root_file_scan_prunes_confirmed_children_before_traversal() {
+        let command = build(
+            "/srv/example site",
+            RemoteAction::FindUnexpectedRootFiles {
+                excluded_directories: vec!["academy".into(), "client area's".into()],
+            },
+        )
+        .unwrap();
+        assert!(!command.mutating);
+        assert_eq!(command.timeout, Duration::from_secs(30));
+        assert!(command.command.contains("array_merge"));
+        assert!(command.command.contains("isset($skip[$name])"));
+        assert!(command.command.contains("$scanned>20000"));
+        assert!(command.command.contains("count($files)>=5000"));
+        assert!(command.command.contains("microtime(true)+20.0"));
+        assert!(command.command.contains("academy"));
+        assert!(command.command.contains("client area'\"'\"'s"));
+        assert!(!command.command.contains("--include-root"));
+    }
+
+    #[test]
+    fn unexpected_root_file_scan_rejects_nested_exclusion_names() {
+        assert!(
+            build(
+                "/srv/site",
+                RemoteAction::FindUnexpectedRootFiles {
+                    excluded_directories: vec!["academy/child".into()],
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]

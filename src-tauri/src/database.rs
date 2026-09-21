@@ -5,10 +5,10 @@ use crate::{
         ChecksumFindingRecord, ChecksumStatus, ErrorCategory, ErrorLogFilter, ErrorLogPage,
         ErrorLogRecord, ErrorSeverity, ExceptionScope, FilePreviewMode, Finding, FindingContext,
         FindingDisposition, FindingException, FindingSeverity, InstalledSoftware, MaintenanceRun,
-        MaintenanceStep, MarkdownPreviewMode, ScanCheck, ScanResult, Site, SiteInput, SiteStatus,
-        SiteVulnerabilitySummary, StepStatus, StoredSite, TrustedFile, TrustedFileStatus,
-        UpdateItem, UpdateKind, VulnerabilityCandidate, VulnerabilityFeedState,
-        VulnerabilityImportSummary, VulnerabilityMatch,
+        MaintenanceStep, MarkdownPreviewMode, ScanCheck, ScanResult, Site, SiteInput,
+        SiteRelationType, SiteStatus, SiteVulnerabilitySummary, StepStatus, StoredSite,
+        TrustedFile, TrustedFileStatus, UpdateItem, UpdateKind, VulnerabilityCandidate,
+        VulnerabilityFeedState, VulnerabilityImportSummary, VulnerabilityMatch,
     },
     snapshot_repository::persist_snapshot_in_transaction,
     snapshots::{SiteSnapshot, SnapshotDiff},
@@ -299,6 +299,22 @@ impl Database {
             )?;
             transaction.commit()?;
         }
+        let nested_wordpress_sites_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 18)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !nested_wordpress_sites_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(include_str!(
+                "../migrations/0018_nested_wordpress_sites.sql"
+            ))?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(18, ?1)",
+                [utc_now()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(database)
     }
 
@@ -312,7 +328,7 @@ impl Database {
 
     pub fn list_sites(&self) -> Result<Vec<Site>, AppError> {
         let connection = self.connect()?;
-        let mut statement = connection.prepare("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,vulnerability_critical_count,vulnerability_high_count,vulnerability_medium_count,vulnerability_low_count,vulnerability_info_count,vulnerability_unknown_count,vulnerability_last_checked_at,vulnerability_feed_updated_at,vulnerability_inventory_observed_at,vulnerability_inventory_stale,wp_cli_version,wp_cli_version_checked_at FROM sites ORDER BY name COLLATE NOCASE")?;
+        let mut statement = connection.prepare("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,vulnerability_critical_count,vulnerability_high_count,vulnerability_medium_count,vulnerability_low_count,vulnerability_info_count,vulnerability_unknown_count,vulnerability_last_checked_at,vulnerability_feed_updated_at,vulnerability_inventory_observed_at,vulnerability_inventory_stale,wp_cli_version,wp_cli_version_checked_at,parent_site_id,relation_type,parent_directory FROM sites ORDER BY name COLLATE NOCASE")?;
         let rows = statement.query_map([], row_to_stored_site)?;
         rows.map(|row| row.map(|stored| stored.site).map_err(AppError::from))
             .collect()
@@ -320,7 +336,7 @@ impl Database {
 
     pub fn get_site(&self, id: &str) -> Result<StoredSite, AppError> {
         let connection = self.connect()?;
-        connection.query_row("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,vulnerability_critical_count,vulnerability_high_count,vulnerability_medium_count,vulnerability_low_count,vulnerability_info_count,vulnerability_unknown_count,vulnerability_last_checked_at,vulnerability_feed_updated_at,vulnerability_inventory_observed_at,vulnerability_inventory_stale,wp_cli_version,wp_cli_version_checked_at FROM sites WHERE id = ?1", [id], row_to_stored_site).optional()?.ok_or_else(|| AppError::not_found("Website"))
+        connection.query_row("SELECT id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,vulnerability_critical_count,vulnerability_high_count,vulnerability_medium_count,vulnerability_low_count,vulnerability_info_count,vulnerability_unknown_count,vulnerability_last_checked_at,vulnerability_feed_updated_at,vulnerability_inventory_observed_at,vulnerability_inventory_stale,wp_cli_version,wp_cli_version_checked_at,parent_site_id,relation_type,parent_directory FROM sites WHERE id = ?1", [id], row_to_stored_site).optional()?.ok_or_else(|| AppError::not_found("Website"))
     }
 
     pub fn save_site(
@@ -339,9 +355,7 @@ impl Database {
         let created_at = existing
             .as_ref()
             .map_or_else(|| now.clone(), |stored| stored.site.created_at.clone());
-        let pinned = existing
-            .as_ref()
-            .and_then(|stored| stored.site.pinned_host_key.clone());
+        let pinned = input.pinned_host_key.clone();
         let status = existing
             .as_ref()
             .map_or(SiteStatus::Unscanned, |stored| stored.site.status);
@@ -352,10 +366,23 @@ impl Database {
         });
         let connection = self.connect()?;
         connection.execute(
-            "INSERT INTO sites(id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,NULL,0,NULL,NULL,NULL,?13,?14) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,ssh_host=excluded.ssh_host,ssh_port=excluded.ssh_port,ssh_username=excluded.ssh_username,auth_method=excluded.auth_method,key_path=excluded.key_path,wordpress_path=excluded.wordpress_path,credential_ref=excluded.credential_ref,pinned_host_key=CASE WHEN sites.ssh_host <> excluded.ssh_host OR sites.ssh_port <> excluded.ssh_port THEN NULL ELSE sites.pinned_host_key END,updated_at=excluded.updated_at",
-            params![id, input.name.trim(), input.url.trim(), input.ssh_host.trim(), input.ssh_port, input.ssh_username.trim(), input.auth_method.as_db(), input.key_path.as_deref().filter(|path| !path.is_empty()), input.wordpress_path.trim(), effective_ref, pinned, status.as_db(), created_at, now]
+            "INSERT INTO sites(id,name,url,ssh_host,ssh_port,ssh_username,auth_method,key_path,wordpress_path,credential_ref,pinned_host_key,status,wordpress_version,php_version,update_count,security_status,last_scan_at,last_maintenance_at,created_at,updated_at,parent_site_id,relation_type,parent_directory) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,NULL,0,NULL,NULL,NULL,?13,?14,?15,?16,?17) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,ssh_host=excluded.ssh_host,ssh_port=excluded.ssh_port,ssh_username=excluded.ssh_username,auth_method=excluded.auth_method,key_path=excluded.key_path,wordpress_path=excluded.wordpress_path,credential_ref=excluded.credential_ref,pinned_host_key=CASE WHEN sites.ssh_host <> excluded.ssh_host OR sites.ssh_port <> excluded.ssh_port THEN excluded.pinned_host_key ELSE COALESCE(excluded.pinned_host_key,sites.pinned_host_key) END,parent_site_id=excluded.parent_site_id,relation_type=excluded.relation_type,parent_directory=excluded.parent_directory,updated_at=excluded.updated_at",
+            params![id, input.name.trim(), input.url.trim(), input.ssh_host.trim(), input.ssh_port, input.ssh_username.trim(), input.auth_method.as_db(), input.key_path.as_deref().filter(|path| !path.is_empty()), input.wordpress_path.trim(), effective_ref, pinned, status.as_db(), created_at, now, input.parent_site_id.as_deref(), input.relation_type.map(SiteRelationType::as_db), input.parent_directory.as_deref()]
         )?;
         Ok(self.get_site(&id)?.site)
+    }
+
+    pub fn child_installation_directories(
+        &self,
+        parent_site_id: &str,
+    ) -> Result<Vec<String>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT parent_directory FROM sites WHERE parent_site_id=?1 AND relation_type IN ('subdomain','subdirectory') AND parent_directory IS NOT NULL ORDER BY parent_directory",
+        )?;
+        let rows = statement.query_map([parent_site_id], |row| row.get(0))?;
+        rows.collect::<Result<Vec<String>, _>>()
+            .map_err(AppError::from)
     }
 
     pub fn delete_site(&self, id: &str) -> Result<Option<String>, AppError> {
@@ -2001,6 +2028,12 @@ fn row_to_stored_site(row: &Row<'_>) -> rusqlite::Result<StoredSite> {
             auth_method: AuthMethod::from_db(&row.get::<_, String>(6)?),
             key_path: row.get(7)?,
             wordpress_path: row.get(8)?,
+            parent_site_id: row.get(32)?,
+            relation_type: row
+                .get::<_, Option<String>>(33)?
+                .as_deref()
+                .and_then(SiteRelationType::from_db),
+            parent_directory: row.get(34)?,
             pinned_host_key: row.get(10)?,
             status: SiteStatus::from_db(&row.get::<_, String>(11)?),
             wordpress_version: row.get(12)?,
@@ -2065,7 +2098,7 @@ pub fn utc_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::AuthMethod;
+    use crate::models::{AuthMethod, SiteRelationType};
     fn input() -> SiteInput {
         SiteInput {
             id: None,
@@ -2078,6 +2111,10 @@ mod tests {
             key_path: Some("C:\\keys\\id_ed25519".into()),
             wordpress_path: "/var/www/public".into(),
             credential_secret: None,
+            pinned_host_key: None,
+            parent_site_id: None,
+            relation_type: None,
+            parent_directory: None,
         }
     }
 
@@ -2202,6 +2239,45 @@ mod tests {
             database.delete_site(&saved.id).unwrap().as_deref(),
             Some("test-ref")
         );
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn nested_site_relations_roundtrip_and_are_cleared_when_the_parent_is_deleted() {
+        let path = std::env::temp_dir().join(format!("wpmm-nested-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let parent = database.save_site(&input(), None).unwrap();
+        let mut child_input = input();
+        child_input.id = None;
+        child_input.name = "dev example".into();
+        child_input.url = "https://dev.example.test/".into();
+        child_input.wordpress_path = "/var/www/public/dev".into();
+        child_input.parent_site_id = Some(parent.id.clone());
+        child_input.relation_type = Some(SiteRelationType::Subdomain);
+        child_input.parent_directory = Some("dev".into());
+        let child = database.save_site(&child_input, None).unwrap();
+
+        assert_eq!(
+            database.child_installation_directories(&parent.id).unwrap(),
+            vec!["dev"]
+        );
+        let stored_child = database.get_site(&child.id).unwrap().site;
+        assert_eq!(
+            stored_child.parent_site_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        assert_eq!(
+            stored_child.relation_type,
+            Some(SiteRelationType::Subdomain)
+        );
+        assert_eq!(stored_child.parent_directory.as_deref(), Some("dev"));
+
+        database.delete_site(&parent.id).unwrap();
+        let orphan = database.get_site(&child.id).unwrap().site;
+        assert_eq!(orphan.parent_site_id, None);
+        assert_eq!(orphan.relation_type, None);
+        assert_eq!(orphan.parent_directory, None);
         drop(database);
         let _ = fs::remove_file(path);
     }

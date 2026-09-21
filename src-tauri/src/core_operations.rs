@@ -228,12 +228,14 @@ pub fn new_run(stored: &StoredSite, kind: CoreOperationKind) -> MaintenanceRun {
     }
 }
 
-pub fn execute<F>(
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_exclusions<F>(
     executor: &dyn SshExecutor,
     stored: &StoredSite,
     credential: Option<&str>,
     backup_root: &Path,
     kind: CoreOperationKind,
+    excluded_root_directories: &[String],
     run: MaintenanceRun,
     progress: F,
 ) -> Result<CoreOperationOutcome, AppError>
@@ -246,6 +248,7 @@ where
         credential,
         backup_root,
         kind,
+        excluded_root_directories,
         run,
         progress,
         check_homepage,
@@ -259,6 +262,7 @@ fn execute_with_health<F, H>(
     credential: Option<&str>,
     backup_root: &Path,
     kind: CoreOperationKind,
+    excluded_root_directories: &[String],
     mut run: MaintenanceRun,
     mut progress: F,
     mut health_check: H,
@@ -456,7 +460,13 @@ where
         None,
         &mut progress,
     )?;
-    match engine::scan_site(executor, stored, credential, 30) {
+    match engine::scan_site_with_exclusions(
+        executor,
+        stored,
+        credential,
+        30,
+        excluded_root_directories,
+    ) {
         Ok(outcome) => {
             let checksum = outcome
                 .result
@@ -841,6 +851,9 @@ mod tests {
                 }
                 "ListPluginUpdates" | "ListThemeUpdates" | "ListUsers" => "[]".into(),
                 "VerifyCoreChecksums" => self.checksum.clone(),
+                "FindUnexpectedRootFiles" => {
+                    r#"{"files":[],"truncated":false,"scanned_entries":12}"#.into()
+                }
                 "CheckSelectedWpConfigConstants" => r#"{"WP_DEBUG":false,"DISALLOW_FILE_EDIT":true,"WP_ENVIRONMENT_TYPE":"production"}"#.into(),
                 "CreateDatabaseBackup" => "/tmp/wpmm-Ab12Cd34.sql".into(),
                 _ => String::new(),
@@ -890,6 +903,9 @@ mod tests {
                 auth_method: AuthMethod::KeyFile,
                 key_path: Some("key".into()),
                 wordpress_path: "/srv/site".into(),
+                parent_site_id: None,
+                relation_type: None,
+                parent_directory: None,
                 pinned_host_key: Some("SHA256:test".into()),
                 status: SiteStatus::Healthy,
                 wordpress_version: Some("6.8.2".into()),
@@ -1005,6 +1021,7 @@ mod tests {
             None,
             &root,
             CoreOperationKind::Repair,
+            &[],
             new_run(&stored, CoreOperationKind::Repair),
             |_| Ok(()),
             healthy,
@@ -1051,6 +1068,7 @@ mod tests {
             None,
             &root,
             CoreOperationKind::Repair,
+            &[],
             new_run(&stored, CoreOperationKind::Repair),
             |_| Ok(()),
             healthy,
@@ -1090,6 +1108,7 @@ mod tests {
             None,
             &root,
             CoreOperationKind::Repair,
+            &[],
             new_run(&stored, CoreOperationKind::Repair),
             |_| Ok(()),
             healthy,
@@ -1118,6 +1137,7 @@ mod tests {
             None,
             &root,
             CoreOperationKind::Repair,
+            &[],
             new_run(&stored, CoreOperationKind::Repair),
             |_| Ok(()),
             healthy,
@@ -1147,6 +1167,7 @@ mod tests {
             None,
             &root,
             CoreOperationKind::Update,
+            &[],
             new_run(&stored, CoreOperationKind::Update),
             |_| Ok(()),
             healthy,
@@ -1191,6 +1212,7 @@ mod tests {
             None,
             &root,
             CoreOperationKind::Update,
+            &[],
             new_run(&stored, CoreOperationKind::Update),
             |_| Ok(()),
             healthy,
@@ -1215,6 +1237,7 @@ mod tests {
             None,
             &root,
             CoreOperationKind::Update,
+            &[],
             new_run(&stored, CoreOperationKind::Update),
             |_| Ok(()),
             healthy,
@@ -1239,6 +1262,7 @@ mod tests {
             None,
             &root,
             CoreOperationKind::Update,
+            &[],
             new_run(&stored, CoreOperationKind::Update),
             |_| Ok(()),
             healthy,
@@ -1266,6 +1290,7 @@ mod tests {
             None,
             &root,
             CoreOperationKind::Repair,
+            &[],
             new_run(&stored, CoreOperationKind::Repair),
             |_| Ok(()),
             healthy,
@@ -1293,6 +1318,7 @@ Success: WordPress installation verifies against checksums."#
             None,
             &root,
             CoreOperationKind::Repair,
+            &[],
             new_run(&stored, CoreOperationKind::Repair),
             |_| Ok(()),
             healthy,

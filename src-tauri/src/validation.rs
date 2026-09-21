@@ -85,6 +85,21 @@ pub fn validate_wordpress_path(path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn validate_direct_child_directory(name: &str) -> Result<(), AppError> {
+    if name.is_empty()
+        || name.len() > 255
+        || matches!(name, "." | "..")
+        || name.chars().any(char::is_control)
+        || name.contains('/')
+        || name.contains('\\')
+    {
+        return Err(AppError::validation(
+            "De gevonden mapnaam is geen veilige directe submap.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_checksum_relative_path(path: &str) -> Result<(), AppError> {
     if path.is_empty()
         || path.len() > 4096
@@ -236,6 +251,16 @@ mod tests {
     #[test]
     fn accepts_normal_wordpress_path() {
         assert!(validate_wordpress_path("/var/www/example/public").is_ok());
+    }
+    #[test]
+    fn validates_direct_child_directories_without_traversal() {
+        assert!(validate_direct_child_directory("academy").is_ok());
+        assert!(validate_direct_child_directory("klant omgeving").is_ok());
+        assert!(validate_direct_child_directory(".well-known").is_ok());
+        assert!(validate_direct_child_directory("..").is_err());
+        assert!(validate_direct_child_directory("dev/site").is_err());
+        assert!(validate_direct_child_directory("dev\\site").is_err());
+        assert!(validate_direct_child_directory("dev\nsite").is_err());
     }
     #[test]
     fn validates_checksum_paths_without_treating_them_as_shell_input() {

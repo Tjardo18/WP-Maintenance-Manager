@@ -1,5 +1,5 @@
 use crate::{
-    command_catalog::{RemoteAction, RemoteCommand, build},
+    command_catalog::{MAX_SCAN_RESULTS, RemoteAction, RemoteCommand, build},
     database::utc_now,
     error::AppError,
     models::{
@@ -11,7 +11,8 @@ use crate::{
     snapshots::SnapshotCore,
     ssh::{ExecOutput, SshConnection, SshExecutor},
 };
-use std::collections::BTreeMap;
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -57,31 +58,60 @@ pub trait ScanProgress {
         _detail: Option<String>,
     ) {
     }
+    fn step_failed_diagnostic(
+        &mut self,
+        _key: &str,
+        _user_message: &str,
+        _technical_details: Option<&str>,
+        _duration_ms: u64,
+    ) {
+    }
 }
 
 struct NoopScanProgress;
 impl ScanProgress for NoopScanProgress {}
 
-pub fn scan_site(
+pub fn scan_site_with_exclusions(
     executor: &dyn SshExecutor,
     stored: &StoredSite,
     credential: Option<&str>,
     modified_days: u16,
+    excluded_root_directories: &[String],
 ) -> Result<ScanOutcome, AppError> {
-    scan_site_with_progress(
+    scan_site_with_progress_and_exclusions(
         executor,
         stored,
         credential,
         modified_days,
+        excluded_root_directories,
         &mut NoopScanProgress,
     )
 }
 
+#[cfg(test)]
 pub fn scan_site_with_progress(
     executor: &dyn SshExecutor,
     stored: &StoredSite,
     credential: Option<&str>,
     modified_days: u16,
+    progress: &mut dyn ScanProgress,
+) -> Result<ScanOutcome, AppError> {
+    scan_site_with_progress_and_exclusions(
+        executor,
+        stored,
+        credential,
+        modified_days,
+        &[],
+        progress,
+    )
+}
+
+pub fn scan_site_with_progress_and_exclusions(
+    executor: &dyn SshExecutor,
+    stored: &StoredSite,
+    credential: Option<&str>,
+    modified_days: u16,
+    excluded_root_directories: &[String],
     progress: &mut dyn ScanProgress,
 ) -> Result<ScanOutcome, AppError> {
     let started_at = utc_now();
@@ -113,7 +143,7 @@ pub fn scan_site_with_progress(
     let mut checks = Vec::new();
 
     checks.push(measured_check(progress, "checksum", || {
-        checksum_check(connection.as_mut(), stored)
+        checksum_check(connection.as_mut(), stored, excluded_root_directories)
     })?);
     let mut snapshot_users = SnapshotBuildSection::Failed;
     checks.push(measured_check(
@@ -555,12 +585,20 @@ fn measured_result<T>(
     let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match &result {
         Ok(_) => progress.step_finished(key, StepStatus::Success, duration, None),
-        Err(error) => progress.step_finished(
-            key,
-            StepStatus::Failed,
-            duration,
-            Some(error.user_message.clone()),
-        ),
+        Err(error) => {
+            progress.step_failed_diagnostic(
+                key,
+                &error.user_message,
+                error.safe_diagnostic().as_deref(),
+                duration,
+            );
+            progress.step_finished(
+                key,
+                StepStatus::Failed,
+                duration,
+                Some(error.user_message.clone()),
+            );
+        }
     }
     result
 }
@@ -632,6 +670,14 @@ fn measured_check(
     let started = Instant::now();
     let check = operation();
     let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if check.status == StepStatus::Failed {
+        progress.step_failed_diagnostic(
+            key,
+            &check.summary,
+            check.technical_details.as_deref(),
+            duration,
+        );
+    }
     progress.step_finished(key, check.status, duration, Some(check.summary.clone()));
     Ok(check)
 }
@@ -759,7 +805,11 @@ pub fn checked_output(
     Ok(output)
 }
 
-fn checksum_check(connection: &mut dyn SshConnection, stored: &StoredSite) -> ScanCheck {
+fn checksum_check(
+    connection: &mut dyn SshConnection,
+    stored: &StoredSite,
+    excluded_root_directories: &[String],
+) -> ScanCheck {
     let observed_at = utc_now();
     let command = match build(
         &stored.site.wordpress_path,
@@ -771,13 +821,40 @@ fn checksum_check(connection: &mut dyn SshConnection, stored: &StoredSite) -> Sc
     match connection.execute(&command) {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            match measured_parse(&stored.site.id, "core_checksum", || {
+            let parsed = measured_parse(&stored.site.id, "core_checksum", || {
                 parsers::parse_checksum_output(&stdout, &observed_at)
-            }) {
+            });
+            match parsed {
                 Ok(findings) if output.exit_code == 0 || !findings.is_empty() => {
-                    checksum_findings_check(findings)
+                    checksum_with_root_files(
+                        connection,
+                        stored,
+                        findings,
+                        excluded_root_directories,
+                        &observed_at,
+                    )
                 }
-                Ok(_) | Err(_) => checksum_plain_fallback(connection, stored, &observed_at),
+                Ok(_) if checksum_json_format_is_unsupported(&output) => checksum_plain_fallback(
+                    connection,
+                    stored,
+                    &observed_at,
+                    excluded_root_directories,
+                ),
+                Ok(_) => {
+                    failed_checksum_check(checksum_command_error(&command, &output), &observed_at)
+                }
+                Err(_) if output.exit_code == 0 || checksum_json_format_is_unsupported(&output) => {
+                    checksum_plain_fallback(
+                        connection,
+                        stored,
+                        &observed_at,
+                        excluded_root_directories,
+                    )
+                }
+                Err(error) => failed_checksum_check(
+                    checksum_parse_error(&command, &output, error),
+                    &observed_at,
+                ),
             }
         }
         Err(error) => failed_checksum_check(error, &observed_at),
@@ -788,6 +865,7 @@ fn checksum_plain_fallback(
     connection: &mut dyn SshConnection,
     stored: &StoredSite,
     observed_at: &str,
+    excluded_root_directories: &[String],
 ) -> ScanCheck {
     let command = match build(
         &stored.site.wordpress_path,
@@ -808,15 +886,207 @@ fn checksum_plain_fallback(
     match measured_parse(&stored.site.id, "core_checksum_fallback", || {
         parsers::parse_checksum_plain_output(&combined, observed_at)
     }) {
-        Ok(findings) if output.exit_code == 0 || !findings.is_empty() => {
-            checksum_findings_check(findings)
-        }
-        Ok(_) => failed_checksum_check(
-            AppError::command_failed(command.action_name, output.exit_code, &combined),
+        Ok(findings) if output.exit_code == 0 || !findings.is_empty() => checksum_with_root_files(
+            connection,
+            stored,
+            findings,
+            excluded_root_directories,
             observed_at,
         ),
+        Ok(_) => failed_checksum_check(checksum_command_error(&command, &output), observed_at),
         Err(error) => failed_checksum_check(error, observed_at),
     }
+}
+
+#[derive(Deserialize)]
+struct UnexpectedRootFilesOutput {
+    files: Vec<String>,
+    truncated: bool,
+    scanned_entries: u64,
+}
+
+fn checksum_with_root_files(
+    connection: &mut dyn SshConnection,
+    stored: &StoredSite,
+    mut findings: Vec<Finding>,
+    excluded_root_directories: &[String],
+    observed_at: &str,
+) -> ScanCheck {
+    match unexpected_root_file_findings(connection, stored, excluded_root_directories, observed_at)
+    {
+        Ok((root_findings, truncated, scanned_entries)) => {
+            findings.extend(root_findings);
+            if truncated {
+                findings.push(checksum_scan_message(
+                    "Aanvullende rootcontrole afgekapt",
+                    format!(
+                        "De aanvullende rootcontrole stopte na {scanned_entries} items door de tijd- of resultaatlimiet. Bevestigde child-installaties waren al uitgesloten."
+                    ),
+                    observed_at,
+                ));
+            }
+            checksum_findings_check(exclude_child_installation_findings(
+                findings,
+                excluded_root_directories,
+            ))
+        }
+        Err(error) => {
+            let technical_details = error.safe_diagnostic();
+            findings.push(checksum_scan_message(
+                "Aanvullende rootcontrole niet voltooid",
+                error.user_message,
+                observed_at,
+            ));
+            let mut check = checksum_findings_check(findings);
+            check.technical_details = technical_details;
+            check
+        }
+    }
+}
+
+fn unexpected_root_file_findings(
+    connection: &mut dyn SshConnection,
+    stored: &StoredSite,
+    excluded_root_directories: &[String],
+    observed_at: &str,
+) -> Result<(Vec<Finding>, bool, u64), AppError> {
+    let command = build(
+        &stored.site.wordpress_path,
+        RemoteAction::FindUnexpectedRootFiles {
+            excluded_directories: excluded_root_directories.to_vec(),
+        },
+    )?;
+    let output = connection.execute(&command)?;
+    if output.exit_code != 0 {
+        return Err(checksum_command_error(&command, &output));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: UnexpectedRootFilesOutput =
+        serde_json::from_str(stdout.trim()).map_err(|error| {
+            AppError::ssh(
+                "checksum_root_parse_failed",
+                "De aanvullende WordPress-rootcontrole kon niet veilig worden gelezen.",
+                format!("Actie: {}; JSON-fout: {error}", command.action_name),
+                true,
+            )
+        })?;
+    if result.files.len() > MAX_SCAN_RESULTS || result.scanned_entries > 20_001 {
+        return Err(AppError::ssh(
+            "checksum_root_limit_invalid",
+            "De aanvullende WordPress-rootcontrole gaf een ongeldige hoeveelheid gegevens terug.",
+            format!(
+                "Actie: {}; bestanden: {}; bekeken items: {}",
+                command.action_name,
+                result.files.len(),
+                result.scanned_entries
+            ),
+            false,
+        ));
+    }
+    let mut unique_paths = BTreeSet::new();
+    let mut findings = Vec::with_capacity(result.files.len());
+    for path in result.files {
+        if unique_paths.insert(path.clone()) {
+            findings.push(parsers::unexpected_checksum_finding(&path, observed_at)?);
+        }
+    }
+    Ok((findings, result.truncated, result.scanned_entries))
+}
+
+fn checksum_json_format_is_unsupported(output: &ExecOutput) -> bool {
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_ascii_lowercase();
+    combined.contains("--format")
+        && (combined.contains("unknown")
+            || combined.contains("unrecognized")
+            || combined.contains("invalid"))
+}
+
+fn checksum_command_error(command: &RemoteCommand, output: &ExecOutput) -> AppError {
+    AppError::ssh(
+        "command_failed",
+        "De servercontrole kon niet worden voltooid.",
+        format!(
+            "Actie: {}; exitstatus: {}; stdout: {}; stderr: {}",
+            command.action_name,
+            output.exit_code,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        true,
+    )
+}
+
+fn checksum_parse_error(
+    command: &RemoteCommand,
+    output: &ExecOutput,
+    parser_error: AppError,
+) -> AppError {
+    AppError::ssh(
+        "checksum_output_invalid",
+        "De checksumresultaten konden niet veilig worden gelezen.",
+        format!(
+            "Actie: {}; exitstatus: {}; parser: {}; stdout: {}; stderr: {}",
+            command.action_name,
+            output.exit_code,
+            parser_error
+                .safe_diagnostic()
+                .unwrap_or(parser_error.category),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        true,
+    )
+}
+
+fn checksum_scan_message(title: &str, detail: String, observed_at: &str) -> Finding {
+    Finding {
+        id: Some(Uuid::new_v4().to_string()),
+        category: "wordpress-core-scan-incomplete".into(),
+        severity: FindingSeverity::Attention,
+        title: title.into(),
+        detail,
+        path: None,
+        checksum_status: Some(ChecksumStatus::ScanError),
+        disposition: crate::models::FindingDisposition::Active,
+        exception_id: None,
+        trusted_file_id: None,
+        policy_reason: None,
+        policy_target: None,
+        vulnerability: None,
+        observed_at: Some(observed_at.into()),
+    }
+}
+
+fn exclude_child_installation_findings(
+    findings: Vec<Finding>,
+    excluded_root_directories: &[String],
+) -> Vec<Finding> {
+    if excluded_root_directories.is_empty() {
+        return findings;
+    }
+    findings
+        .into_iter()
+        .filter(|finding| {
+            if finding.checksum_status != Some(ChecksumStatus::Unexpected) {
+                return true;
+            }
+            let Some(path) = finding.path.as_deref() else {
+                return true;
+            };
+            let normalized = path.strip_prefix("./").unwrap_or(path);
+            !excluded_root_directories.iter().any(|directory| {
+                normalized == directory
+                    || normalized
+                        .strip_prefix(directory)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+        })
+        .collect()
 }
 
 fn checksum_findings_check(findings: Vec<Finding>) -> ScanCheck {
@@ -1055,6 +1325,9 @@ mod tests {
                 auth_method: AuthMethod::Password,
                 key_path: None,
                 wordpress_path: "/var/www".into(),
+                parent_site_id: None,
+                relation_type: None,
+                parent_directory: None,
                 pinned_host_key: Some("SHA256:test".into()),
                 status: SiteStatus::Unscanned,
                 wordpress_version: None,
@@ -1104,18 +1377,95 @@ mod tests {
                         "Warning: File should not exist: wp-admin/extra.php\nError: WordPress installation doesn't verify against checksums.",
                     ),
                 ),
+                (
+                    "FindUnexpectedRootFiles",
+                    output(r#"{"files":[],"truncated":false,"scanned_entries":12}"#),
+                ),
             ]),
             authentications: AtomicUsize::new(0),
         };
 
         let site = stored();
         let mut connection = ssh.open_connection(&site.site, Some("secret")).unwrap();
-        let check = checksum_check(connection.as_mut(), &site);
+        let check = checksum_check(connection.as_mut(), &site, &[]);
         assert_eq!(check.status, StepStatus::Warning);
         assert_eq!(check.findings.len(), 1);
         assert_eq!(
             check.findings[0].checksum_status,
             Some(ChecksumStatus::Unexpected)
+        );
+    }
+
+    #[test]
+    fn genuine_checksum_failure_does_not_start_the_plain_fallback() {
+        let ssh = MockSsh {
+            outputs: HashMap::from([(
+                "VerifyCoreChecksums",
+                failed_output("Error: checksum service is unavailable"),
+            )]),
+            authentications: AtomicUsize::new(0),
+        };
+
+        let site = stored();
+        let mut connection = ssh.open_connection(&site.site, Some("secret")).unwrap();
+        let check = checksum_check(connection.as_mut(), &site, &[]);
+        assert_eq!(check.status, StepStatus::Failed);
+        let details = check.technical_details.unwrap();
+        assert!(details.contains("VerifyCoreChecksums"));
+        assert!(details.contains("checksum service is unavailable"));
+    }
+
+    #[test]
+    fn root_file_scan_adds_unknown_files_but_defensively_filters_child_paths() {
+        let ssh = MockSsh {
+            outputs: HashMap::from([
+                (
+                    "VerifyCoreChecksums",
+                    output("Success: WordPress installation verifies against checksums."),
+                ),
+                (
+                    "FindUnexpectedRootFiles",
+                    output(
+                        r#"{"files":["academy/should-never-return.php","logs/error.php"],"truncated":false,"scanned_entries":24}"#,
+                    ),
+                ),
+            ]),
+            authentications: AtomicUsize::new(0),
+        };
+
+        let site = stored();
+        let mut connection = ssh.open_connection(&site.site, Some("secret")).unwrap();
+        let check = checksum_check(connection.as_mut(), &site, &["academy".into()]);
+        assert_eq!(check.status, StepStatus::Warning);
+        assert_eq!(check.findings.len(), 1);
+        assert_eq!(check.findings[0].path.as_deref(), Some("logs/error.php"));
+    }
+
+    #[test]
+    fn child_scan_without_parent_exclusions_keeps_findings_in_its_own_root() {
+        let ssh = MockSsh {
+            outputs: HashMap::from([
+                (
+                    "VerifyCoreChecksums",
+                    output("Success: WordPress installation verifies against checksums."),
+                ),
+                (
+                    "FindUnexpectedRootFiles",
+                    output(
+                        r#"{"files":["academy/diagnostic.php"],"truncated":false,"scanned_entries":8}"#,
+                    ),
+                ),
+            ]),
+            authentications: AtomicUsize::new(0),
+        };
+
+        let site = stored();
+        let mut connection = ssh.open_connection(&site.site, Some("secret")).unwrap();
+        let check = checksum_check(connection.as_mut(), &site, &[]);
+        assert_eq!(check.findings.len(), 1);
+        assert_eq!(
+            check.findings[0].path.as_deref(),
+            Some("academy/diagnostic.php")
         );
     }
 
@@ -1167,6 +1517,10 @@ mod tests {
                 (
                     "VerifyCoreChecksums",
                     output("Success: WordPress installation verifies against checksums."),
+                ),
+                (
+                    "FindUnexpectedRootFiles",
+                    output(r#"{"files":[],"truncated":false,"scanned_entries":12}"#),
                 ),
                 ("ListUsers", output("[]")),
                 ("FindPhpFiles", output("")),
@@ -1261,10 +1615,34 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn confirmed_child_directories_hide_only_their_unexpected_checksum_findings() {
+        let findings = parsers::parse_checksum_output(
+            r#"[
+                {"file":"dev/wp-admin/load.php","message":"File should not exist"},
+                {"file":"portal/index.php","message":"File should not exist"},
+                {"file":"dev/wp-includes/version.php","message":"File doesn't verify against checksum"}
+            ]"#,
+            "2026-09-21T08:00:00Z",
+        )
+        .unwrap();
+        let filtered = exclude_child_installation_findings(findings, &["dev".into()]);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|finding| {
+            finding.path.as_deref() == Some("portal/index.php")
+                && finding.checksum_status == Some(ChecksumStatus::Unexpected)
+        }));
+        assert!(filtered.iter().any(|finding| {
+            finding.path.as_deref() == Some("dev/wp-includes/version.php")
+                && finding.checksum_status == Some(ChecksumStatus::Modified)
+        }));
+    }
+
     #[derive(Default)]
     struct RecordingProgress {
         started: Vec<String>,
         finished: Vec<(String, StepStatus, u64)>,
+        failed_diagnostics: Vec<(String, String, Option<String>)>,
     }
 
     impl ScanProgress for RecordingProgress {
@@ -1281,6 +1659,41 @@ mod tests {
         ) {
             self.finished.push((key.into(), status, duration_ms));
         }
+
+        fn step_failed_diagnostic(
+            &mut self,
+            key: &str,
+            user_message: &str,
+            technical_details: Option<&str>,
+            _duration_ms: u64,
+        ) {
+            self.failed_diagnostics.push((
+                key.into(),
+                user_message.into(),
+                technical_details.map(str::to_owned),
+            ));
+        }
+    }
+
+    #[test]
+    fn failed_scan_progress_receives_the_real_checksum_diagnostic() {
+        let mut progress = RecordingProgress::default();
+        let check = measured_check(&mut progress, "checksum", || {
+            failed_checksum_check(
+                AppError::command_failed("VerifyCoreChecksums", 70, "remote checksum error"),
+                "2026-09-21T08:00:00Z",
+            )
+        })
+        .unwrap();
+
+        assert_eq!(check.status, StepStatus::Failed);
+        assert!(matches!(
+            progress.failed_diagnostics.as_slice(),
+            [(key, _, Some(details))]
+                if key == "checksum"
+                    && details.contains("VerifyCoreChecksums")
+                    && details.contains("remote checksum error")
+        ));
     }
 
     #[test]
