@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildNestedSiteProposal, joinWordpressPath, rootSiteNameBase } from "./nestedSites";
+import type { Site } from "../types";
+import { availableNestedDirectories, buildNestedSiteProposal, joinWordpressPath, rootSiteNameBase } from "./nestedSites";
 
 const root = {
   key: "root",
@@ -7,6 +8,21 @@ const root = {
   url: "https://yellowbrand.nl/",
   wordpressPath: "/home/yellowbrand/domains/yellowbrand.nl/public_html/",
   isRoot: true,
+};
+
+const storedRoot: Site = {
+  id: "root-id",
+  name: "Yellowbrand",
+  url: root.url,
+  sshHost: "host.example.test",
+  sshPort: 22,
+  sshUsername: "deploy",
+  authMethod: "keyFile",
+  wordpressPath: root.wordpressPath,
+  status: "healthy",
+  updateCount: 0,
+  createdAt: "2026-09-21T10:00:00Z",
+  updatedAt: "2026-09-21T10:00:00Z",
 };
 
 describe("nested site proposals", () => {
@@ -69,5 +85,21 @@ describe("nested site proposals", () => {
     expect(joinWordpressPath("/home/ctlvu/domains/ctl-vu.nl/public_html/edudatabase/", "portal")).toBe(
       "/home/ctlvu/domains/ctl-vu.nl/public_html/edudatabase/portal",
     );
+  });
+
+  it("hides installations that already exist on the same server and path", () => {
+    const existingChild: Site = {
+      ...storedRoot,
+      id: "dev-id",
+      name: "dev yellowbrand",
+      url: "https://dev.yellowbrand.nl/",
+      wordpressPath: "/home/yellowbrand/domains/yellowbrand.nl/public_html/dev/",
+      parentSiteId: storedRoot.id,
+      relationType: "subdomain",
+      parentDirectory: "dev",
+    };
+    expect(
+      availableNestedDirectories(storedRoot, ["dev", "academy", "academy"], [storedRoot, existingChild]),
+    ).toEqual(["academy"]);
   });
 });

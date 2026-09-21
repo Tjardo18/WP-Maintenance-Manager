@@ -389,7 +389,19 @@ impl Database {
         let existing = self.get_site(id)?;
         let connection = self.connect()?;
         connection.execute("DELETE FROM sites WHERE id = ?1", [id])?;
-        Ok(existing.credential_ref)
+        let credential_still_used = match existing.credential_ref.as_deref() {
+            Some(reference) => connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sites WHERE credential_ref = ?1)",
+                [reference],
+                |row| row.get::<_, bool>(0),
+            )?,
+            None => false,
+        };
+        Ok(if credential_still_used {
+            None
+        } else {
+            existing.credential_ref
+        })
     }
 
     pub fn set_host_key(&self, id: &str, fingerprint: &str) -> Result<(), AppError> {
@@ -2278,6 +2290,45 @@ mod tests {
         assert_eq!(orphan.parent_site_id, None);
         assert_eq!(orphan.relation_type, None);
         assert_eq!(orphan.parent_directory, None);
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn shared_parent_credentials_are_only_released_after_the_last_site_is_deleted() {
+        let path = std::env::temp_dir().join(format!(
+            "wpmm-shared-nested-credential-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let database = Database::initialize(path.clone()).unwrap();
+        let parent = database
+            .save_site(&input(), Some("site:parent:ssh"))
+            .unwrap();
+        let mut child_input = input();
+        child_input.id = None;
+        child_input.name = "academy example".into();
+        child_input.url = "https://example.test/academy/".into();
+        child_input.wordpress_path = "/var/www/public/academy".into();
+        child_input.parent_site_id = Some(parent.id.clone());
+        child_input.relation_type = Some(SiteRelationType::Subdirectory);
+        child_input.parent_directory = Some("academy".into());
+        let child = database
+            .save_site(&child_input, Some("site:parent:ssh"))
+            .unwrap();
+
+        assert_eq!(database.delete_site(&parent.id).unwrap(), None);
+        assert_eq!(
+            database
+                .get_site(&child.id)
+                .unwrap()
+                .credential_ref
+                .as_deref(),
+            Some("site:parent:ssh")
+        );
+        assert_eq!(
+            database.delete_site(&child.id).unwrap().as_deref(),
+            Some("site:parent:ssh")
+        );
         drop(database);
         let _ = fs::remove_file(path);
     }

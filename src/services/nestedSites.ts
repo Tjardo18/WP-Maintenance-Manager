@@ -1,4 +1,4 @@
-import type { SiteRelationType } from "../types";
+import type { Site, SiteRelationType } from "../types";
 
 export interface NestedSiteParentContext {
   key: string;
@@ -33,6 +33,22 @@ function subdomainLabel(directory: string) {
 
 export function joinWordpressPath(parentPath: string, directory: string) {
   return `${parentPath.replace(/\/+$/g, "")}/${normalizedDirectory(directory)}`;
+}
+
+export function availableNestedDirectories(
+  parent: Pick<Site, "id" | "sshHost" | "sshPort" | "wordpressPath">,
+  directories: string[],
+  sites: Site[],
+) {
+  const knownPaths = new Set(
+    sites
+      .filter((site) => site.id !== parent.id)
+      .filter((site) => site.sshHost.toLowerCase() === parent.sshHost.toLowerCase() && site.sshPort === parent.sshPort)
+      .map((site) => site.wordpressPath.replace(/\/+$/g, "")),
+  );
+  return [...new Set(directories)]
+    .filter((directory) => !knownPaths.has(joinWordpressPath(parent.wordpressPath, directory)))
+    .sort((left, right) => left.localeCompare(right));
 }
 
 export function rootSiteNameBase(name: string, url: string) {

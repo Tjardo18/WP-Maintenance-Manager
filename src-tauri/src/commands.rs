@@ -665,9 +665,15 @@ pub fn save_site(
     validate_site(&input)?;
     validate_site_identity_and_relationship(&state.database, &mut input)?;
     let is_new = input.id.is_none();
+    let has_secret = input
+        .credential_secret
+        .as_deref()
+        .is_some_and(|secret| !secret.is_empty());
+    let inherited_credential_ref =
+        inherited_credential_ref_for_new_site(&state.database, &input, is_new, has_secret)?;
     let is_new_password =
         is_new && matches!(input.auth_method, crate::models::AuthMethod::Password);
-    if is_new_password && input.credential_secret.as_deref().is_none_or(str::is_empty) {
+    if is_new_password && !has_secret && inherited_credential_ref.is_none() {
         return Err(AppError::validation("Vul het SSH-wachtwoord in."));
     }
     let provisional_id = input
@@ -708,10 +714,6 @@ pub fn save_site(
         }
     }
     let credential_ref = format!("site:{provisional_id}:ssh");
-    let has_secret = input
-        .credential_secret
-        .as_deref()
-        .is_some_and(|secret| !secret.is_empty());
     if let Some(secret) = input
         .credential_secret
         .as_deref()
@@ -720,10 +722,10 @@ pub fn save_site(
         state.credentials.set(&credential_ref, secret)?;
     }
     input.credential_secret = None;
-    match state
-        .database
-        .save_site(&input, has_secret.then_some(credential_ref.as_str()))
-    {
+    let credential_ref_for_save = has_secret
+        .then_some(credential_ref.as_str())
+        .or(inherited_credential_ref.as_deref());
+    match state.database.save_site(&input, credential_ref_for_save) {
         Ok(site) => Ok(site),
         Err(error) => {
             if is_new && has_secret {
@@ -3692,6 +3694,23 @@ fn normalized_wordpress_path(path: &str) -> String {
     }
 }
 
+fn inherited_credential_ref_for_new_site(
+    database: &crate::database::Database,
+    input: &SiteInput,
+    is_new: bool,
+    has_secret: bool,
+) -> Result<Option<String>, AppError> {
+    if !is_new || has_secret {
+        return Ok(None);
+    }
+    input
+        .parent_site_id
+        .as_deref()
+        .map(|parent_id| database.get_site(parent_id))
+        .transpose()
+        .map(|parent| parent.and_then(|stored| stored.credential_ref))
+}
+
 fn child_wordpress_path(parent_path: &str, directory: &str) -> String {
     let parent = normalized_wordpress_path(parent_path);
     if parent == "/" {
@@ -4213,6 +4232,34 @@ mod tests {
         wrong_path.parent_directory = Some("portal".into());
         assert!(validate_site_identity_and_relationship(&database, &mut wrong_path).is_err());
 
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn new_child_without_a_new_secret_inherits_the_parent_credential_reference() {
+        let path = std::env::temp_dir().join(format!(
+            "wpmm-inherited-child-credential-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let database = Database::initialize(path.clone()).unwrap();
+        let parent = database
+            .save_site(&site_input(), Some("site:existing-parent:ssh"))
+            .unwrap();
+        let mut child = site_input();
+        child.id = None;
+        child.parent_site_id = Some(parent.id);
+
+        assert_eq!(
+            inherited_credential_ref_for_new_site(&database, &child, true, false)
+                .unwrap()
+                .as_deref(),
+            Some("site:existing-parent:ssh")
+        );
+        assert_eq!(
+            inherited_credential_ref_for_new_site(&database, &child, true, true).unwrap(),
+            None
+        );
         drop(database);
         let _ = std::fs::remove_file(path);
     }

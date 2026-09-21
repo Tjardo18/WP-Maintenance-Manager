@@ -10,7 +10,9 @@ Websitecontroles en bulkscans draaien als begrensde achtergrondtaken. Cached pag
 
 ## Geneste WordPress-installaties
 
-Bij het toevoegen van een website controleert de verbindingstest ook de directe mappen in de ingestelde WordPress-root. Voor iedere onverwachte map kiest de gebruiker expliciet **Subdomein**, **Subdirectory** of **Geen aparte website**. De app stelt voor gekoppelde installaties een bewerkbare naam en URL voor, bouwt het vaste directe child-pad op en neemt de SSH-verbinding plus gepinde serveridentiteit van de parent over. Een gekozen subdomein wordt meteen op dezelfde manier gecontroleerd, zodat meerdere niveaus en meerdere installaties in één toevoegflow kunnen worden verwerkt.
+Bij het toevoegen van een website controleert de verbindingstest ook de directe mappen in de ingestelde WordPress-root. Voor iedere onverwachte map kiest de gebruiker expliciet **Subdomein**, **Subdirectory** of **Geen aparte website**. De app stelt voor gekoppelde installaties een bewerkbare naam en URL voor, bouwt het vaste directe child-pad op en neemt de SSH-verbinding plus gepinde serveridentiteit van de parent over. Iedere gekozen installatie wordt meteen op dezelfde manier gecontroleerd, zodat subdomeinen én subdirectories over meerdere niveaus in één toevoegflow kunnen worden verwerkt.
+
+Op de detailpagina van iedere al opgeslagen website kan dezelfde controle later opnieuw worden gestart via **Zoeken naar subdomeinen/subdirectories**. Daardoor kunnen nieuw aangelegde mappen ook achteraf worden gekoppeld, zowel onder een rootwebsite als onder een bestaande child. Iedere bevestigde kandidaat wordt direct op verdere subdomeinen en subdirectories gecontroleerd; alle gekozen niveaus worden parent-vóór-child opgeslagen. Installaties die op dezelfde server en hetzelfde WordPress-pad al in de app staan, worden niet nogmaals voorgesteld. De naam en URL blijven vóór het koppelen bewerkbaar en de opgeslagen SSH-toegang van de parent wordt zonder nieuwe secretinvoer hergebruikt.
 
 Parent-childrelaties worden in SQLite bewaard. De backend weigert cirkels, afwijkende SSH-identiteiten, een child-pad buiten de gekozen directe parentmap en dubbele installaties op basis van server/pad of URL. Bij een parentscan worden bevestigde childmappen al vóór de aanvullende rootcontrole uitgesloten, zodat die controle de child niet doorloopt of als parent-core behandelt. Een map met **Geen aparte website** blijft normaal in de scan zichtbaar; de child zelf wordt altijd vanuit zijn eigen opgeslagen WordPress-root gecontroleerd.
 
@@ -189,7 +191,7 @@ Geslaagde lokale back-ups hebben momenteel geen automatische bewaartermijn. Er i
 
 - First-run applicatiewachtwoord met Argon2id, één willekeurige geheugensessie, backend-autorisatie, login-rate-limiting, handmatige lock en instelbare idle lock (standaard 15 minuten).
 - Dashboard voor tientallen websites met status, zoeken en filters. Websitekaarten en detailpagina's tonen de automatisch uitgelezen WP-CLI-versie; de URL op de detailpagina opent via de gevalideerde OS-browseropener.
-- Toevoegflow voor meerdere geneste WordPress-installaties met handmatige subdomein-/subdirectorykeuze, recursieve subdomeincontrole, opgeslagen parentrelaties en automatische checksumuitsluiting bij de parent.
+- Toevoegflow en herdetectie voor meerdere geneste WordPress-installaties met handmatige subdomein-/subdirectorykeuze, controle over meerdere niveaus, opgeslagen parentrelaties en automatische checksumuitsluiting bij de parent.
 - Genormaliseerde site-momentopnames met eerste baseline, centrale deterministische diff-engine, partial-sectieveiligheid, previous/baseline/datumvergelijking, compacte Dashboardstatus en momentopnamehistorie.
 - Website toevoegen/bewerken/verwijderen en veilige authenticatiekeuze.
 - Persistente SQLite-siteopslag met UUID's, UTC-timestamps en cascading historie-tabellen.

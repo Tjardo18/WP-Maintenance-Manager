@@ -360,7 +360,7 @@ async function testCandidate(candidate: NestedSiteCandidate) {
     candidate.result = connectionResult;
     candidate.verified = connectionResult.success;
     candidate.verifiedSignature = connectionResult.success ? signature : undefined;
-    if (connectionResult.success && candidate.choice === "subdomain") {
+    if (connectionResult.success) {
       addCandidates(candidate.key, candidate.depth + 1, connectionResult.unexpectedDirectories);
     }
   } catch (cause) {
