@@ -306,26 +306,85 @@ fn normalize_boolean(value: &Value) -> Option<bool> {
 }
 
 fn normalize_cron(events: Vec<SnapshotCronInput>) -> Result<Vec<SnapshotCronEvent>, AppError> {
-    let mut seen = BTreeSet::new();
-    let mut normalized = Vec::with_capacity(events.len());
+    let mut grouped =
+        BTreeMap::<String, BTreeMap<(Option<String>, Option<String>), SnapshotCronEvent>>::new();
     for event in events {
         let hook = bounded_text(&event.hook, "cronhook", 250)?;
         let schedule = normalize_optional_text(event.schedule, "cronschema", 250)?;
         let recurrence = normalize_optional_text(event.recurrence, "cronherhaling", 250)?;
         let args_fingerprint = event.args.as_ref().map(json_fingerprint).transpose()?;
         let identity = cron_identity(&hook, args_fingerprint.as_deref());
-        ensure_unique(&mut seen, &identity, "cronjob")?;
-        normalized.push(SnapshotCronEvent {
-            identity,
-            hook,
-            schedule,
-            recurrence,
-            args_fingerprint,
-            next_run_at: event.next_run_at.as_deref().and_then(normalize_timestamp),
-        });
+        let next_run_at = event.next_run_at.as_deref().and_then(normalize_timestamp);
+        let variant = (schedule.clone(), recurrence.clone());
+        let variants = grouped.entry(identity.clone()).or_default();
+
+        if let Some(existing) = variants.get_mut(&variant) {
+            retain_earliest_next_run(&mut existing.next_run_at, next_run_at);
+            continue;
+        }
+
+        variants.insert(
+            variant,
+            SnapshotCronEvent {
+                identity,
+                hook,
+                schedule,
+                recurrence,
+                args_fingerprint,
+                next_run_at,
+            },
+        );
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(grouped.len());
+    for (base_identity, variants) in grouped {
+        for (index, (_, mut event)) in variants.into_iter().enumerate() {
+            // WordPress can store the same logical event at multiple timestamps. Those rows are
+            // intentionally collapsed because the next execution time is volatile snapshot data.
+            // If one hook/argument pair genuinely has multiple schedules, retain every schedule
+            // under a deterministic secondary identity instead of rejecting the whole snapshot.
+            event.identity = if index == 0 {
+                base_identity.clone()
+            } else {
+                cron_variant_identity(
+                    &base_identity,
+                    event.schedule.as_deref(),
+                    event.recurrence.as_deref(),
+                )
+            };
+            ensure_unique(&mut seen, &event.identity, "cronjob")?;
+            normalized.push(event);
+        }
     }
     normalized.sort_by(|left, right| left.identity.cmp(&right.identity));
     Ok(normalized)
+}
+
+fn retain_earliest_next_run(current: &mut Option<String>, candidate: Option<String>) {
+    match (current.as_ref(), candidate) {
+        (None, Some(candidate)) => *current = Some(candidate),
+        (Some(existing), Some(candidate)) if candidate < *existing => *current = Some(candidate),
+        _ => {}
+    }
+}
+
+fn cron_variant_identity(
+    base_identity: &str,
+    schedule: Option<&str>,
+    recurrence: Option<&str>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(base_identity.as_bytes());
+    hasher.update([0]);
+    if let Some(schedule) = schedule {
+        hasher.update(schedule.as_bytes());
+    }
+    hasher.update([0]);
+    if let Some(recurrence) = recurrence {
+        hasher.update(recurrence.as_bytes());
+    }
+    format!("cron:{}", hex_digest(&hasher.finalize()))
 }
 
 fn normalize_files(files: Vec<SnapshotFileState>) -> Result<Vec<SnapshotFileState>, AppError> {
@@ -628,6 +687,94 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.starts_with("sha256:"))
         );
+    }
+
+    #[test]
+    fn duplicate_cron_instances_are_collapsed_without_rejecting_the_snapshot() {
+        let mut input = input();
+        input.cron = SnapshotBuildSection::Complete(vec![
+            SnapshotCronInput {
+                hook: "action_scheduler_run_queue".into(),
+                schedule: Some("every_minute".into()),
+                recurrence: Some("60".into()),
+                args: Some(serde_json::json!([])),
+                next_run_at: Some("2026-09-15T08:31:00Z".into()),
+            },
+            SnapshotCronInput {
+                hook: "action_scheduler_run_queue".into(),
+                schedule: Some("every_minute".into()),
+                recurrence: Some("60".into()),
+                args: Some(serde_json::json!([])),
+                next_run_at: Some("2026-09-15T08:30:00Z".into()),
+            },
+        ]);
+
+        let snapshot = SnapshotBuilder::build(input).unwrap();
+
+        assert_eq!(snapshot.cron.len(), 1);
+        assert_eq!(
+            snapshot.cron[0].next_run_at.as_deref(),
+            Some("2026-09-15T08:30:00Z")
+        );
+    }
+
+    #[test]
+    fn cron_schedule_variants_get_deterministic_unique_identities() {
+        let events = vec![
+            SnapshotCronInput {
+                hook: "example_hook".into(),
+                schedule: Some("hourly".into()),
+                recurrence: Some("3600".into()),
+                args: Some(serde_json::json!({"site": "primary"})),
+                next_run_at: Some("2026-09-15T09:00:00Z".into()),
+            },
+            SnapshotCronInput {
+                hook: "example_hook".into(),
+                schedule: Some("daily".into()),
+                recurrence: Some("86400".into()),
+                args: Some(serde_json::json!({"site": "primary"})),
+                next_run_at: Some("2026-09-16T08:00:00Z".into()),
+            },
+        ];
+        let mut forward_input = input();
+        forward_input.cron = SnapshotBuildSection::Complete(events.clone());
+        let mut reverse_input = input();
+        reverse_input.cron = SnapshotBuildSection::Complete(events.into_iter().rev().collect());
+
+        let forward = SnapshotBuilder::build(forward_input).unwrap();
+        let reverse = SnapshotBuilder::build(reverse_input).unwrap();
+
+        assert_eq!(forward.cron.len(), 2);
+        assert_eq!(forward.cron, reverse.cron);
+        assert_ne!(forward.cron[0].identity, forward.cron[1].identity);
+        assert_eq!(
+            forward
+                .cron
+                .iter()
+                .map(|event| event.schedule.as_deref().unwrap())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["daily", "hourly"])
+        );
+    }
+
+    #[test]
+    fn a_single_cron_schedule_change_keeps_its_logical_identity() {
+        let build = |schedule: &str, recurrence: &str| {
+            let mut input = input();
+            input.cron = SnapshotBuildSection::Complete(vec![SnapshotCronInput {
+                hook: "example_hook".into(),
+                schedule: Some(schedule.into()),
+                recurrence: Some(recurrence.into()),
+                args: Some(serde_json::json!([])),
+                next_run_at: Some("2026-09-15T09:00:00Z".into()),
+            }]);
+            SnapshotBuilder::build(input).unwrap().cron.remove(0)
+        };
+
+        let hourly = build("hourly", "3600");
+        let daily = build("daily", "86400");
+
+        assert_eq!(hourly.identity, daily.identity);
     }
 
     #[test]
