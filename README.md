@@ -28,6 +28,14 @@ De selector vergelijkt de huidige controle met de vorige controle, de expliciete
 
 SQLite bewaart standaard maximaal 100 momentopnames per site. De expliciete baseline en pre-/post-onderhoudsmomentopnames zijn tegen automatische retention beschermd. Snapshotdata is bedoeld voor veranderingdetectie en is geen garantie dat een site veilig of malwarevrij is; zie [SECURITY.md](SECURITY.md) voor de opgeslagen en uitgesloten gegevens.
 
+## Veilig databasebeheer
+
+Onder **Instellingen → Databasebeheer** toont de app uitsluitend zes vooraf gecontroleerde opschoonacties: websites, scanhistorie, snapshots en wijzigingen, onderhoudshistorie, foutenlog en auditlog. Per actie staan de actuele recordaantallen, opgeslagen gegevens, afhankelijke categorieën en concrete gevolgen vóór de bevestiging in beeld. Authenticatie, app-instellingen, migratiegegevens en de Wordfence-feed zijn geen vrij te kiezen targets; er bestaat bewust geen generieke functie om een willekeurige tabel te legen.
+
+Opschonen gebeurt in één SQLite-transactie met ingeschakelde foreign keys en een integriteitscontrole vóór de commit. Een fout rolt de volledige databasewijziging terug. Het legen van `sites` vereist dat exact **VERWIJDEREN** wordt ingevoerd, sluit actieve terminals, verwijdert sitegebonden data via cascades en ruimt daarna de bijbehorende SSH-referenties in de beveiligde Windows-opslag op. Actieve scans blokkeren conflicterende acties. Na succes probeert de app SQLite te comprimeren; als dat door een tijdelijke lock niet lukt, blijven de vrijgekomen pagina's beschikbaar voor hergebruik en wordt dit als waarschuwing gemeld.
+
+Databasebeheer verwijdert geen fysieke `.sql.gz`-back-upbestanden. Bij het verwijderen van websites of onderhoudshistorie verdwijnen uitsluitend de SQLite-registraties; het vooraf getoonde gevolg vermeldt expliciet dat de lokale bestanden op de computer blijven staan.
+
 ## Uitzonderingen
 
 Bekende of operationeel onbelangrijke meldingen kunnen per website permanent of tijdelijk worden genegeerd. De backend matcht exact op website, controle, meldingstype en target: een genegeerde ontbrekende `readme.html` verbergt dus geen latere gewijzigde `readme.html`. Informatieve ontbrekende distributiebestanden zoals `readme.html` en `license.txt` tellen standaard niet als websitewaarschuwing. De Security-tab toont standaard alleen actieve meldingen; genegeerde, vertrouwde en verlopen records blijven via filters en de centrale pagina **Uitzonderingen** beschikbaar.

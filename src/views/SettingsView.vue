@@ -6,6 +6,7 @@ import type { FilePreviewMode, MarkdownPreviewMode, VulnerabilityRefreshJobState
 import { errorMessage } from "../utils/errors";
 import { formatDate } from "../utils/format";
 import { useAuthStore } from "../stores/auth";
+import DatabaseCleanup from "../components/DatabaseCleanup.vue";
 
 const auth = useAuthStore();
 const concurrency = ref(4);
@@ -74,7 +75,12 @@ async function refreshWordfenceFeed() { integrationBusy.value = "refresh"; error
     <section class="card form-card"><div class="section-heading"><span class="section-icon"><DatabaseBackup /></span><div><h3>Lokale backups</h3><p>Databasebackups staan buiten de website en worden lokaal als <code>.sql.gz</code> opgeslagen.</p></div></div><div class="form-grid"><div class="notice span-2"><Info :size="18" /><p>Windows-locatie: <code>%APPDATA%\nl.wpmaintenancemanager.desktop\backups\&lt;site-id&gt;\</code>. Het volledige pad van een gemaakte backup staat in de onderhoudshistorie; het bestand is dan al op deze computer opgeslagen.</p></div><div class="notice span-2"><Info :size="18" /><p>Backups worden niet automatisch verwijderd. De app heeft momenteel geen download-, openen- of herstelfunctie; herstel gebeurt handmatig met bijvoorbeeld WP-CLI, phpMyAdmin of hostinggereedschap.</p></div></div></section>
     <section class="card form-card"><div class="section-heading"><span class="section-icon"><LockKeyhole /></span><div><h3>Credentials</h3><p>Wachtwoorden, passphrases en API-sleutels staan in de beveiligde opslag van het besturingssysteem.</p></div></div><div class="notice safe"><LockKeyhole :size="18" /><p>De SQLite-database bevat geen geheime waarden. Credentials worden nooit teruggestuurd naar de interface.</p></div></section>
     <section class="card form-card"><div class="section-heading"><span class="section-icon"><ShieldCheck /></span><div><h3>Beveiliging</h3><p>De backend blokkeert sitegegevens en beheeracties zonder geldige sessie.</p></div></div><div class="form-grid"><label><span>Automatisch vergrendelen na</span><select v-model.number="idleMinutes"><option :value="5">5 minuten</option><option :value="10">10 minuten</option><option :value="15">15 minuten</option><option :value="30">30 minuten</option><option :value="60">1 uur</option></select></label><div class="notice"><Info :size="18" /><p>Na volledig afsluiten of herstarten moet je altijd opnieuw inloggen. Actieve muterende backendacties mogen bij vergrendeling veilig afronden.</p></div></div><form class="password-change" @submit.prevent="changePassword"><h4>Wachtwoord wijzigen</h4><div class="form-grid three"><label><span>Huidig wachtwoord</span><input v-model="currentPassword" type="password" autocomplete="current-password" required /></label><label><span>Nieuw wachtwoord</span><input v-model="newPassword" type="password" autocomplete="new-password" minlength="12" required /></label><label><span>Herhaal nieuw wachtwoord</span><input v-model="repeatedPassword" type="password" autocomplete="new-password" minlength="12" required /></label></div><p v-if="repeatedPassword && newPassword !== repeatedPassword" class="field-error">De nieuwe wachtwoorden zijn niet gelijk.</p><button class="button secondary" type="submit" :disabled="passwordBusy || newPassword.length < 12 || newPassword !== repeatedPassword">{{ passwordBusy ? 'Wijzigen…' : 'Wachtwoord wijzigen' }}</button></form><div class="security-lock-row"><p>Vergrendel direct en wis gevoelige UI-state.</p><button class="button danger-text" @click="auth.lock"><LockKeyhole :size="16" /> Nu vergrendelen</button></div></section>
+    <DatabaseCleanup />
   </div>
   <p v-if="error" class="error-banner">{{ error }}</p>
-  <div class="form-actions"><span v-if="saved" class="saved-copy">Instellingen opgeslagen</span><button class="button primary" :disabled="saving || concurrency < 1 || concurrency > 5" @click="save"><Save :size="17" /> {{ saving ? 'Opslaan…' : 'Algemene instellingen opslaan' }}</button></div>
+  <div class="form-actions settings-save-actions"><span v-if="saved" class="saved-copy">Instellingen opgeslagen</span><button class="button primary" :disabled="saving || concurrency < 1 || concurrency > 5" @click="save"><Save :size="17" /> {{ saving ? 'Opslaan…' : 'Algemene instellingen opslaan' }}</button></div>
 </template>
+
+<style scoped>
+.settings-save-actions { margin-top: 18px; }
+</style>

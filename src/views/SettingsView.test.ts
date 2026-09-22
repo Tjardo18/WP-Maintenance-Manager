@@ -8,6 +8,8 @@ const mockApi = vi.hoisted(() => ({
   getWordfenceStatus: vi.fn(async () => ({ configured: false, connectionStatus: "not_tested", feedStatus: "missing", vulnerabilityCount: 0, softwareRecordCount: 0, refreshRunning: false, cooldownRemainingSeconds: 0 })),
   getWordfenceFeedRefreshJob: vi.fn(async () => undefined),
   onWordfenceFeedRefreshUpdated: vi.fn(async () => () => undefined),
+  listDatabaseCleanupOptions: vi.fn(async () => []),
+  cleanupDatabase: vi.fn(),
 }));
 const mockAuth = vi.hoisted(() => ({
   idleTimeoutMinutes: 15,
@@ -18,6 +20,7 @@ const mockAuth = vi.hoisted(() => ({
 
 vi.mock("../services/tauri", () => ({ appApi: mockApi }));
 vi.mock("../stores/auth", () => ({ useAuthStore: () => mockAuth }));
+vi.mock("../stores/sites", () => ({ useSitesStore: () => ({ load: vi.fn(async () => undefined) }) }));
 
 import SettingsView from "./SettingsView.vue";
 

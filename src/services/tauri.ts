@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteChangeSummary, SiteInput, SnapshotDiff, SnapshotHistoryItem, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, DatabaseCleanupOption, DatabaseCleanupRequest, DatabaseCleanupResult, DatabaseCleanupTarget, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteChangeSummary, SiteInput, SnapshotDiff, SnapshotHistoryItem, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import type { MediaKeyCommand } from "./keyboardShortcuts";
 import { demoChanges, demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
@@ -12,6 +12,7 @@ let browserConfigured = false;
 let browserPasswordHash = "";
 let browserIdleMinutes = 15;
 let browserSettings: AppSettings = { scanConcurrency: 4, filePreviewMode: "normal", markdownPreviewMode: "raw" };
+let browserMaintenanceRuns = structuredClone(demoHistory);
 const browserTerminalChallenges = new Map<string, { siteId: string; expiresAt: number }>();
 const browserScanJobs = new Map<string, ScanJobState>();
 const browserScanJobListeners = new Set<(job: ScanJobState) => void>();
@@ -50,6 +51,40 @@ function browserSiteChanges(siteId: string): SiteChangeHistory {
     history.comparison.changes.forEach((change) => { change.siteId = siteId; change.seen = browserSeenSnapshots.has(`${siteId}:${change.toSnapshotId}`); });
   }
   return history;
+}
+
+function browserCleanupOptions(): DatabaseCleanupOption[] {
+  const counts: Record<DatabaseCleanupTarget, number> = {
+    sites: browserSites.length,
+    scan_runs: browserScans.size,
+    site_snapshots: browserSnapshotBaselines.size,
+    maintenance_runs: browserMaintenanceRuns.length,
+    error_logs: 0,
+    audit_events: 0,
+  };
+  const definitions: Array<[DatabaseCleanupTarget, string, string, string[], string[], string]> = [
+    ["sites", "Websites", "Alle websites die aan WP Maintenance Manager zijn toegevoegd.", ["Website- en SSH-configuratie.", "Relaties tussen root- en childwebsites."], ["Scans, snapshots, uitzonderingen, vertrouwde bestanden en onderhoudshistorie."], "Alle websites en uitsluitend daaraan gekoppelde gegevens worden verwijderd. Globale instellingen en authenticatie blijven behouden."],
+    ["scan_runs", "Scanhistorie", "Alle uitgevoerde websitescans en resultaten.", ["Scantijden, controles en bevindingen."], ["Scancontroles en bevindingen worden verwijderd; website-scansamenvattingen worden gereset."], "Websites en snapshots blijven behouden."],
+    ["site_snapshots", "Snapshots en wijzigingen", "Alle opgeslagen momentopnames en berekende verschillen.", ["Websiteconfiguratie op meetmomenten en wijzigingshistorie."], ["Vergelijkingen, wijzigingen en baseline-statussen worden verwijderd."], "Scans, websites en onderhoudsrecords blijven behouden."],
+    ["maintenance_runs", "Onderhoudshistorie", "Alle geregistreerde onderhouds- en updateacties.", ["Onderhoudsstappen en lokale back-upregistraties."], ["Lokale .sql.gz-bestanden blijven op de computer staan."], "De onderhoudshistorie wordt verwijderd; back-upbestanden zelf blijven behouden."],
+    ["error_logs", "Foutenlog", "Alle lokaal opgeslagen technische fouten en waarschuwingen.", ["Fout-ID's, tijdstippen, categorieën en technische details."], ["Er zijn geen afhankelijke tabellen."], "Alleen de foutregels worden verwijderd."],
+    ["audit_events", "Auditlog", "De lokale beveiligings- en actiehistorie.", ["Geslaagde en mislukte beheeracties en tijdstippen."], ["Er zijn geen afhankelijke tabellen."], "Het volledige auditlog wordt verwijderd en kan niet worden gereconstrueerd."],
+  ];
+  return definitions.map(([target, title, description, storedData, dependencies, cleanupEffect]) => ({
+    target,
+    tableName: target,
+    title,
+    description,
+    storedData,
+    dependencies,
+    cleanupEffect,
+    recordCount: counts[target],
+    impacts: [{ key: target, label: title.toLocaleLowerCase("nl-NL"), count: counts[target], effect: "verwijderd" }],
+    previewToken: `${target}:${counts[target]}`,
+    confirmationMode: target === "sites" ? "typed" : "dialog",
+    confirmationPhrase: target === "sites" ? "VERWIJDEREN" : target,
+    irreversible: true,
+  }));
 }
 
 const demoScanSteps: ScanJobState["steps"] = [
@@ -310,11 +345,23 @@ export const appApi = {
   async checkUpdates(siteId: string): Promise<UpdateItem[]> { return isTauri() ? call("check_updates", { siteId }) : structuredClone(demoUpdates); },
   async listCachedUpdates(siteId: string): Promise<UpdateItem[]> { return isTauri() ? call("list_cached_updates", { siteId }) : structuredClone(demoUpdates); },
   async runUpdate(siteId: string, kind: string, slug?: string): Promise<void> { if (isTauri()) await call("run_update", { siteId, kind, slug }); else await new Promise((resolve) => setTimeout(resolve, 700)); },
-  async runMaintenance(siteId: string): Promise<MaintenanceRun> { return isTauri() ? call("run_maintenance", { siteId }) : { ...structuredClone(demoHistory[0]), id: crypto.randomUUID(), siteId }; },
-  async listHistory(siteId?: string): Promise<MaintenanceRun[]> { return isTauri() ? call("list_maintenance_runs", { siteId: siteId ?? null }) : structuredClone(demoHistory.filter((run) => !siteId || run.siteId === siteId)); },
+  async runMaintenance(siteId: string): Promise<MaintenanceRun> { if (isTauri()) return call("run_maintenance", { siteId }); const run = { ...structuredClone(demoHistory[0]), id: crypto.randomUUID(), siteId }; browserMaintenanceRuns = [run, ...browserMaintenanceRuns]; return run; },
+  async listHistory(siteId?: string): Promise<MaintenanceRun[]> { return isTauri() ? call("list_maintenance_runs", { siteId: siteId ?? null }) : structuredClone(browserMaintenanceRuns.filter((run) => !siteId || run.siteId === siteId)); },
   async onMaintenanceProgress(handler: (payload: { siteId: string; runId: string; step: MaintenanceStep }) => void): Promise<UnlistenFn> { if (!isTauri()) return () => undefined; return listen("maintenance-progress", (event) => handler(event.payload as { siteId: string; runId: string; step: MaintenanceStep })); },
   async getSettings(): Promise<AppSettings> { return isTauri() ? call("get_settings") : structuredClone(browserSettings); },
   async saveSettings(settings: AppSettings): Promise<AppSettings> { if (isTauri()) return call("save_settings", { settings }); browserSettings = structuredClone(settings); return structuredClone(browserSettings); },
+  async listDatabaseCleanupOptions(): Promise<DatabaseCleanupOption[]> { return isTauri() ? call("list_database_cleanup_options") : structuredClone(browserCleanupOptions()); },
+  async cleanupDatabase(request: DatabaseCleanupRequest): Promise<DatabaseCleanupResult> {
+    if (isTauri()) return call("cleanup_database", { request });
+    const option = browserCleanupOptions().find((candidate) => candidate.target === request.target);
+    if (!option || request.confirmation.trim() !== option.confirmationPhrase) throw new Error("De bevestiging voor deze opschoonactie is niet correct.");
+    if (request.previewToken !== option.previewToken) throw new Error("De database is gewijzigd sinds deze aantallen zijn getoond. Vernieuw het overzicht en bevestig opnieuw.");
+    if (request.target === "sites") { browserSites = []; browserScans.clear(); browserExceptions.splice(0); browserTrustedFiles.splice(0); browserSnapshotBaselines.clear(); browserSeenSnapshots.clear(); browserMaintenanceRuns = []; }
+    if (request.target === "scan_runs") browserScans.clear();
+    if (request.target === "site_snapshots") { browserSnapshotBaselines.clear(); browserSeenSnapshots.clear(); }
+    if (request.target === "maintenance_runs") browserMaintenanceRuns = [];
+    return { target: request.target, tableName: option.tableName, status: "success", impacts: structuredClone(option.impacts), warnings: [], completedAt: new Date().toISOString() };
+  },
   async getWordfenceStatus(): Promise<WordfenceIntegrationStatus> { return isTauri() ? call("get_wordfence_status") : { configured: browserWordfenceConfigured, connectionStatus: "not_tested", feedStatus: "missing", vulnerabilityCount: 0, softwareRecordCount: 0, refreshRunning: false, cooldownRemainingSeconds: 0 }; },
   async saveWordfenceApiKey(apiKey: string): Promise<WordfenceIntegrationStatus> { if (isTauri()) return call("save_wordfence_api_key", { apiKey }); browserWordfenceConfigured = Boolean(apiKey.trim()); return appApi.getWordfenceStatus(); },
   async removeWordfenceApiKey(): Promise<WordfenceIntegrationStatus> { if (isTauri()) return call("remove_wordfence_api_key"); browserWordfenceConfigured = false; return appApi.getWordfenceStatus(); },

@@ -6,6 +6,7 @@ mod commands;
 mod core_operations;
 mod credentials;
 pub mod database;
+mod database_cleanup;
 mod engine;
 mod error;
 mod error_log;
@@ -121,6 +122,8 @@ pub fn run() {
             commands::delete_checksum_findings,
             commands::get_settings,
             commands::save_settings,
+            commands::list_database_cleanup_options,
+            commands::cleanup_database,
             commands::get_wordfence_status,
             commands::save_wordfence_api_key,
             commands::remove_wordfence_api_key,

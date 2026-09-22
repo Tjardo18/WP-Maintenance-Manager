@@ -38,6 +38,14 @@ De bestandspreview ontvangt uitsluitend een backend-opgebouwd `FilePreview` voor
 
 De Rust-backend is opgesplitst in domeinmodellen, SQLite-repositories, runtime-authenticatie, credentialopslag, SSH-adapter, managed commandcatalogus, interactieve terminalmanager, centrale error-logservice, checksum-bestandsservice, userservice, scan-/update-engine en maintenance-/core-orchestratie. De normale SSH-executor is een trait zodat managed flows mocks kunnen gebruiken.
 
+### Gecontroleerd databasebeheer
+
+`database_cleanup` gebruikt een gesloten enum met exact zes ondersteunde targets. Tabelnamen komen nooit als vrije SQL-input uit de UI. De preview en uitvoering delen dezelfde backendmetadata en tellen de primaire plus alle gerelateerde effecten rechtstreeks in SQLite. `auth_config`, `app_settings`, `schema_migrations`, de globale Wordfence-feedtabellen en overige interne tabellen zijn niet bereikbaar via deze beheerfunctie.
+
+Iedere uitvoering valideert opnieuw de targetspecifieke bevestiging. `sites` vereist de letterlijke frase `VERWIJDEREN`; de overige acties vereisen na hun concrete UI-dialoog de exacte backend-owned tabelidentiteit. Conflicterende actieve scan- en Wordfence-jobs blokkeren relevante acties. Sitescleanup sluit bovendien alle sitegebonden terminals en trekt openstaande terminalchallenges in voordat de data verdwijnt.
+
+De backend telt de impact en voert alle SQLite-wijzigingen binnen dezelfde transactie uit. Cascades verwijderen onderliggende scan-, snapshot-, maintenance- en policyrecords; aanvullende `SET NULL`-effecten en samenvattingsresets worden expliciet getoond. Vóór commit moet de gekozen hoofdtabel leeg zijn en `PRAGMA foreign_key_check` geen overtreding opleveren. Een fout bevat de mislukte fase en laat de transactie terugrollen. Na commit wordt een WAL-checkpoint plus `VACUUM` geprobeerd. OS-credentialverwijdering kan niet onderdeel zijn van een SQLite-transactie en gebeurt daarom direct erna; een mislukte credential- of compactiestap levert een zichtbare `completed_with_warnings`-uitkomst op zonder een succesvolle databaseactie verkeerd als rollback te presenteren.
+
 ### Geneste WordPress-installaties
 
 Een geslaagde verbindingstest voert na WordPress- en databasevalidatie een begrensde, read-only inventarisatie uit van directe niet-standaardmappen in de WordPress-root. De UI classificeert niets automatisch: iedere map blijft onbeslist totdat de gebruiker haar als subdomein, subdirectory of geen aparte site markeert. Voor iedere gekozen installatie wordt de volledige verbinding opnieuw getest; zowel gekozen subdomeinen als subdirectories leveren vervolgens hun volgende maplaag op. De root en alle gecontroleerde children worden parent-vóór-child opgeslagen.

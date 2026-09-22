@@ -59,4 +59,26 @@ describe("Tauri authentication boundary", () => {
       command: "play-pause",
     });
   });
+
+  it("keeps database cleanup behind the authenticated IPC boundary", async () => {
+    invokeMock.mockResolvedValueOnce([]).mockResolvedValueOnce({
+      target: "error_logs",
+      tableName: "error_logs",
+      status: "success",
+      impacts: [],
+      warnings: [],
+      completedAt: "2026-09-21T12:00:00Z",
+    });
+
+    await appApi.listDatabaseCleanupOptions();
+    await appApi.cleanupDatabase({ target: "error_logs", confirmation: "error_logs", previewToken: "preview" });
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "list_database_cleanup_options", {
+      sessionToken: "active-app-session",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "cleanup_database", {
+      request: { target: "error_logs", confirmation: "error_logs", previewToken: "preview" },
+      sessionToken: "active-app-session",
+    });
+  });
 });
