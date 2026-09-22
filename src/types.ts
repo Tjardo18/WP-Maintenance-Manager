@@ -137,6 +137,11 @@ export interface MaintenanceRun { id: string; siteId: string; siteName?: string;
 export type FilePreviewMode = "normal" | "fullscreen";
 export type MarkdownPreviewMode = "raw" | "preview";
 export interface AppSettings { scanConcurrency: number; filePreviewMode: FilePreviewMode; markdownPreviewMode: MarkdownPreviewMode }
+export type DatabaseCleanupTarget = "sites" | "scan_runs" | "site_snapshots" | "maintenance_runs" | "error_logs" | "audit_events";
+export interface DatabaseCleanupImpact { key: string; label: string; count: number; effect: "verwijderd" | "losgekoppeld" | "gereset" | "bewaard" }
+export interface DatabaseCleanupOption { target: DatabaseCleanupTarget; tableName: string; title: string; description: string; storedData: string[]; dependencies: string[]; cleanupEffect: string; recordCount: number; impacts: DatabaseCleanupImpact[]; previewToken: string; confirmationMode: "dialog" | "typed"; confirmationPhrase: string; irreversible: boolean }
+export interface DatabaseCleanupRequest { target: DatabaseCleanupTarget; confirmation: string; previewToken: string }
+export interface DatabaseCleanupResult { target: DatabaseCleanupTarget; tableName: string; status: "success" | "completed_with_warnings"; impacts: DatabaseCleanupImpact[]; warnings: string[]; completedAt: string }
 export interface WordfenceIntegrationStatus { configured: boolean; connectionStatus: "not_tested" | "connected" | "failed"; feedStatus: "missing" | "current" | "stale" | "refreshing" | "failed"; lastSuccessfulUpdateAt?: string; nextAutomaticUpdateAt?: string; vulnerabilityCount: number; softwareRecordCount: number; refreshRunning: boolean; refreshPhase?: string; cooldownRemainingSeconds: number; lastError?: string }
 export interface VulnerabilityRefreshJobState { id: string; status: "queued" | "running" | "completed" | "failed"; phase?: "download" | "validate" | "process" | "database" | "complete"; createdAt: string; startedAt?: string; finishedAt?: string; downloadedBytes: number; vulnerabilityCount: number; softwareRecordCount: number; automatic: boolean; error?: TechnicalError }
 export interface AuthStatus { configured: boolean; authenticated: boolean; idleTimeoutMinutes: number; retryAfterSeconds: number }

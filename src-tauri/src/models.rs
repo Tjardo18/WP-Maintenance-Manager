@@ -939,6 +939,92 @@ pub struct AppSettings {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum DatabaseCleanupTarget {
+    Sites,
+    ScanRuns,
+    SiteSnapshots,
+    MaintenanceRuns,
+    ErrorLogs,
+    AuditEvents,
+}
+
+impl DatabaseCleanupTarget {
+    pub fn table_name(self) -> &'static str {
+        match self {
+            Self::Sites => "sites",
+            Self::ScanRuns => "scan_runs",
+            Self::SiteSnapshots => "site_snapshots",
+            Self::MaintenanceRuns => "maintenance_runs",
+            Self::ErrorLogs => "error_logs",
+            Self::AuditEvents => "audit_events",
+        }
+    }
+
+    pub fn requires_idle_scans(self) -> bool {
+        matches!(self, Self::Sites | Self::ScanRuns | Self::SiteSnapshots)
+    }
+
+    pub fn typed_confirmation(self) -> bool {
+        matches!(self, Self::Sites)
+    }
+
+    pub fn confirmation_phrase(self) -> &'static str {
+        if self.typed_confirmation() {
+            "VERWIJDEREN"
+        } else {
+            self.table_name()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseCleanupImpact {
+    pub key: String,
+    pub label: String,
+    pub count: u64,
+    pub effect: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseCleanupOption {
+    pub target: DatabaseCleanupTarget,
+    pub table_name: String,
+    pub title: String,
+    pub description: String,
+    pub stored_data: Vec<String>,
+    pub dependencies: Vec<String>,
+    pub cleanup_effect: String,
+    pub record_count: u64,
+    pub impacts: Vec<DatabaseCleanupImpact>,
+    pub preview_token: String,
+    pub confirmation_mode: String,
+    pub confirmation_phrase: String,
+    pub irreversible: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseCleanupRequest {
+    pub target: DatabaseCleanupTarget,
+    pub confirmation: String,
+    pub preview_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseCleanupResult {
+    pub target: DatabaseCleanupTarget,
+    pub table_name: String,
+    pub status: String,
+    pub impacts: Vec<DatabaseCleanupImpact>,
+    pub warnings: Vec<String>,
+    pub completed_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum MarkdownPreviewMode {
     Raw,
     Preview,

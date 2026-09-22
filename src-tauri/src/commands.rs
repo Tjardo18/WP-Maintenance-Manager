@@ -7,13 +7,14 @@ use crate::{
     models::{
         AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteFailure,
         ChecksumDeleteResult, ComponentVulnerabilityResult, ConnectionStep, ConnectionTestResult,
-        CoreOperationInfo, CoreOperationKind, CoreOperationResult, ErrorLogFilter, ErrorLogPage,
-        ExceptionScope, FilePreview, FindingException, FindingExceptionInput, LoginResult,
-        MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult,
-        SecurityPolicyMutationResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite,
-        TrustedFile, TrustedFileInput, TrustedFileStatus, UpdateItem, VulnerabilityRefreshJobState,
-        WordPressUserDeleteInput, WordPressUserUpdateInput, WordPressUsersData,
-        WordfenceIntegrationStatus,
+        CoreOperationInfo, CoreOperationKind, CoreOperationResult, DatabaseCleanupOption,
+        DatabaseCleanupRequest, DatabaseCleanupResult, DatabaseCleanupTarget, ErrorLogFilter,
+        ErrorLogPage, ExceptionScope, FilePreview, FindingException, FindingExceptionInput,
+        LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState,
+        ScanResult, SecurityPolicyMutationResult, Site, SiteInput, SiteStatus, StepStatus,
+        StoredSite, TrustedFile, TrustedFileInput, TrustedFileStatus, UpdateItem,
+        VulnerabilityRefreshJobState, WordPressUserDeleteInput, WordPressUserUpdateInput,
+        WordPressUsersData, WordfenceIntegrationStatus,
     },
     security_policy,
     snapshot_builder::{SnapshotBuildInput, SnapshotBuildSection, SnapshotBuilder},
@@ -2553,6 +2554,101 @@ pub fn save_settings(
         .store(settings.scan_concurrency, Ordering::SeqCst);
     state.scan_jobs.set_concurrency(settings.scan_concurrency);
     Ok(settings)
+}
+
+#[tauri::command(async)]
+pub fn list_database_cleanup_options(
+    session_token: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<DatabaseCleanupOption>, AppError> {
+    require_auth(&state, &session_token)?;
+    state.database.database_cleanup_options()
+}
+
+#[tauri::command(async)]
+pub fn cleanup_database(
+    session_token: String,
+    request: DatabaseCleanupRequest,
+    state: State<'_, AppState>,
+) -> Result<DatabaseCleanupResult, AppError> {
+    require_auth(&state, &session_token)?;
+    if request.confirmation.trim() != request.target.confirmation_phrase() {
+        return Err(AppError::validation(format!(
+            "De bevestiging voor tabel '{}' is niet correct.",
+            request.target.table_name()
+        )));
+    }
+    if request.target.requires_idle_scans() && !state.scan_jobs.list(true)?.is_empty() {
+        return Err(AppError::validation(
+            "Wacht tot alle actieve scans zijn afgerond of annuleer ze voordat je deze tabel opschoont.",
+        ));
+    }
+    if matches!(
+        request.target,
+        DatabaseCleanupTarget::Sites | DatabaseCleanupTarget::ScanRuns
+    ) && state
+        .vulnerability_jobs
+        .current()?
+        .is_some_and(|job| job.status.is_active())
+    {
+        return Err(AppError::validation(
+            "Wacht tot het vernieuwen van de Wordfence-database is afgerond voordat je deze tabel opschoont.",
+        ));
+    }
+
+    let mut execution = state.database.execute_database_cleanup(&request)?;
+    for site_id in &execution.site_ids {
+        state.terminals.close_site(site_id);
+        state.terminal_access.revoke_site(site_id);
+    }
+    let credential_total = u64::try_from(execution.credential_references.len()).unwrap_or(u64::MAX);
+    let mut credential_failures = 0_u64;
+    for reference in execution.credential_references {
+        if let Err(error) = state.credentials.delete(&reference) {
+            credential_failures += 1;
+            eprintln!("site credential cleanup failed category={}", error.category);
+        }
+    }
+    if credential_failures > 0 {
+        if let Some(impact) = execution
+            .result
+            .impacts
+            .iter_mut()
+            .find(|impact| impact.key == "credential_references")
+        {
+            impact.count = credential_total.saturating_sub(credential_failures);
+        }
+        execution.result.warnings.push(format!(
+            "{credential_failures} opgeslagen SSH-credential(s) konden niet uit de beveiligde Windows-opslag worden verwijderd. De SQLite-database is wel volledig en consistent opgeschoond."
+        ));
+    }
+
+    if request.target != DatabaseCleanupTarget::AuditEvents {
+        let affected = execution
+            .result
+            .impacts
+            .iter()
+            .filter(|impact| impact.effect != "bewaard")
+            .map(|impact| impact.count)
+            .sum::<u64>();
+        if let Err(error) = state.database.save_audit_event(
+            None,
+            "database_cleanup",
+            request.target.table_name(),
+            "success",
+            Some(&format!("affected_records={affected}")),
+        ) {
+            eprintln!("database cleanup audit failed category={}", error.category);
+            execution.result.warnings.push(
+                "De opschoonactie is uitgevoerd, maar kon niet in het auditlog worden vastgelegd."
+                    .into(),
+            );
+        }
+    }
+    if !execution.result.warnings.is_empty() {
+        execution.result.status = "completed_with_warnings".into();
+    }
+    Ok(execution.result)
 }
 
 #[tauri::command(async)]
