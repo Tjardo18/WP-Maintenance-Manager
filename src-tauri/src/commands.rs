@@ -6,15 +6,16 @@ use crate::{
     error_log, maintenance,
     models::{
         AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteFailure,
-        ChecksumDeleteResult, ComponentVulnerabilityResult, ConnectionStep, ConnectionTestResult,
-        CoreOperationInfo, CoreOperationKind, CoreOperationResult, DatabaseCleanupOption,
-        DatabaseCleanupRequest, DatabaseCleanupResult, DatabaseCleanupTarget, ErrorLogFilter,
-        ErrorLogPage, ExceptionScope, FilePreview, FindingException, FindingExceptionInput,
-        LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState,
-        ScanResult, SecurityPolicyMutationResult, Site, SiteInput, SiteStatus, StepStatus,
-        StoredSite, TrustedFile, TrustedFileInput, TrustedFileStatus, UpdateItem,
-        VulnerabilityRefreshJobState, WordPressUserDeleteInput, WordPressUserUpdateInput,
-        WordPressUsersData, WordfenceIntegrationStatus,
+        ChecksumDeletePhase, ChecksumDeleteProgress, ChecksumDeleteResult,
+        ComponentVulnerabilityResult, ConnectionStep, ConnectionTestResult, CoreOperationInfo,
+        CoreOperationKind, CoreOperationResult, DatabaseCleanupOption, DatabaseCleanupRequest,
+        DatabaseCleanupResult, DatabaseCleanupTarget, ErrorLogFilter, ErrorLogPage, ExceptionScope,
+        FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun,
+        MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult,
+        SecurityPolicyMutationResult, Site, SiteInput, SiteStatus, StepStatus, StoredSite,
+        TrustedFile, TrustedFileInput, TrustedFileStatus, UpdateItem, VulnerabilityRefreshJobState,
+        WordPressUserDeleteInput, WordPressUserUpdateInput, WordPressUsersData,
+        WordfenceIntegrationStatus,
     },
     security_policy,
     snapshot_builder::{SnapshotBuildInput, SnapshotBuildSection, SnapshotBuilder},
@@ -1890,11 +1891,26 @@ pub fn delete_checksum_findings(
     session_token: String,
     site_id: String,
     finding_ids: Vec<String>,
+    operation_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ChecksumDeleteResult, AppError> {
     require_auth(&state, &session_token)?;
+    uuid::Uuid::parse_str(&operation_id)
+        .map_err(|_| AppError::validation("De bulkverwijdering-id is ongeldig."))?;
     let started = Instant::now();
-    let result = delete_checksum_findings_internal(&state, &site_id, finding_ids, true);
+    let result = delete_checksum_findings_with_progress(
+        &state,
+        &site_id,
+        finding_ids,
+        true,
+        &operation_id,
+        |progress| {
+            if let Err(error) = app.emit("checksum-delete-progress", progress) {
+                eprintln!("checksum delete progress emit failed: {error}");
+            }
+        },
+    );
     log_operation_error(
         &state,
         Some(&site_id),
@@ -1910,6 +1926,20 @@ fn delete_checksum_findings_internal(
     finding_ids: Vec<String>,
     bulk: bool,
 ) -> Result<ChecksumDeleteResult, AppError> {
+    delete_checksum_findings_with_progress(state, site_id, finding_ids, bulk, "", |_| {})
+}
+
+fn delete_checksum_findings_with_progress<F>(
+    state: &AppState,
+    site_id: &str,
+    finding_ids: Vec<String>,
+    bulk: bool,
+    operation_id: &str,
+    mut on_progress: F,
+) -> Result<ChecksumDeleteResult, AppError>
+where
+    F: FnMut(ChecksumDeleteProgress),
+{
     if finding_ids.is_empty() || finding_ids.len() > 5_000 {
         return Err(AppError::validation(
             "Selecteer tussen 1 en 5.000 onverwachte checksum-bestanden.",
@@ -1926,8 +1956,18 @@ fn delete_checksum_findings_internal(
     let credential = stored_credential_from_state(state, &stored)?;
     let mut deleted_paths = Vec::new();
     let mut failures = Vec::new();
+    emit_checksum_delete_progress(
+        &mut on_progress,
+        operation_id,
+        site_id,
+        ChecksumDeletePhase::Deleting,
+        0,
+        requested,
+        0,
+        0,
+    );
 
-    for finding_id in finding_ids {
+    for (index, finding_id) in finding_ids.into_iter().enumerate() {
         let record = match state
             .database
             .current_unexpected_checksum_finding(site_id, &finding_id)
@@ -1948,6 +1988,16 @@ fn delete_checksum_findings_internal(
                     path: None,
                     error,
                 });
+                emit_checksum_delete_progress(
+                    &mut on_progress,
+                    operation_id,
+                    site_id,
+                    ChecksumDeletePhase::Deleting,
+                    index + 1,
+                    requested,
+                    deleted_paths.len(),
+                    failures.len(),
+                );
                 continue;
             }
         };
@@ -1982,16 +2032,46 @@ fn delete_checksum_findings_internal(
                 });
             }
         }
+        emit_checksum_delete_progress(
+            &mut on_progress,
+            operation_id,
+            site_id,
+            ChecksumDeletePhase::Deleting,
+            index + 1,
+            requested,
+            deleted_paths.len(),
+            failures.len(),
+        );
     }
 
     let (scan, rescan_error) = if deleted_paths.is_empty() {
         (None, None)
     } else {
+        emit_checksum_delete_progress(
+            &mut on_progress,
+            operation_id,
+            site_id,
+            ChecksumDeletePhase::Rescanning,
+            requested,
+            requested,
+            deleted_paths.len(),
+            failures.len(),
+        );
         match scan_site_internal(state, site_id, 30) {
             Ok(scan) => (Some(scan), None),
             Err(error) => (None, Some(error)),
         }
     };
+    emit_checksum_delete_progress(
+        &mut on_progress,
+        operation_id,
+        site_id,
+        ChecksumDeletePhase::Completed,
+        requested,
+        requested,
+        deleted_paths.len(),
+        failures.len(),
+    );
     if bulk {
         let status = if failures.is_empty() && rescan_error.is_none() {
             "success"
@@ -2026,6 +2106,33 @@ fn delete_checksum_findings_internal(
         scan,
         rescan_error,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_checksum_delete_progress<F>(
+    on_progress: &mut F,
+    operation_id: &str,
+    site_id: &str,
+    phase: ChecksumDeletePhase,
+    processed: usize,
+    total: usize,
+    deleted: usize,
+    failed: usize,
+) where
+    F: FnMut(ChecksumDeleteProgress),
+{
+    if operation_id.is_empty() {
+        return;
+    }
+    on_progress(ChecksumDeleteProgress {
+        operation_id: operation_id.into(),
+        site_id: site_id.into(),
+        phase,
+        processed,
+        total,
+        deleted,
+        failed,
+    });
 }
 
 fn validate_checksum_ids(site_id: &str, finding_ids: &[String]) -> Result<(), AppError> {
@@ -4642,9 +4749,17 @@ mod tests {
         let mut state = app_state(database.clone(), &temp);
         state.ssh = ssh.clone();
 
-        let result =
-            delete_checksum_findings_internal(&state, &site.id, vec![first_id, second_id], true)
-                .unwrap();
+        let operation_id = Uuid::new_v4().to_string();
+        let mut progress = Vec::new();
+        let result = delete_checksum_findings_with_progress(
+            &state,
+            &site.id,
+            vec![first_id, second_id],
+            true,
+            &operation_id,
+            |event| progress.push(event),
+        )
+        .unwrap();
         assert_eq!(result.requested, 2);
         assert_eq!(result.deleted, 1);
         assert_eq!(result.failures.len(), 1);
@@ -4654,6 +4769,18 @@ mod tests {
             ["wp-admin/delete.php"]
         );
         assert_eq!(database.list_scans(&site.id).unwrap().len(), 2);
+        assert_eq!(progress.len(), 5);
+        assert_eq!(progress[0].phase, ChecksumDeletePhase::Deleting);
+        assert_eq!((progress[0].processed, progress[0].total), (0, 2));
+        assert_eq!((progress[2].processed, progress[2].total), (2, 2));
+        assert_eq!(progress[3].phase, ChecksumDeletePhase::Rescanning);
+        assert_eq!(progress[4].phase, ChecksumDeletePhase::Completed);
+        assert_eq!((progress[4].deleted, progress[4].failed), (1, 1));
+        assert!(
+            progress
+                .iter()
+                .all(|event| event.operation_id == operation_id)
+        );
         assert!(
             database
                 .list_audit_events(Some(&site.id))

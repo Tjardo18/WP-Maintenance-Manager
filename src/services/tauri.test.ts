@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const listenMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
 import { appApi, authApi, systemInputApi } from "./tauri";
 
@@ -10,6 +11,8 @@ describe("Tauri authentication boundary", () => {
   beforeEach(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
     invokeMock.mockReset();
+    listenMock.mockReset();
+    listenMock.mockResolvedValue(() => undefined);
     authApi.setSessionToken("active-app-session");
   });
 
@@ -80,5 +83,35 @@ describe("Tauri authentication boundary", () => {
       request: { target: "error_logs", confirmation: "error_logs", previewToken: "preview" },
       sessionToken: "active-app-session",
     });
+  });
+
+  it("correlates a bulk file deletion with its progress operation", async () => {
+    invokeMock.mockResolvedValueOnce({
+      requested: 2,
+      deleted: 2,
+      deletedPaths: ["one.php", "two.php"],
+      failures: [],
+    });
+
+    await appApi.deleteChecksumFindings("site-a", ["finding-a", "finding-b"], "operation-a");
+
+    expect(invokeMock).toHaveBeenCalledWith("delete_checksum_findings", {
+      siteId: "site-a",
+      findingIds: ["finding-a", "finding-b"],
+      operationId: "operation-a",
+      sessionToken: "active-app-session",
+    });
+  });
+
+  it("forwards live bulk deletion progress events", async () => {
+    const handler = vi.fn();
+    await appApi.onChecksumDeleteProgress(handler);
+    const eventHandler = listenMock.mock.calls[0]?.[1] as ((event: { payload: unknown }) => void) | undefined;
+    const progress = { operationId: "operation-a", siteId: "site-a", phase: "deleting", processed: 1, total: 2, deleted: 1, failed: 0 };
+
+    eventHandler?.({ payload: progress });
+
+    expect(listenMock).toHaveBeenCalledWith("checksum-delete-progress", expect.any(Function));
+    expect(handler).toHaveBeenCalledWith(progress);
   });
 });

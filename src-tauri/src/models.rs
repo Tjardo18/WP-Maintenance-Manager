@@ -705,6 +705,26 @@ pub struct ChecksumDeleteResult {
     pub rescan_error: Option<crate::error::AppError>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecksumDeletePhase {
+    Deleting,
+    Rescanning,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecksumDeleteProgress {
+    pub operation_id: String,
+    pub site_id: String,
+    pub phase: ChecksumDeletePhase,
+    pub processed: usize,
+    pub total: usize,
+    pub deleted: usize,
+    pub failed: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WordPressUser {
