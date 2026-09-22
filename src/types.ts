@@ -118,6 +118,7 @@ export interface SecurityPolicyMutationResult { scan?: ScanResult; findingExcept
 export interface FilePreview { finding: Finding; fileName: string; relativePath: string; sizeBytes: number; modifiedAt?: string; fileType: string; extension?: string; textContent?: string; imageMimeType?: string; imageDataBase64?: string; rawDataBase64?: string; binary: boolean; truncated: boolean }
 export interface ChecksumDeleteFailure { findingId: string; path?: string; error: TechnicalError }
 export interface ChecksumDeleteResult { requested: number; deleted: number; deletedPaths: string[]; failures: ChecksumDeleteFailure[]; scan?: ScanResult; rescanError?: TechnicalError }
+export interface ChecksumDeleteProgress { operationId: string; siteId: string; phase: "deleting" | "rescanning" | "completed"; processed: number; total: number; deleted: number; failed: number }
 export interface WordPressUser { id: number; username: string; displayName: string; email: string; roles: string[]; registeredAt: string }
 export interface WordPressRole { role: string; name: string }
 export interface WordPressUsersData { users: WordPressUser[]; roles: WordPressRole[]; multisite: boolean }

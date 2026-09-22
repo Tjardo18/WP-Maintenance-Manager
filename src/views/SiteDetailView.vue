@@ -13,7 +13,7 @@ import NestedSiteDiscovery from "../components/NestedSiteDiscovery.vue";
 import { useSitesStore } from "../stores/sites";
 import { useScanJobsStore } from "../stores/scanJobs";
 import { appApi } from "../services/tauri";
-import type { ChecksumDeleteResult, CoreOperationInfo, CoreOperationKind, FilePreview, FilePreviewMode, Finding, MaintenanceRun, MaintenanceStep, MarkdownPreviewMode, ScanResult, SiteChangeHistory, SnapshotHistoryItem, UpdateItem, WordPressUser, WordPressUsersData, WordPressUserUpdateInput } from "../types";
+import type { ChecksumDeleteProgress, ChecksumDeleteResult, CoreOperationInfo, CoreOperationKind, FilePreview, FilePreviewMode, Finding, MaintenanceRun, MaintenanceStep, MarkdownPreviewMode, ScanResult, SiteChangeHistory, SnapshotHistoryItem, UpdateItem, WordPressUser, WordPressUsersData, WordPressUserUpdateInput } from "../types";
 import { errorMessage } from "../utils/errors";
 import { formatDate, formatWpCliVersion } from "../utils/format";
 
@@ -24,7 +24,7 @@ const tabs = ["Overzicht", "Wijzigingen", "Updates", "Security", "Gebruikers", "
 const requestedTab = String(route.query.tab ?? "");
 const activeTab = ref(tabs.includes(requestedTab) ? requestedTab : "Overzicht"); const scan = ref<ScanResult>(); const scanHistory = ref<ScanResult[]>([]); const updates = ref<UpdateItem[]>([]); const history = ref<MaintenanceRun[]>([]); const liveSteps = ref<MaintenanceStep[]>([]); const busy = ref<string>(); const confirmUpdate = ref<UpdateItem | "all" | "maintenance">(); const error = ref<string>(); let stopProgress: (() => void) | undefined;
 const changes = ref<SiteChangeHistory>(); const snapshotHistory = ref<SnapshotHistoryItem[]>([]); const snapshots = computed(() => snapshotHistory.value.map((item) => item.snapshot)); const changesLoading = ref(true);
-const selectedFindingIds = ref<string[]>([]); const preview = ref<FilePreview>(); const pendingDelete = ref<Finding[]>([]); const deleteResult = ref<ChecksumDeleteResult>();
+const selectedFindingIds = ref<string[]>([]); const preview = ref<FilePreview>(); const pendingDelete = ref<Finding[]>([]); const deleteResult = ref<ChecksumDeleteResult>(); const deleteProgress = ref<ChecksumDeleteProgress>();
 const filePreviewMode = ref<FilePreviewMode>("normal");
 const markdownPreviewMode = ref<MarkdownPreviewMode>("raw");
 const selectedVulnerability = ref<Finding>();
@@ -35,12 +35,14 @@ const nestedDiscoveryOpen = ref(false);
 const scanJob = computed(() => site.value ? scanJobs.forSite(site.value.id) : undefined);
 const scanActive = computed(() => scanJob.value?.status === "queued" || scanJob.value?.status === "running");
 const scanProgress = computed(() => scanJob.value?.totalSteps ? Math.round(scanJob.value.completedSteps / scanJob.value.totalSteps * 100) : 0);
+const deleteProgressPercent = computed(() => deleteProgress.value?.total ? Math.round(deleteProgress.value.processed / deleteProgress.value.total * 100) : 0);
+const deleteProgressLabel = computed(() => deleteProgress.value?.phase === "rescanning" ? "Bestanden verwerkt, checksum-nacontrole uitvoeren…" : deleteProgress.value?.phase === "completed" ? "Verwijdering afgerond" : "Bestanden verwijderen…");
 const scanClock = ref(Date.now()); const development = import.meta.env.DEV; let scanClockTimer: number | undefined;
 const activeScanStep = computed(() => scanJob.value?.steps.find((step) => step.key === scanJob.value?.currentStep));
 const activeStepSeconds = computed(() => activeScanStep.value?.startedAt ? Math.max(0, Math.floor((scanClock.value - Date.parse(activeScanStep.value.startedAt)) / 1000)) : 0);
 const measuredScanDurations = computed(() => scanJob.value?.steps.flatMap((step) => typeof step.durationMs === "number" && Number.isFinite(step.durationMs) && step.durationMs >= 0 ? [step.durationMs] : []) ?? []);
 const totalScanDuration = computed(() => measuredScanDurations.value.reduce((total, duration) => total + duration, 0));
-let updatesLoaded = false; let usersLoaded = false; let handledScanId: string | undefined;
+let updatesLoaded = false; let usersLoaded = false; let handledScanId: string | undefined; let activeDeleteOperationId: string | undefined; let stopDeleteProgress: (() => void) | undefined;
 const updateKinds = computed(() => ({ plugins: updates.value.filter((item) => item.kind === "plugin").length, themes: updates.value.filter((item) => item.kind === "theme").length, core: updates.value.filter((item) => item.kind === "core").length }));
 const visibleChecks = computed(() => { if (!scan.value) return []; if (activeTab.value === "Bestanden") return scan.value.checks.filter((check) => ["php_files", "php_uploads", "modified_files", "permissions"].includes(check.key)); if (activeTab.value === "Database") return scan.value.checks.filter((check) => check.key === "database"); return scan.value.checks; });
 const unexpectedFindings = computed(() => scan.value?.checks.find((check) => check.key === "core_checksum")?.findings.filter((finding) => finding.checksumStatus === "unexpected" && finding.id) ?? []);
@@ -71,7 +73,36 @@ function isHighRiskVulnerability(finding: Finding) { return Boolean(finding.vuln
 async function openVulnerabilityReference(url: string) { error.value = undefined; try { await appApi.openVulnerabilityReference(url); } catch (cause) { error.value = errorMessage(cause); } }
 function temporaryExpiration() { if (!pendingPolicyAction.value?.temporary) return undefined; if (policyExpiry.value === "date") { const parsed = new Date(policyExpiryDate.value); return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString(); } const expires = new Date(); expires.setUTCDate(expires.getUTCDate() + Number(policyExpiry.value)); return expires.toISOString(); }
 async function executePolicyAction() { if (!site.value || !pendingPolicyAction.value?.finding.id) return; const action = pendingPolicyAction.value; const findingId = action.finding.id; const siteId = site.value.id; if (!findingId) return; if (action.temporary && policyExpiry.value === "date" && !temporaryExpiration()) { error.value = "Kies een geldige verloopdatum."; return; } busy.value = "security-policy"; error.value = undefined; try { const result = action.kind === "trust" ? await appApi.trustFindingFile({ siteId, findingId, note: policyNote.value || undefined }) : await appApi.ignoreFinding({ siteId, findingId, note: policyNote.value || undefined, expiresAt: temporaryExpiration() }); if (result.scan) { scan.value = result.scan; scanHistory.value = [result.scan, ...scanHistory.value.filter((item) => item.id !== result.scan?.id)]; } pendingPolicyAction.value = undefined; await store.load(); } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
-async function executeFileDelete() { if (!site.value || !pendingDelete.value.length) return; const ids = pendingDelete.value.flatMap((finding) => finding.id ? [finding.id] : []); busy.value = "file-delete"; error.value = undefined; try { const result = ids.length === 1 ? await appApi.deleteChecksumFinding(site.value.id, ids[0]) : await appApi.deleteChecksumFindings(site.value.id, ids); deleteResult.value = result; if (result.scan) { scan.value = result.scan; scanHistory.value = [result.scan, ...scanHistory.value.filter((item) => item.id !== result.scan?.id)]; } selectedFindingIds.value = []; pendingDelete.value = []; if (result.rescanError) error.value = `De bestanden zijn verwerkt, maar de nacontrole mislukte: ${result.rescanError.userMessage}`; await store.load(); } catch (cause) { error.value = errorMessage(cause); } finally { busy.value = undefined; } }
+async function executeFileDelete() {
+  if (!site.value || !pendingDelete.value.length) return;
+  const ids = pendingDelete.value.flatMap((finding) => finding.id ? [finding.id] : []);
+  const operationId = ids.length > 1 ? crypto.randomUUID() : undefined;
+  busy.value = "file-delete";
+  error.value = undefined;
+  deleteResult.value = undefined;
+  activeDeleteOperationId = operationId;
+  deleteProgress.value = operationId ? { operationId, siteId: site.value.id, phase: "deleting", processed: 0, total: ids.length, deleted: 0, failed: 0 } : undefined;
+  try {
+    const result = ids.length === 1
+      ? await appApi.deleteChecksumFinding(site.value.id, ids[0])
+      : await appApi.deleteChecksumFindings(site.value.id, ids, operationId!);
+    deleteResult.value = result;
+    if (result.scan) {
+      scan.value = result.scan;
+      scanHistory.value = [result.scan, ...scanHistory.value.filter((item) => item.id !== result.scan?.id)];
+    }
+    selectedFindingIds.value = [];
+    pendingDelete.value = [];
+    if (result.rescanError) error.value = `De bestanden zijn verwerkt, maar de nacontrole mislukte: ${result.rescanError.userMessage}`;
+    await store.load();
+  } catch (cause) {
+    error.value = errorMessage(cause);
+  } finally {
+    activeDeleteOperationId = undefined;
+    deleteProgress.value = undefined;
+    busy.value = undefined;
+  }
+}
 function roleName(role: string) { return usersData.value?.roles.find((item) => item.role === role)?.name ?? role; }
 function isLastAdministrator(user: WordPressUser) { return user.roles.includes("administrator") && administratorCount.value <= 1; }
 function startUserEdit(user: WordPressUser) { editUser.value = user; editUserInput.value = { userId: user.id, displayName: user.displayName, email: user.email, role: undefined }; adminPromotionConfirmed.value = false; }
@@ -108,8 +139,15 @@ async function executeConfirmed() {
     busy.value = undefined;
   }
 }
-onMounted(async () => { await load(); stopProgress = await appApi.onMaintenanceProgress((payload) => { if (payload.siteId !== site.value?.id) return; const existing = liveSteps.value.findIndex((step) => step.key === payload.step.key); if (existing >= 0) liveSteps.value.splice(existing, 1, payload.step); else liveSteps.value.push(payload.step); }); });
-onUnmounted(() => { stopProgress?.(); if (scanClockTimer !== undefined) globalThis.clearInterval(scanClockTimer); });
+onMounted(async () => {
+  stopDeleteProgress = await appApi.onChecksumDeleteProgress((progress) => {
+    if (progress.siteId !== site.value?.id || progress.operationId !== activeDeleteOperationId) return;
+    deleteProgress.value = progress;
+  });
+  await load();
+  stopProgress = await appApi.onMaintenanceProgress((payload) => { if (payload.siteId !== site.value?.id) return; const existing = liveSteps.value.findIndex((step) => step.key === payload.step.key); if (existing >= 0) liveSteps.value.splice(existing, 1, payload.step); else liveSteps.value.push(payload.step); });
+});
+onUnmounted(() => { stopProgress?.(); stopDeleteProgress?.(); if (scanClockTimer !== undefined) globalThis.clearInterval(scanClockTimer); });
 watch(activeTab, (tab) => { if (tab === "Updates") void loadUpdates(); if (tab === "Gebruikers") void loadUsers(); });
 watch(scanActive, (active) => { if (active && scanClockTimer === undefined) scanClockTimer = globalThis.setInterval(() => { scanClock.value = Date.now(); }, 1_000); else if (!active && scanClockTimer !== undefined) { globalThis.clearInterval(scanClockTimer); scanClockTimer = undefined; } }, { immediate: true });
 watch(() => scanJob.value?.status, async (status) => {
@@ -160,8 +198,9 @@ watch(() => scanJob.value?.status, async (status) => {
         <div v-if="deleteResult" :class="['delete-result', { partial: deleteResult.failures.length }]">
           <strong>{{ deleteResult.deleted }} van {{ deleteResult.requested }} bestanden verwijderd</strong>
           <p v-if="deleteResult.scan">De checksumscan is opnieuw uitgevoerd.</p>
-          <p v-else-if="deleteResult.rescanError">De verwijdering is verwerkt, maar de checksum-nacontrole is mislukt.</p>
-          <ul v-else><li v-for="failure in deleteResult.failures" :key="failure.findingId"><code>{{ failure.path ?? failure.findingId }}</code> — {{ failure.error.userMessage }}</li></ul>
+          <p v-if="deleteResult.rescanError">De verwijdering is verwerkt, maar de checksum-nacontrole is mislukt.</p>
+          <p v-if="deleteResult.failures.length"><strong>{{ deleteResult.failures.length }}</strong> {{ deleteResult.failures.length === 1 ? 'bestand kon' : 'bestanden konden' }} niet worden verwijderd:</p>
+          <ul v-if="deleteResult.failures.length"><li v-for="failure in deleteResult.failures" :key="failure.findingId"><code>{{ failure.path ?? failure.findingId }}</code> — {{ failure.error.userMessage }}</li></ul>
         </div>
         <div v-if="activeTab === 'Security' && unexpectedFindings.length" class="checksum-toolbar">
           <div><strong>Hoort niet aanwezig te zijn</strong><small>Alleen actuele unexpected findings kunnen worden geselecteerd.</small></div>
@@ -184,9 +223,16 @@ watch(() => scanJob.value?.status, async (status) => {
   <ChecksumFilePreview v-if="preview" :preview="preview" :default-fullscreen="filePreviewMode === 'fullscreen'" :default-markdown-mode="markdownPreviewMode" @close="preview = undefined" @delete="pendingDelete = [preview.finding]; preview = undefined" />
   <VulnerabilityDetails v-if="selectedVulnerability" :finding="selectedVulnerability" @close="selectedVulnerability = undefined" @open-reference="openVulnerabilityReference" />
   <NestedSiteDiscovery v-if="site && nestedDiscoveryOpen" :parent="site" :sites="store.sites" @close="nestedDiscoveryOpen = false" @saved="handleNestedSiteSaved" />
-  <ConfirmDialog v-if="pendingDelete.length" :title="pendingDelete.length === 1 ? 'Bestand permanent verwijderen?' : `${pendingDelete.length} bestanden permanent verwijderen?`" :confirm-label="pendingDelete.length === 1 ? 'Bestand verwijderen' : `${pendingDelete.length} bestanden verwijderen`" :busy="busy === 'file-delete'" danger @cancel="pendingDelete = []" @confirm="executeFileDelete">
+  <ConfirmDialog v-if="pendingDelete.length" :title="busy === 'file-delete' && pendingDelete.length > 1 ? 'Bestanden verwijderen…' : pendingDelete.length === 1 ? 'Bestand permanent verwijderen?' : `${pendingDelete.length} bestanden permanent verwijderen?`" :confirm-label="pendingDelete.length === 1 ? 'Bestand verwijderen' : `${pendingDelete.length} bestanden verwijderen`" :busy="busy === 'file-delete'" danger @cancel="pendingDelete = []" @confirm="executeFileDelete">
     <p>Deze actie verwijdert de geselecteerde bestanden permanent van de server en kan niet automatisch ongedaan worden gemaakt.</p>
-    <ul class="delete-file-list"><li v-for="finding in pendingDelete" :key="finding.id"><code>{{ finding.path }}</code></li></ul>
+    <div v-if="busy === 'file-delete' && deleteProgress" class="bulk-delete-progress" role="status" aria-live="polite">
+      <div class="bulk-delete-progress-heading"><LoaderCircle v-if="deleteProgress.phase !== 'completed'" class="spin" :size="18" /><Check v-else :size="18" /><div><strong>{{ deleteProgressLabel }}</strong><p>{{ deleteProgress.processed }} van {{ deleteProgress.total }} bestanden verwerkt</p></div><b>{{ deleteProgressPercent }}%</b></div>
+      <div class="progress-track" role="progressbar" :aria-valuenow="deleteProgressPercent" aria-valuemin="0" aria-valuemax="100" :aria-label="`${deleteProgress.processed} van ${deleteProgress.total} bestanden verwerkt`"><span :style="{ width: `${deleteProgressPercent}%` }"></span></div>
+      <div class="bulk-delete-progress-counts"><span><strong>{{ deleteProgress.deleted }}</strong> verwijderd</span><span :class="{ failed: deleteProgress.failed }"><strong>{{ deleteProgress.failed }}</strong> mislukt</span></div>
+      <small v-if="deleteProgress.phase === 'rescanning'">De verwijdering is klaar. De bijgewerkte bestandsstatus wordt nu gecontroleerd.</small>
+    </div>
+    <ul v-else class="delete-file-list"><li v-for="finding in pendingDelete" :key="finding.id"><code>{{ finding.path }}</code></li></ul>
+    <p v-if="error && busy !== 'file-delete'" class="error-banner">{{ error }}</p>
   </ConfirmDialog>
   <div v-if="pendingPolicyAction" class="modal-backdrop" role="presentation" @click.self="pendingPolicyAction = undefined">
     <form class="modal policy-action-modal" role="dialog" aria-modal="true" :aria-label="pendingPolicyAction.kind === 'trust' ? 'Bestand vertrouwen' : 'Melding negeren'" @submit.prevent="executePolicyAction">
@@ -226,3 +272,37 @@ watch(() => scanJob.value?.status, async (status) => {
     <p class="danger-notice">Deze actie kan niet automatisch ongedaan worden gemaakt.</p>
   </ConfirmDialog>
 </template>
+
+<style scoped>
+.bulk-delete-progress {
+  margin-top: 14px;
+  padding: 13px;
+  border: 1px solid #dce7e2;
+  border-radius: 9px;
+  background: #f7faf9;
+}
+.bulk-delete-progress-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  color: #315b4b;
+}
+.bulk-delete-progress-heading strong,
+.bulk-delete-progress-heading p { display: block; }
+.bulk-delete-progress-heading strong { font-size: 12px; }
+.bulk-delete-progress-heading p { margin: 2px 0 0; font-size: 10px; }
+.bulk-delete-progress-heading b { font-size: 13px; }
+.bulk-delete-progress .progress-track { height: 7px; margin-top: 11px; }
+.bulk-delete-progress-counts {
+  display: flex;
+  gap: 16px;
+  margin-top: 10px;
+  color: #557067;
+  font-size: 10px;
+}
+.bulk-delete-progress-counts span { display: inline-flex; align-items: baseline; gap: 4px; }
+.bulk-delete-progress-counts strong { color: #277055; font-size: 12px; }
+.bulk-delete-progress-counts .failed strong { color: #a13f45; }
+.bulk-delete-progress > small { display: block; margin-top: 9px; color: #6b7d76; font-size: 10px; line-height: 1.45; }
+</style>

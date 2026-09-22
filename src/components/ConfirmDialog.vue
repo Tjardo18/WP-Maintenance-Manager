@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { AlertTriangle, X } from "@lucide/vue";
-defineProps<{ title: string; confirmLabel?: string; busy?: boolean; danger?: boolean; confirmDisabled?: boolean; wide?: boolean }>();
-defineEmits<{ confirm: []; cancel: [] }>();
+const props = defineProps<{ title: string; confirmLabel?: string; busy?: boolean; danger?: boolean; confirmDisabled?: boolean; wide?: boolean }>();
+const emit = defineEmits<{ confirm: []; cancel: [] }>();
+function cancel() { if (!props.busy) emit("cancel"); }
 </script>
 <template>
-  <div class="modal-backdrop" role="presentation" @click.self="$emit('cancel')">
+  <div class="modal-backdrop" role="presentation" @click.self="cancel">
     <section :class="['modal', { 'modal-wide': wide }]" role="dialog" aria-modal="true" :aria-label="title">
-      <button class="icon-button modal-close" aria-label="Sluiten" @click="$emit('cancel')"><X :size="18" /></button>
+      <button class="icon-button modal-close" aria-label="Sluiten" :disabled="busy" @click="cancel"><X :size="18" /></button>
       <span class="modal-icon"><AlertTriangle :size="23" /></span>
       <h2>{{ title }}</h2><div class="modal-copy"><slot /></div>
-      <div class="modal-actions"><button class="button secondary" :disabled="busy" @click="$emit('cancel')">Annuleren</button><button :class="['button', danger ? 'danger' : 'primary']" :disabled="busy || confirmDisabled" @click="$emit('confirm')">{{ busy ? "Bezig…" : (confirmLabel ?? "Bevestigen") }}</button></div>
+      <div class="modal-actions"><button class="button secondary" :disabled="busy" @click="cancel">Annuleren</button><button :class="['button', danger ? 'danger' : 'primary']" :disabled="busy || confirmDisabled" @click="$emit('confirm')">{{ busy ? "Bezig…" : (confirmLabel ?? "Bevestigen") }}</button></div>
     </section>
   </div>
 </template>

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, DatabaseCleanupOption, DatabaseCleanupRequest, DatabaseCleanupResult, DatabaseCleanupTarget, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteChangeSummary, SiteInput, SnapshotDiff, SnapshotHistoryItem, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
+import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteProgress, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, DatabaseCleanupOption, DatabaseCleanupRequest, DatabaseCleanupResult, DatabaseCleanupTarget, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteChangeSummary, SiteInput, SnapshotDiff, SnapshotHistoryItem, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import type { MediaKeyCommand } from "./keyboardShortcuts";
 import { demoChanges, demoHistory, demoScan, demoSites, demoUpdates, demoUsers } from "./fixtures";
 
@@ -16,6 +16,7 @@ let browserMaintenanceRuns = structuredClone(demoHistory);
 const browserTerminalChallenges = new Map<string, { siteId: string; expiresAt: number }>();
 const browserScanJobs = new Map<string, ScanJobState>();
 const browserScanJobListeners = new Set<(job: ScanJobState) => void>();
+const browserChecksumDeleteProgressListeners = new Set<(progress: ChecksumDeleteProgress) => void>();
 const browserExceptions: FindingException[] = [];
 const browserTrustedFiles: TrustedFile[] = [];
 const browserScans = new Map<string, ScanResult>();
@@ -36,6 +37,10 @@ function browserScan(siteId: string) {
 
 function browserFinding(siteId: string, findingId: string) {
   return browserScan(siteId).checks.flatMap((check) => check.findings).find((finding) => finding.id === findingId);
+}
+
+function emitBrowserChecksumDeleteProgress(progress: ChecksumDeleteProgress) {
+  browserChecksumDeleteProgressListeners.forEach((listener) => listener(structuredClone(progress)));
 }
 
 function browserSiteChanges(siteId: string): SiteChangeHistory {
@@ -335,7 +340,27 @@ export const appApi = {
   },
   async previewFindingFile(siteId: string, findingId: string): Promise<FilePreview> { if (isTauri()) return call("preview_checksum_finding", { siteId, findingId }); const finding = demoScan.checks.flatMap((check) => check.findings).find((item) => item.id === findingId); if (!finding?.path) throw new Error("Bestandsfinding niet gevonden."); const parts = finding.path.split("/"); return { finding: structuredClone(finding), fileName: parts[parts.length - 1] ?? finding.path, relativePath: finding.path, sizeBytes: 54, modifiedAt: new Date().toISOString(), fileType: "php-bestand", extension: "php", textContent: "<script>alert('preview wordt als tekst getoond')</script>\n<?php // demo ?>", binary: false, truncated: false }; },
   async deleteChecksumFinding(siteId: string, findingId: string): Promise<ChecksumDeleteResult> { if (isTauri()) return call("delete_checksum_finding", { siteId, findingId }); const path = demoScan.checks.flatMap((check) => check.findings).find((item) => item.id === findingId)?.path; return { requested: 1, deleted: path ? 1 : 0, deletedPaths: path ? [path] : [], failures: [], scan: { ...structuredClone(demoScan), siteId } }; },
-  async deleteChecksumFindings(siteId: string, findingIds: string[]): Promise<ChecksumDeleteResult> { if (isTauri()) return call("delete_checksum_findings", { siteId, findingIds }); const paths = demoScan.checks.flatMap((check) => check.findings).filter((item) => item.id && findingIds.includes(item.id)).flatMap((item) => item.path ? [item.path] : []); return { requested: findingIds.length, deleted: paths.length, deletedPaths: paths, failures: [], scan: { ...structuredClone(demoScan), siteId } }; },
+  async deleteChecksumFindings(siteId: string, findingIds: string[], operationId: string): Promise<ChecksumDeleteResult> {
+    if (isTauri()) return call("delete_checksum_findings", { siteId, findingIds, operationId });
+    const findings = demoScan.checks.flatMap((check) => check.findings);
+    const deletedPaths: string[] = [];
+    const failures: ChecksumDeleteResult["failures"] = [];
+    emitBrowserChecksumDeleteProgress({ operationId, siteId, phase: "deleting", processed: 0, total: findingIds.length, deleted: 0, failed: 0 });
+    for (const [index, findingId] of findingIds.entries()) {
+      const finding = findings.find((item) => item.id === findingId);
+      if (finding?.path) deletedPaths.push(finding.path);
+      else failures.push({ findingId, error: { category: "filesystem", userMessage: "Het bestand kon niet worden gevonden.", retryable: false } });
+      emitBrowserChecksumDeleteProgress({ operationId, siteId, phase: "deleting", processed: index + 1, total: findingIds.length, deleted: deletedPaths.length, failed: failures.length });
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 20));
+    }
+    if (deletedPaths.length) {
+      emitBrowserChecksumDeleteProgress({ operationId, siteId, phase: "rescanning", processed: findingIds.length, total: findingIds.length, deleted: deletedPaths.length, failed: failures.length });
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 80));
+    }
+    emitBrowserChecksumDeleteProgress({ operationId, siteId, phase: "completed", processed: findingIds.length, total: findingIds.length, deleted: deletedPaths.length, failed: failures.length });
+    return { requested: findingIds.length, deleted: deletedPaths.length, deletedPaths, failures, scan: deletedPaths.length ? { ...structuredClone(demoScan), siteId } : undefined };
+  },
+  async onChecksumDeleteProgress(handler: (progress: ChecksumDeleteProgress) => void): Promise<UnlistenFn> { if (isTauri()) return listen("checksum-delete-progress", (event) => handler(event.payload as ChecksumDeleteProgress)); browserChecksumDeleteProgressListeners.add(handler); return () => browserChecksumDeleteProgressListeners.delete(handler); },
   async listWordPressUsers(siteId: string): Promise<WordPressUsersData> { return isTauri() ? call("list_wordpress_users", { siteId }) : structuredClone(browserUsers); },
   async updateWordPressUser(siteId: string, input: WordPressUserUpdateInput): Promise<WordPressUsersData> { if (isTauri()) return call("update_wordpress_user", { siteId, input }); browserUsers.users = browserUsers.users.map((user) => user.id === input.userId ? { ...user, displayName: input.displayName, email: input.email, roles: input.role ? [input.role] : user.roles } : user); return structuredClone(browserUsers); },
   async deleteWordPressUser(siteId: string, input: WordPressUserDeleteInput): Promise<WordPressUsersData> { if (isTauri()) return call("delete_wordpress_user", { siteId, input }); browserUsers.users = browserUsers.users.filter((user) => user.id !== input.userId); return structuredClone(browserUsers); },
