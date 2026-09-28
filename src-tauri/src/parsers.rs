@@ -289,11 +289,6 @@ pub fn parse_modified_files(output: &[u8], wordpress_path: &str) -> (Vec<Finding
         let path = String::from_utf8_lossy(record[0]).into_owned();
         let category = categorize_path(&path, wordpress_path);
         let display = display_path(&path, wordpress_path);
-        let lower = display.to_ascii_lowercase();
-        let attention = lower == "wp-config.php"
-            || lower == ".htaccess"
-            || (category == "root" && lower.ends_with(".php"))
-            || (category == "uploads" && lower.ends_with(".php"));
         let modified_at = parse_find_unix_timestamp(record[1]);
         let permission_mode = String::from_utf8_lossy(record[2]);
         let permission_mode = permission_mode.trim();
@@ -313,16 +308,8 @@ pub fn parse_modified_files(output: &[u8], wordpress_path: &str) -> (Vec<Finding
         findings.push(Finding {
             id: None,
             category,
-            severity: if attention {
-                FindingSeverity::Attention
-            } else {
-                FindingSeverity::Info
-            },
-            title: if attention {
-                "Recent gewijzigd bestand vraagt aandacht".into()
-            } else {
-                "Recent gewijzigd bestand".into()
-            },
+            severity: FindingSeverity::Info,
+            title: "Recent gewijzigd bestand".into(),
             detail: format!("Gewijzigd op {modified_label} en heeft permissies {permission_mode}."),
             path: Some(display),
             checksum_status: None,
@@ -1461,12 +1448,22 @@ mod tests {
     }
 
     #[test]
-    fn highlights_sensitive_modified_root_files_neutrally() {
+    fn recent_changes_to_sensitive_paths_remain_informational() {
         let (items, _) = parse_modified_files(
-            b"/var/www/wp-config.php\x001720000000.0\x00644\0",
+            b"/var/www/wp-config.php\x001720000000.0\x00644\0/var/www/.htaccess\x001720000001.0\x00644\0/var/www/wp-content/uploads/script.php\x001720000002.0\x00644\0",
             "/var/www",
         );
-        assert_eq!(items[0].severity, FindingSeverity::Attention);
+        assert_eq!(items.len(), 3);
+        assert!(
+            items
+                .iter()
+                .all(|item| item.severity == FindingSeverity::Info)
+        );
+        assert!(
+            items
+                .iter()
+                .all(|item| item.title == "Recent gewijzigd bestand")
+        );
         assert!(items[0].detail.contains("heeft permissies 644"));
         assert!(!items[0].detail.contains("Unix-tijd"));
         assert!(!items[0].detail.contains("kwaadaardig"));
