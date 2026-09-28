@@ -4,7 +4,7 @@
 
 Een lokale, Nederlandstalige Windows-desktopapp voor beheer en onderhoud van meerdere WordPress-websites via SSH en WP-CLI. Dagelijks beheer gebruikt vooraf gedefinieerde acties; voor beheerders is per website daarnaast een geavanceerde interactieve SSH-terminal beschikbaar.
 
-> Status: functionele bèta (`0.12.0-beta.1`). Applicatielogin, secure SSH, root-checksums, intelligente PHP-classificatie, begrensd bestandsbeheer met editor- en afbeeldingspreview, WordPress-gebruikersbeheer, core-reparatie, updates, lokale databasebackups, foutenlog, historie, Wordfence Intelligence en de interactieve SSH-terminal zijn aangesloten. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan of remote command rapporteren.
+> Status: functionele bèta (`0.13.0-beta.1`). Applicatielogin, secure SSH, root-checksums, intelligente PHP-classificatie, begrensd bestandsbeheer met editor- en afbeeldingspreview, WordPress-gebruikersbeheer, core-reparatie, updates, lokale databasebackups, foutenlog, historie, Wordfence Intelligence en de interactieve SSH-terminal zijn aangesloten. Mockdata verschijnt uitsluitend wanneer de interface los in een browser draait en kan nooit een echte productiescan of remote command rapporteren.
 
 Websitecontroles en bulkscans draaien als begrensde achtergrondtaken. Cached pagina's en navigatie blijven daardoor tijdens een scan bruikbaar, terwijl echte stapvoortgang en annulering beschikbaar blijven.
 
@@ -85,7 +85,7 @@ Een productie-installatiepakket maken:
 npm run tauri build
 ```
 
-Op Windows verschijnen daarna een MSI en NSIS-installer onder `src-tauri/target/release/bundle/`. De app- en pakketversie is `0.12.0-beta.1`; omdat Windows Installer geen tekstuele prerelease-identifiers accepteert, gebruikt uitsluitend de interne WiX/MSI-productversie de equivalente numerieke waarde `0.12.0.1`. Lokale builds zijn niet digitaal ondertekend; voor publieke distributie hoort daar een vertrouwd code-signingcertificaat bij.
+Op Windows verschijnen daarna een MSI en NSIS-installer onder `src-tauri/target/release/bundle/`. De app- en pakketversie is `0.13.0-beta.1`; omdat Windows Installer geen tekstuele prerelease-identifiers accepteert, gebruikt uitsluitend de interne WiX/MSI-productversie de equivalente numerieke waarde `0.13.0.1`. Lokale builds zijn niet digitaal ondertekend; voor publieke distributie hoort daar een vertrouwd code-signingcertificaat bij.
 
 ## Wordfence Intelligence instellen
 

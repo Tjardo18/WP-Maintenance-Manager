@@ -1,6 +1,6 @@
 [package]
 name = "wp-maintenance-manager"
-version = "0.12.0-beta.1"
+version = "0.13.0-beta.1"
 description = "Veilige lokale WordPress onderhoudsapp via SSH en WP-CLI"
 authors = ["WP Maintenance Manager contributors"]
 edition = "2024"

@@ -1,6 +1,6 @@
 # Databaseback-ups
 
-Dit document beschrijft de huidige implementatie van databaseback-ups in WP Maintenance Manager `0.12.0-beta.1`. Het gaat uitsluitend om logische WordPress-database-exports; websitebestanden, uploads, plugins, thema's, `wp-config.php` en serverconfiguratie zitten niet in deze back-up.
+Dit document beschrijft de huidige implementatie van databaseback-ups in WP Maintenance Manager `0.13.0-beta.1`. Het gaat uitsluitend om logische WordPress-database-exports; websitebestanden, uploads, plugins, thema's, `wp-config.php` en serverconfiguratie zitten niet in deze back-up.
 
 ## Samenvatting
 

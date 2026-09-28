@@ -431,7 +431,7 @@ mod tests {
             status: SnapshotStatus::Partial,
             wordpress_root_identity: Some("sha256:root-identity".into()),
             scan_timestamp: "2026-09-15T08:00:00Z".into(),
-            app_version: Some("0.12.0-beta.1".into()),
+            app_version: Some("0.13.0-beta.1".into()),
             is_baseline: true,
             previous_snapshot_id: None,
         };
