@@ -53,6 +53,15 @@ describe("Tauri authentication boundary", () => {
     });
   });
 
+  it("requires an app session for filemanager metadata and sends only the site selector", async () => {
+    invokeMock.mockResolvedValueOnce({ siteId: "site-a", siteName: "A", siteUrl: "https://a.test" });
+    await appApi.getFilemanagerContext("site-a");
+    expect(invokeMock).toHaveBeenCalledWith("get_filemanager_context", { siteId: "site-a", sessionToken: "active-app-session" });
+    authApi.setSessionToken();
+    await expect(appApi.getFilemanagerContext("site-b")).rejects.toMatchObject({ category: "locked" });
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
   it("forwards a media key without exposing or requiring the app session", async () => {
     invokeMock.mockResolvedValueOnce(undefined);
 

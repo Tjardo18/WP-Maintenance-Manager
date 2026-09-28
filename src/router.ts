@@ -15,6 +15,7 @@ export default createRouter({
     { path: "/websites", component: SitesView, meta: { title: "Websites" } },
     { path: "/websites/toevoegen", component: SiteFormView, meta: { title: "Website toevoegen" } },
     { path: "/websites/:id/bewerken", component: SiteFormView, meta: { title: "Website bewerken" } },
+    { path: "/websites/:id/filemanager", component: () => import("./views/FilemanagerView.vue"), meta: { title: "Filemanager" } },
     { path: "/websites/:id", component: SiteDetailView, meta: { title: "Websiteoverzicht" } },
     { path: "/historie", component: HistoryView, meta: { title: "Onderhoudshistorie" } },
     { path: "/foutenlog", component: ErrorLogView, meta: { title: "Foutenlog" } },

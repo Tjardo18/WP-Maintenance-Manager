@@ -660,6 +660,17 @@ fn save_wp_cli_audit(
 }
 
 #[tauri::command(async)]
+pub fn get_filemanager_context(
+    session_token: String,
+    site_id: String,
+    state: State<'_, AppState>,
+) -> Result<crate::filemanager::FilemanagerContext, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_uuid(&site_id, "De website-id is ongeldig.")?;
+    crate::filemanager::context(&state.database, &site_id)
+}
+
+#[tauri::command(async)]
 pub fn list_sites(
     session_token: String,
     state: State<'_, AppState>,

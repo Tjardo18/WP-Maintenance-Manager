@@ -10,6 +10,7 @@ mod database_cleanup;
 mod engine;
 mod error;
 mod error_log;
+mod filemanager;
 mod health;
 mod maintenance;
 mod media_keys;
@@ -92,6 +93,7 @@ pub fn run() {
             commands::resize_terminal,
             commands::close_terminal,
             commands::list_sites,
+            commands::get_filemanager_context,
             commands::save_site,
             commands::delete_site,
             commands::accept_host_key,
