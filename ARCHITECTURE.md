@@ -1,5 +1,7 @@
 # Architectuur
 
+Het geïsoleerde filemanagerfundament en de hergebruikspunten voor volgende fases staan in [docs/FILEMANAGER.md](docs/FILEMANAGER.md). Fase 1 biedt uitsluitend lokale websitecontext en een placeholderpagina; er zijn nog geen remote filemanageracties.
+
 ## Grenzen en execution modes
 
 ```text

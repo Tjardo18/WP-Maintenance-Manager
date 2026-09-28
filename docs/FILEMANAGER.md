@@ -76,3 +76,10 @@ permissions, downloads, archives and bulk operations are all outside phase 1.
 Route tests cover site changes, delayed responses, missing sites and unmounts.
 Existing terminal/auth tests remain the regression baseline. Opening this page
 requires only local metadata and never establishes a remote session.
+
+Phase 1 checks completed: `npm run check` (typecheck, lint, 191 tests and Vite
+build), `cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+--all-features` (229 tests), Cargo fmt and Clippy with warnings denied, and
+`git diff --check`. The existing Vite warning about a main chunk above 500 kB
+remains; the filemanager view is loaded as a separate route chunk. These are
+automated checks, not a live-server or manual desktop test.
