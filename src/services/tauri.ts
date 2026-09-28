@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { FilemanagerContext } from "../types/filemanager";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteProgress, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, DatabaseCleanupOption, DatabaseCleanupRequest, DatabaseCleanupResult, DatabaseCleanupTarget, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteChangeSummary, SiteInput, SnapshotDiff, SnapshotHistoryItem, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import type { MediaKeyCommand } from "./keyboardShortcuts";
@@ -190,6 +191,12 @@ export const systemInputApi = {
 };
 
 export const appApi = {
+  async getFilemanagerContext(siteId: string): Promise<FilemanagerContext> {
+    if (isTauri()) return call("get_filemanager_context", { siteId });
+    const site = browserSites.find((item) => item.id === siteId);
+    if (!site) throw new Error("Website niet gevonden.");
+    return { siteId: site.id, siteName: site.name, siteUrl: site.url };
+  },
   async beginTerminalReauthentication(siteId: string, appPassword: string): Promise<TerminalChallengeInfo> {
     if (isTauri()) return call("begin_terminal_reauthentication", { siteId, appPassword });
     if (await demoHash(appPassword) !== browserPasswordHash) {
