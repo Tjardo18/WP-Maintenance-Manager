@@ -59,12 +59,27 @@ describe("SecurityChecks", () => {
     expect(wrapper.find("#security-check-modified_files .security-accordion-body").exists()).toBe(true);
   });
 
-  it("shows readable modified dates and the explanatory notice only once", () => {
+  it("formats large recent-change counts as informational inventory", () => {
+    const modifiedChecks: ScanCheck[] = [{
+      key: "modified_files",
+      label: "Gewijzigde bestanden afgelopen 30 dagen",
+      status: "success",
+      summary: "1284 gewijzigde bestanden gevonden.",
+      findings: Array.from({ length: 1_284 }, (_, index) => finding(`wp-content/cache/${index}.txt`, "other")),
+    }];
+
+    const wrapper = mount(SecurityChecks, { props: { checks: modifiedChecks, finishedAt: "2026-09-28T08:40:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: true } });
+
+    expect(wrapper.get(".security-summary-grid button").text()).toContain("1.284 gewijzigd");
+    expect(wrapper.text()).toContain("Geen aandachtspunten");
+  });
+
+  it("shows recent changes as informational data with one explanatory notice", async () => {
     const legacyDetail = "Gewijzigd op Unix-tijd 1789627074.9670225510 met permissiemodus 644. Een recente wijziging is niet automatisch kwaadaardig.";
     const modifiedChecks: ScanCheck[] = [{
       key: "modified_files",
       label: "Gewijzigde bestanden",
-      status: "warning",
+      status: "success",
       summary: "2 bestanden gewijzigd",
       findings: [
         { ...finding("wp-content/themes/demo/one.php", "themes"), detail: legacyDetail },
@@ -72,15 +87,49 @@ describe("SecurityChecks", () => {
       ],
     }];
     const wrapper = mount(SecurityChecks, { props: { checks: modifiedChecks, finishedAt: "2026-09-17T08:40:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: false } });
+    await wrapper.get("#security-check-modified_files .security-accordion-header").trigger("click");
 
     expect(wrapper.findAll(".modified-files-context")).toHaveLength(1);
-    expect(wrapper.get(".modified-files-context").text()).toBe("Een recente wijziging betekent niet automatisch dat het bestand kwaadaardig is.");
+    expect(wrapper.get(".modified-files-context").text()).toBe("Een recente wijziging is op zichzelf informatief. Als voor hetzelfde bestand een concrete securitybevinding bestaat, toont het label hier de ernst daarvan.");
+    expect(wrapper.findAll(".modified-file-heading>span").map((badge) => badge.text())).toEqual(["Informatief", "Informatief"]);
+    expect(wrapper.find(".security-disposition-tabs").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Melding negeren");
+    expect(wrapper.text()).not.toContain("Bestand vertrouwen");
     expect(wrapper.text()).not.toContain("Unix-tijd");
     expect(wrapper.text()).not.toContain("Een recente wijziging is niet automatisch kwaadaardig.");
     expect(wrapper.findAll(".finding-copy p").map((paragraph) => paragraph.text())).toEqual([
       "Gewijzigd op 17 september 2026 om 08:37 uur en heeft permissies 644.",
       "Gewijzigd op 17 september 2026 om 08:37 uur en heeft permissies 644.",
     ]);
+  });
+
+  it("shows and prioritizes the severity of a related security finding for a modified file", async () => {
+    const safeChange = finding("wp-content/cache/safe.php", "other");
+    const criticalChange = finding("wp-admin/includes/ajax-actions.php", "core");
+    const correlatedChecks: ScanCheck[] = [
+      {
+        key: "core_checksum",
+        label: "WordPress core",
+        status: "warning",
+        summary: "1 gewijzigd bestand",
+        findings: [{ ...criticalChange, severity: "critical", checksumStatus: "modified", disposition: "active" }],
+      },
+      {
+        key: "modified_files",
+        label: "Gewijzigde bestanden",
+        status: "success",
+        summary: "2 bestanden gewijzigd",
+        findings: [safeChange, criticalChange],
+      },
+    ];
+    const wrapper = mount(SecurityChecks, { props: { checks: correlatedChecks, finishedAt: "2026-09-28T08:40:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: false } });
+    await wrapper.get("#security-check-modified_files .security-accordion-header").trigger("click");
+
+    const rows = wrapper.findAll("#security-check-modified_files .finding");
+    expect(rows[0]!.text()).toContain("ajax-actions.php");
+    expect(rows[0]!.get(".modified-file-heading>span").text()).toBe("Kritiek");
+    expect(rows[0]!.get(".modified-file-heading>span").classes()).toContain("critical");
+    expect(rows[1]!.get(".modified-file-heading>span").text()).toBe("Informatief");
   });
 
   it("filters and paginates thousands of findings without creating a giant DOM", async () => {
@@ -120,7 +169,7 @@ describe("SecurityChecks", () => {
     const modifiedFinding = { ...finding("wp-content/themes/demo/functions.php", "themes"), id: "modified-finding" };
     const previewChecks: ScanCheck[] = [
       { key: "php_uploads", label: "PHP in uploads", status: "warning", summary: "1 bestand gevonden", findings: [uploadFinding] },
-      { key: "modified_files", label: "Gewijzigde bestanden", status: "warning", summary: "1 bestand gewijzigd", findings: [modifiedFinding] },
+      { key: "modified_files", label: "Gewijzigde bestanden", status: "success", summary: "1 bestand gewijzigd", findings: [modifiedFinding] },
     ];
     const wrapper = mount(SecurityChecks, { props: { checks: previewChecks, finishedAt: "2026-09-07T11:42:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: true } });
 

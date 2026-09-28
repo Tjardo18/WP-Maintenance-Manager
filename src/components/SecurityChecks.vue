@@ -36,13 +36,49 @@ const dispositions = reactive<Record<string, SecurityDisposition>>({});
 const pages = reactive<Record<string, number>>({});
 const pageSizes = reactive<Record<string, number>>({});
 const showAllPhp = ref(false);
+const numberFormat = new Intl.NumberFormat("nl-NL");
+
+function normalizedFindingPath(path?: string) {
+  return path?.replace(/\\/g, "/").replace(/^(\.\/)+/, "").replace(/\/{2,}/g, "/").replace(/\/$/, "");
+}
+
+function severityPriority(severity: Finding["severity"]) {
+  if (severity === "critical") return 5;
+  if (severity === "problem") return 4;
+  if (severity === "warning") return 3;
+  if (severity === "attention") return 2;
+  return 1;
+}
+
+const relatedSecurityFindings = computed(() => {
+  const findings = new Map<string, Finding>();
+  for (const check of props.checks) {
+    if (check.key === "modified_files") continue;
+    for (const finding of check.findings) {
+      const path = normalizedFindingPath(finding.path);
+      const disposition = finding.disposition ?? "active";
+      if (!path || finding.severity === "info" || !["active", "expired_exception", "trusted_changed"].includes(disposition)) continue;
+      const current = findings.get(path);
+      if (!current || severityPriority(finding.severity) > severityPriority(current.severity)) findings.set(path, finding);
+    }
+  }
+  return findings;
+});
+
+function findingsForDisplay(check: ScanCheck) {
+  if (check.key !== "modified_files") return check.findings;
+  return check.findings.map((finding) => {
+    const related = relatedSecurityFindings.value.get(normalizedFindingPath(finding.path) ?? "");
+    return related ? { ...finding, severity: related.severity } : finding;
+  });
+}
 
 watch(() => [props.finishedAt, ...props.checks.map((check) => check.key)], () => {
   for (const check of props.checks) {
     queries[check.key] ??= "";
     queryInputs[check.key] ??= "";
     categories[check.key] ??= "all";
-    dispositions[check.key] ??= "active";
+    dispositions[check.key] ??= check.key === "modified_files" ? "all" : "active";
     pages[check.key] ??= 1;
     pageSizes[check.key] ??= 25;
   }
@@ -53,7 +89,7 @@ watch(() => [props.finishedAt, ...props.checks.map((check) => check.key)], () =>
 }, { immediate: true });
 
 const results = computed(() => Object.fromEntries(props.checks.map((check) => {
-  const findings = filterSecurityFindings(check, {
+  const findings = filterSecurityFindings({ ...check, findings: findingsForDisplay(check) }, {
     query: queries[check.key] ?? "",
     category: categories[check.key] ?? "all",
     disposition: dispositions[check.key] ?? "active",
@@ -123,7 +159,7 @@ function compactSummary(check: ScanCheck) {
   }
   if (check.key === "php_files") return count ? `${count} opvallend` : "Geen opvallende bestanden";
   if (check.key === "php_uploads") return count ? `${count} gevonden` : "Geen bestanden gevonden";
-  if (check.key === "modified_files") return `${count} gewijzigd`;
+  if (check.key === "modified_files") return `${numberFormat.format(count)} gewijzigd`;
   if (!count && check.status === "success") return "In orde";
   return check.summary;
 }
@@ -145,8 +181,8 @@ function dispositionLabel(finding: Finding) {
   return undefined;
 }
 
-function canTrust(finding: Finding) {
-  return Boolean(finding.id && finding.path && !["missing", "scan_error"].includes(finding.checksumStatus ?? "") && finding.disposition !== "trusted");
+function canTrust(check: ScanCheck, finding: Finding) {
+  return check.key !== "modified_files" && Boolean(finding.id && finding.path && !["missing", "scan_error"].includes(finding.checksumStatus ?? "") && finding.disposition !== "trusted");
 }
 
 function canPreview(check: ScanCheck, finding: Finding) {
@@ -164,6 +200,14 @@ function updateFor(finding: Finding) {
 function vulnerabilityRating(finding: Finding) {
   if (finding.vulnerability?.informational) return "Informatief";
   return finding.vulnerability?.cvssRating ?? "Unknown";
+}
+
+function modifiedFileStatusLabel(finding: Finding) {
+  if (finding.severity === "critical") return "Kritiek";
+  if (finding.severity === "problem") return "Probleem";
+  if (finding.severity === "warning") return "Waarschuwing";
+  if (finding.severity === "attention") return "Aandacht nodig";
+  return "Informatief";
 }
 
 function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; label: string }> {
@@ -207,10 +251,10 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
 
       <div v-if="isOpen(check.key)" :id="`security-panel-${check.key}`" class="security-accordion-body">
         <p class="security-check-description">{{ check.summary }}</p>
-        <p v-if="check.key === 'modified_files'" class="modified-files-context"><Info :size="14" /><span>Een recente wijziging betekent niet automatisch dat het bestand kwaadaardig is.</span></p>
+        <p v-if="check.key === 'modified_files'" class="modified-files-context"><Info :size="14" /><span>Een recente wijziging is op zichzelf informatief. Als voor hetzelfde bestand een concrete securitybevinding bestaat, toont het label hier de ernst daarvan.</span></p>
         <details v-if="check.status === 'failed' && check.technicalDetails" class="scan-diagnostic"><summary>Technische details</summary><pre>{{ check.technicalDetails }}</pre></details>
 
-        <div class="security-disposition-tabs" aria-label="Meldingstatus">
+        <div v-if="check.key !== 'modified_files'" class="security-disposition-tabs" aria-label="Meldingstatus">
           <button v-for="option in [{ value: 'active', label: 'Actief' }, { value: 'ignored', label: 'Genegeerd' }, { value: 'trusted', label: 'Vertrouwd' }, { value: 'all', label: 'Alles' }]" :key="option.value" type="button" :class="{ active: dispositions[check.key] === option.value }" @click="setDisposition(check.key, option.value)">{{ option.label }}</button>
         </div>
 
@@ -232,16 +276,16 @@ function categoryOptions(check: ScanCheck): Array<{ value: SecurityCategory; lab
             <label v-if="finding.checksumStatus === 'unexpected' && finding.id" class="finding-select"><input type="checkbox" :checked="selectedFindingIds.includes(finding.id)" :disabled="!isLatestScan" :aria-label="`${finding.path} selecteren`" @change="emit('toggleFinding', finding.id)" /></label>
             <div class="finding-copy">
               <template v-if="finding.vulnerability"><div class="vulnerability-finding-heading"><div><strong>{{ finding.vulnerability.softwareName }}</strong><code>{{ finding.vulnerability.softwareSlug }}</code></div><span :class="['vulnerability-rating', (finding.vulnerability.cvssRating ?? 'unknown').toLowerCase()]">{{ vulnerabilityRating(finding) }}<template v-if="finding.vulnerability.cvssScore !== undefined"> · {{ finding.vulnerability.cvssScore }}</template></span></div><p class="vulnerability-title">{{ finding.vulnerability.title }}</p><div class="vulnerability-meta"><span>Geïnstalleerd: <strong>{{ finding.vulnerability.installedVersion }}</strong></span><span v-if="finding.vulnerability.installedStatus === 'inactive'">Inactief</span><span v-if="finding.vulnerability.cve">{{ finding.vulnerability.cve }}</span><span>{{ finding.vulnerability.patchedVersions.length ? `Opgelost: ${finding.vulnerability.patchedVersions.join(', ')}` : finding.vulnerability.patched ? 'Oplossing gemeld' : 'Geen bekende patch beschikbaar' }}</span></div></template>
-              <template v-else><span v-if="finding.checksumStatus" :class="['checksum-status', finding.checksumStatus]">{{ checksumLabel(finding) }}</span><strong v-else>{{ finding.title }}</strong><p>{{ check.key === 'modified_files' ? formatModifiedFileDetail(finding.detail) : finding.detail }}</p><code v-if="finding.path">{{ finding.path }}</code></template>
+              <template v-else><span v-if="finding.checksumStatus" :class="['checksum-status', finding.checksumStatus]">{{ checksumLabel(finding) }}</span><div v-else-if="check.key === 'modified_files'" class="modified-file-heading"><strong>{{ finding.title }}</strong><span :class="finding.severity"><CircleX v-if="finding.severity === 'critical' || finding.severity === 'problem'" :size="11" /><CircleAlert v-else-if="finding.severity === 'warning' || finding.severity === 'attention'" :size="11" /><Info v-else :size="11" /> {{ modifiedFileStatusLabel(finding) }}</span></div><strong v-else>{{ finding.title }}</strong><p>{{ check.key === 'modified_files' ? formatModifiedFileDetail(finding.detail) : finding.detail }}</p><code v-if="finding.path">{{ finding.path }}</code></template>
               <span v-if="dispositionLabel(finding)" :class="['finding-disposition', finding.disposition]">{{ dispositionLabel(finding) }}</span><small v-if="finding.policyReason" class="finding-policy-reason">{{ finding.policyReason }}</small>
             </div>
             <div v-if="finding.id" class="finding-actions">
               <button v-if="finding.vulnerability" class="button small secondary" :disabled="!!busy" @click="emit('details', finding)"><Info :size="14" /> Details</button>
               <button v-if="isLatestScan && updateFor(finding)" class="button small secondary" :disabled="!!busy" @click="emit('update', updateFor(finding)!)"><RefreshCw :size="14" /> {{ finding.vulnerability?.softwareType === 'core' ? 'WordPress bijwerken' : 'Bijwerken' }}</button>
               <button v-if="canPreview(check, finding)" class="button small secondary" :disabled="!!busy" @click="emit('preview', finding)"><LoaderCircle v-if="busy === `preview-${finding.id}`" class="spin" :size="14" /><Eye v-else :size="14" /> Bekijken</button>
-              <button v-if="isLatestScan && (finding.disposition ?? 'active') !== 'ignored' && finding.disposition !== 'trusted'" class="button small ghost" :disabled="!!busy" @click="emit('ignore', finding, false)"><EyeOff :size="14" /> Melding negeren</button>
-              <button v-if="isLatestScan && (finding.disposition ?? 'active') !== 'ignored' && finding.disposition !== 'trusted'" class="button small ghost" :disabled="!!busy" @click="emit('ignore', finding, true)"><Clock3 :size="14" /> Tijdelijk negeren</button>
-              <button v-if="isLatestScan && canTrust(finding)" class="button small ghost" :disabled="!!busy" @click="emit('trust', finding)"><ShieldCheck :size="14" /> Bestand vertrouwen</button>
+              <button v-if="check.key !== 'modified_files' && isLatestScan && (finding.disposition ?? 'active') !== 'ignored' && finding.disposition !== 'trusted'" class="button small ghost" :disabled="!!busy" @click="emit('ignore', finding, false)"><EyeOff :size="14" /> Melding negeren</button>
+              <button v-if="check.key !== 'modified_files' && isLatestScan && (finding.disposition ?? 'active') !== 'ignored' && finding.disposition !== 'trusted'" class="button small ghost" :disabled="!!busy" @click="emit('ignore', finding, true)"><Clock3 :size="14" /> Tijdelijk negeren</button>
+              <button v-if="isLatestScan && canTrust(check, finding)" class="button small ghost" :disabled="!!busy" @click="emit('trust', finding)"><ShieldCheck :size="14" /> Bestand vertrouwen</button>
               <button v-if="isLatestScan && finding.checksumStatus === 'unexpected'" class="button small danger-text" :disabled="!!busy" @click="emit('delete', finding)"><Trash2 :size="14" /> Verwijderen</button>
             </div>
           </div>

@@ -18,6 +18,23 @@ export function noteworthyFindingCount(check: ScanCheck) {
   return check.findings.filter(isNoteworthyFinding).length;
 }
 
+function findingPriority(finding: Finding) {
+  const disposition = finding.disposition ?? "active";
+
+  if (["ignored", "trusted", "trusted_missing"].includes(disposition)) return 4;
+  if (disposition === "trusted_changed") return 2;
+  if (["critical", "problem"].includes(finding.severity)) return 0;
+  if (["attention", "warning"].includes(finding.severity)) return 1;
+  return 3;
+}
+
+export function sortSecurityFindings(findings: Finding[]) {
+  return findings
+    .map((finding, index) => ({ finding, index }))
+    .sort((left, right) => findingPriority(left.finding) - findingPriority(right.finding) || left.index - right.index)
+    .map(({ finding }) => finding);
+}
+
 function normalizedCategory(finding: Finding) {
   return finding.category.trim().toLocaleLowerCase("nl-NL");
 }
@@ -47,7 +64,7 @@ function belongsToDisposition(finding: Finding, disposition: SecurityDisposition
 
 export function filterSecurityFindings(check: ScanCheck, filter: SecurityFindingFilter) {
   const query = filter.query.trim().toLocaleLowerCase("nl-NL");
-  return check.findings.filter((finding) => {
+  const findings = check.findings.filter((finding) => {
     if (!belongsToDisposition(finding, filter.disposition ?? "active")) return false;
     if (check.key === "php_files" && !filter.showAllPhp && !isNoteworthyFinding(finding)) return false;
     if (!belongsToCategory(finding, filter.category)) return false;
@@ -57,6 +74,8 @@ export function filterSecurityFindings(check: ScanCheck, filter: SecurityFinding
       .filter(Boolean)
       .some((value) => value!.toLocaleLowerCase("nl-NL").includes(query));
   });
+
+  return sortSecurityFindings(findings);
 }
 
 export function paginateSecurityFindings(findings: Finding[], page: number, pageSize: number) {

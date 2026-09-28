@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Finding, ScanCheck } from "../types";
-import { filterSecurityFindings, noteworthyFindingCount, paginateSecurityFindings } from "./securityResults";
+import { filterSecurityFindings, noteworthyFindingCount, paginateSecurityFindings, sortSecurityFindings } from "./securityResults";
 
 function finding(path: string, category: string, severity: Finding["severity"] = "info"): Finding {
   return { path, category, severity, title: path.split("/").slice(-1)[0]!, detail: `Controle van ${path}` };
@@ -45,8 +45,38 @@ describe("security result filtering", () => {
 
     expect(filterSecurityFindings(findings, { query: "", category: "all", showAllPhp: true }).map((item) => item.path)).toEqual(["active.php", "changed.php"]);
     expect(filterSecurityFindings(findings, { query: "", category: "all", disposition: "ignored", showAllPhp: true })).toEqual([ignored]);
-    expect(filterSecurityFindings(findings, { query: "", category: "all", disposition: "trusted", showAllPhp: true })).toEqual([trusted, changed]);
+    expect(filterSecurityFindings(findings, { query: "", category: "all", disposition: "trusted", showAllPhp: true })).toEqual([changed, trusted]);
     expect(noteworthyFindingCount(findings)).toBe(2);
+  });
+
+  it("sorts actionable findings before informational and handled findings", () => {
+    const info = { ...finding("info.php", "root"), disposition: "active" as const };
+    const warning = { ...finding("warning.php", "root", "warning"), disposition: "active" as const };
+    const critical = { ...finding("critical.php", "root", "critical"), disposition: "active" as const };
+    const problem = { ...finding("problem.php", "root", "problem"), disposition: "active" as const };
+    const attention = { ...finding("attention.php", "root", "attention"), disposition: "active" as const };
+    const changed = { ...finding("changed.php", "root", "warning"), disposition: "trusted_changed" as const };
+    const ignored = { ...finding("ignored.php", "root", "critical"), disposition: "ignored" as const };
+    const trusted = { ...finding("trusted.php", "root", "critical"), disposition: "trusted" as const };
+
+    expect(sortSecurityFindings([info, warning, ignored, changed, critical, trusted, attention, problem]).map((item) => item.path)).toEqual([
+      "critical.php",
+      "problem.php",
+      "warning.php",
+      "attention.php",
+      "changed.php",
+      "info.php",
+      "ignored.php",
+      "trusted.php",
+    ]);
+  });
+
+  it("keeps the original order within the same priority group", () => {
+    const first = finding("first.php", "root", "warning");
+    const second = finding("second.php", "root", "attention");
+    const third = finding("third.php", "root", "warning");
+
+    expect(sortSecurityFindings([first, second, third])).toEqual([first, second, third]);
   });
 
   it("paginates thousands of findings without copying them into the visible page", () => {

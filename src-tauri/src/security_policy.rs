@@ -244,6 +244,13 @@ pub fn security_summary(checks: &[ScanCheck]) -> String {
 }
 
 fn apply_default_severity(check_type: &str, finding: &mut Finding) {
+    if check_type == "modified_files" {
+        // Recency is inventory metadata, not a security signal. Suspicious PHP content and
+        // locations are reported by the dedicated PHP checks. An explicitly trusted file whose
+        // hash changed can still become TrustedChanged later in the policy flow.
+        finding.severity = FindingSeverity::Info;
+        return;
+    }
     let path = finding
         .path
         .as_deref()
@@ -476,6 +483,46 @@ mod tests {
             calculate_site_status(&check(vec![critical])),
             SiteStatus::Problem
         );
+    }
+
+    #[test]
+    fn recent_file_changes_are_informational_but_real_security_findings_remain_active() {
+        let now = Utc::now();
+        let mut recent_change = finding("wp-config.php", ChecksumStatus::Modified);
+        recent_change.checksum_status = None;
+        recent_change.category = "root".into();
+        recent_change.severity = FindingSeverity::Critical;
+        recent_change.title = "Recent gewijzigd bestand vraagt aandacht".into();
+        let mut checks = vec![ScanCheck {
+            key: "modified_files".into(),
+            label: "Gewijzigde bestanden".into(),
+            status: StepStatus::Warning,
+            summary: "1 gewijzigd bestand".into(),
+            technical_details: None,
+            findings: vec![recent_change],
+        }];
+
+        apply_scan_policy("site-a", &mut checks, &[], &[], now);
+
+        assert_eq!(checks[0].status, StepStatus::Success);
+        assert_eq!(checks[0].findings[0].severity, FindingSeverity::Info);
+        assert_eq!(calculate_site_status(&checks), SiteStatus::Healthy);
+
+        let mut suspicious_php =
+            finding("wp-content/uploads/shell.php", ChecksumStatus::Unexpected);
+        suspicious_php.checksum_status = None;
+        suspicious_php.category = "uploads".into();
+        suspicious_php.severity = FindingSeverity::Attention;
+        checks.push(ScanCheck {
+            key: "php_files".into(),
+            label: "PHP in wp-content".into(),
+            status: StepStatus::Warning,
+            summary: "1 opvallend bestand".into(),
+            technical_details: None,
+            findings: vec![suspicious_php],
+        });
+
+        assert_eq!(calculate_site_status(&checks), SiteStatus::Attention);
     }
 
     #[test]
