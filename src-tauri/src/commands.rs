@@ -222,6 +222,17 @@ pub fn list_error_logs(
     state.database.list_error_logs(&filter)
 }
 
+#[tauri::command(async)]
+pub fn delete_error_logs(
+    session_token: String,
+    error_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<u64, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_error_log_ids(&error_ids)?;
+    state.database.delete_error_logs(&error_ids)
+}
+
 fn log_operation_error<T>(
     state: &AppState,
     site_id: Option<&str>,
@@ -1659,6 +1670,54 @@ pub fn remove_finding_exception(
 }
 
 #[tauri::command(async)]
+pub fn remove_finding_exceptions(
+    session_token: String,
+    exception_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<u64, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_bulk_uuid_ids(&exception_ids, "uitzonderingen")?;
+    let site_ids = state
+        .database
+        .deactivate_finding_exceptions(&exception_ids)?;
+    for (exception_id, site_id) in exception_ids.iter().zip(&site_ids) {
+        state.database.save_audit_event(
+            Some(site_id),
+            "finding_unignored",
+            exception_id,
+            "success",
+            Some("bulk_action=true"),
+        )?;
+    }
+    reapply_policy_for_sites(&state, &site_ids)?;
+    Ok(exception_ids.len() as u64)
+}
+
+#[tauri::command(async)]
+pub fn cleanup_expired_finding_exceptions(
+    session_token: String,
+    exception_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<u64, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_bulk_uuid_ids(&exception_ids, "verlopen uitzonderingen")?;
+    let site_ids = state
+        .database
+        .delete_expired_finding_exceptions(&exception_ids, Utc::now())?;
+    for (exception_id, site_id) in exception_ids.iter().zip(&site_ids) {
+        state.database.save_audit_event(
+            Some(site_id),
+            "expired_exception_deleted",
+            exception_id,
+            "success",
+            Some("bulk_action=true"),
+        )?;
+    }
+    reapply_policy_for_sites(&state, &site_ids)?;
+    Ok(exception_ids.len() as u64)
+}
+
+#[tauri::command(async)]
 pub fn list_trusted_files(
     session_token: String,
     site_id: Option<String>,
@@ -1840,6 +1899,37 @@ pub fn revoke_trusted_file(
         finding_exception: None,
         trusted_file: None,
     })
+}
+
+#[tauri::command(async)]
+pub fn revoke_trusted_files(
+    session_token: String,
+    trusted_file_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<u64, AppError> {
+    require_auth(&state, &session_token)?;
+    validate_bulk_uuid_ids(&trusted_file_ids, "vertrouwde bestanden")?;
+    let trusted_files = trusted_file_ids
+        .iter()
+        .map(|id| state.database.get_trusted_file(id))
+        .collect::<Result<Vec<_>, _>>()?;
+    if trusted_files.iter().any(|trusted| !trusted.active) {
+        return Err(AppError::validation(
+            "Een geselecteerde trustregistratie is al ingetrokken.",
+        ));
+    }
+    let site_ids = state.database.deactivate_trusted_files(&trusted_file_ids)?;
+    for (trusted, site_id) in trusted_files.iter().zip(&site_ids) {
+        state.database.save_audit_event(
+            Some(site_id),
+            "trust_revoked",
+            &trusted.relative_path,
+            "success",
+            Some("bulk_action=true"),
+        )?;
+    }
+    reapply_policy_for_sites(&state, &site_ids)?;
+    Ok(trusted_file_ids.len() as u64)
 }
 
 #[tauri::command(async)]
@@ -2176,6 +2266,45 @@ fn validate_security_ids(site_id: &str, finding_id: &str) -> Result<(), AppError
     validate_uuid(finding_id, "De securitymelding-id is ongeldig.")
 }
 
+fn validate_bulk_uuid_ids(ids: &[String], label: &str) -> Result<(), AppError> {
+    if ids.is_empty() || ids.len() > 1_000 {
+        return Err(AppError::validation(format!(
+            "Selecteer tussen 1 en 1000 {label}.",
+        )));
+    }
+    let mut unique = HashSet::with_capacity(ids.len());
+    for id in ids {
+        validate_uuid(id, "Een geselecteerde registratie-id is ongeldig.")?;
+        if !unique.insert(id) {
+            return Err(AppError::validation(
+                "De selectie bevat een dubbele registratie-id.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_error_log_ids(ids: &[String]) -> Result<(), AppError> {
+    if ids.is_empty() || ids.len() > 1_000 {
+        return Err(AppError::validation(
+            "Selecteer tussen 1 en 1000 foutregels.",
+        ));
+    }
+    let mut unique = HashSet::with_capacity(ids.len());
+    for id in ids {
+        let suffix = id.strip_prefix("ERR-").unwrap_or_default();
+        if suffix.len() != 12 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(AppError::validation("Een fout-ID is ongeldig."));
+        }
+        if !unique.insert(id) {
+            return Err(AppError::validation(
+                "De selectie bevat een dubbel fout-ID.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_uuid(value: &str, message: &str) -> Result<(), AppError> {
     uuid::Uuid::parse_str(value)
         .map(|_| ())
@@ -2240,6 +2369,16 @@ fn remote_timestamp(timestamp: Option<u64>) -> Option<String> {
         .and_then(|timestamp| i64::try_from(timestamp).ok())
         .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
         .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+fn reapply_policy_for_sites(state: &AppState, site_ids: &[String]) -> Result<(), AppError> {
+    let mut reapplied = HashSet::with_capacity(site_ids.len());
+    for site_id in site_ids {
+        if reapplied.insert(site_id) {
+            reapply_latest_policy(state, site_id)?;
+        }
+    }
+    Ok(())
 }
 
 fn reapply_latest_policy(state: &AppState, site_id: &str) -> Result<Option<ScanResult>, AppError> {

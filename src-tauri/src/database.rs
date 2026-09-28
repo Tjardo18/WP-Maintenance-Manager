@@ -14,7 +14,7 @@ use crate::{
     snapshots::{SiteSnapshot, SnapshotDiff},
     wordfence::{WORDFENCE_PROVIDER, WordfenceVulnerability},
 };
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde::de::{DeserializeSeed, Error as _, MapAccess, Visitor};
 use std::{
@@ -926,6 +926,59 @@ impl Database {
         Ok(site_id)
     }
 
+    pub fn deactivate_finding_exceptions(&self, ids: &[String]) -> Result<Vec<String>, AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        let mut site_ids = Vec::with_capacity(ids.len());
+        for id in ids {
+            let site_id = transaction
+                .query_row(
+                    "SELECT site_id FROM finding_exceptions WHERE id=?1 AND active=1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| AppError::not_found("Actieve uitzondering"))?;
+            transaction.execute("UPDATE finding_exceptions SET active=0 WHERE id=?1", [id])?;
+            site_ids.push(site_id);
+        }
+        transaction.commit()?;
+        Ok(site_ids)
+    }
+
+    pub fn delete_expired_finding_exceptions(
+        &self,
+        ids: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>, AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        let mut site_ids = Vec::with_capacity(ids.len());
+        for id in ids {
+            let (site_id, expires_at) = transaction
+                .query_row(
+                    "SELECT site_id,expires_at FROM finding_exceptions WHERE id=?1 AND active=1",
+                    [id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| AppError::not_found("Verlopen uitzondering"))?;
+            let expired = expires_at
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .is_some_and(|expires| expires <= now);
+            if !expired {
+                return Err(AppError::validation(
+                    "Alleen daadwerkelijk verlopen uitzonderingen kunnen worden opgeruimd.",
+                ));
+            }
+            transaction.execute("DELETE FROM finding_exceptions WHERE id=?1", [id])?;
+            site_ids.push(site_id);
+        }
+        transaction.commit()?;
+        Ok(site_ids)
+    }
+
     pub fn list_trusted_files(&self, site_id: Option<&str>) -> Result<Vec<TrustedFile>, AppError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
@@ -1037,6 +1090,26 @@ impl Database {
             .ok_or_else(|| AppError::not_found("Actief vertrouwd bestand"))?;
         connection.execute("UPDATE trusted_files SET active=0 WHERE id=?1", [id])?;
         Ok(site_id)
+    }
+
+    pub fn deactivate_trusted_files(&self, ids: &[String]) -> Result<Vec<String>, AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        let mut site_ids = Vec::with_capacity(ids.len());
+        for id in ids {
+            let site_id = transaction
+                .query_row(
+                    "SELECT site_id FROM trusted_files WHERE id=?1 AND active=1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| AppError::not_found("Actief vertrouwd bestand"))?;
+            transaction.execute("UPDATE trusted_files SET active=0 WHERE id=?1", [id])?;
+            site_ids.push(site_id);
+        }
+        transaction.commit()?;
+        Ok(site_ids)
     }
 
     pub fn update_scan_policy(
@@ -1670,6 +1743,17 @@ impl Database {
             offset,
         })
     }
+
+    pub fn delete_error_logs(&self, ids: &[String]) -> Result<u64, AppError> {
+        let connection = self.connect()?;
+        let transaction = connection.unchecked_transaction()?;
+        let mut deleted = 0_u64;
+        for id in ids {
+            deleted += transaction.execute("DELETE FROM error_logs WHERE id=?1", [id])? as u64;
+        }
+        transaction.commit()?;
+        Ok(deleted)
+    }
 }
 
 struct WordfenceFeedSeed<'transaction, 'connection> {
@@ -2215,6 +2299,32 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.records[0].id, "ERR-NEW");
         assert!(!page.records.iter().any(|record| record.id == "ERR-OLD"));
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn deletes_only_selected_error_log_records() {
+        let path =
+            std::env::temp_dir().join(format!("wpmm-error-delete-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        for id in ["ERR-AAAAAAAAAAAA", "ERR-BBBBBBBBBBBB", "ERR-CCCCCCCCCCCC"] {
+            database
+                .save_error_log(&error_record(id, &utc_now()))
+                .unwrap();
+        }
+
+        assert_eq!(
+            database
+                .delete_error_logs(&["ERR-AAAAAAAAAAAA".into(), "ERR-CCCCCCCCCCCC".into()])
+                .unwrap(),
+            2
+        );
+        let remaining = database
+            .list_error_logs(&ErrorLogFilter::default())
+            .unwrap();
+        assert_eq!(remaining.total, 1);
+        assert_eq!(remaining.records[0].id, "ERR-BBBBBBBBBBBB");
         drop(database);
         let _ = fs::remove_file(path);
     }
@@ -2827,6 +2937,103 @@ mod tests {
         assert_eq!(
             database.deactivate_trusted_file(&trusted.id).unwrap(),
             site.id
+        );
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn bulk_policy_cleanup_deactivates_current_records_and_deletes_only_expired_history() {
+        let path =
+            std::env::temp_dir().join(format!("wpmm-policy-bulk-{}.sqlite3", Uuid::new_v4()));
+        let database = Database::initialize(path.clone()).unwrap();
+        let site = database.save_site(&input(), None).unwrap();
+        let now = Utc::now();
+        let make_exception = |expires_at: Option<String>| FindingException {
+            id: Uuid::new_v4().to_string(),
+            site_id: site.id.clone(),
+            site_name: site.name.clone(),
+            check_type: "core_checksum".into(),
+            finding_type: "modified".into(),
+            target: format!("wp-includes/{}.php", Uuid::new_v4()),
+            scope: ExceptionScope::Site,
+            reason: "Handmatig tijdelijk genegeerd".into(),
+            note: None,
+            created_at: utc_now(),
+            expires_at,
+            active: true,
+        };
+        let ignored = make_exception(None);
+        let expired = make_exception(Some((now - chrono::Duration::minutes(1)).to_rfc3339()));
+        let future = make_exception(Some((now + chrono::Duration::minutes(10)).to_rfc3339()));
+        for exception in [&ignored, &expired, &future] {
+            database.save_finding_exception(exception).unwrap();
+        }
+
+        assert_eq!(
+            database
+                .deactivate_finding_exceptions(std::slice::from_ref(&ignored.id))
+                .unwrap(),
+            vec![site.id.clone()]
+        );
+        assert_eq!(
+            database
+                .delete_expired_finding_exceptions(std::slice::from_ref(&expired.id), now)
+                .unwrap(),
+            vec![site.id.clone()]
+        );
+        assert!(
+            database
+                .delete_expired_finding_exceptions(std::slice::from_ref(&future.id), now)
+                .is_err()
+        );
+        let exceptions = database.list_finding_exceptions(Some(&site.id)).unwrap();
+        assert!(
+            exceptions
+                .iter()
+                .any(|item| item.id == ignored.id && !item.active)
+        );
+        assert!(!exceptions.iter().any(|item| item.id == expired.id));
+        assert!(
+            exceptions
+                .iter()
+                .any(|item| item.id == future.id && item.active)
+        );
+
+        let trusted = |relative_path: &str| TrustedFile {
+            id: Uuid::new_v4().to_string(),
+            site_id: site.id.clone(),
+            site_name: site.name.clone(),
+            relative_path: relative_path.into(),
+            trusted_sha256: "a".repeat(64),
+            current_sha256: Some("a".repeat(64)),
+            size_bytes: 10,
+            current_size_bytes: Some(10),
+            modified_at_snapshot: None,
+            current_modified_at: None,
+            file_type: "regular".into(),
+            status: TrustedFileStatus::Trusted,
+            trusted_at: utc_now(),
+            last_checked_at: Some(utc_now()),
+            note: None,
+            active: true,
+        };
+        let first = trusted("wp-content/first.php");
+        let second = trusted("wp-content/second.php");
+        database.save_trusted_file(&first).unwrap();
+        database.save_trusted_file(&second).unwrap();
+        assert_eq!(
+            database
+                .deactivate_trusted_files(&[first.id.clone(), second.id.clone()])
+                .unwrap(),
+            vec![site.id.clone(), site.id.clone()]
+        );
+        assert!(
+            database
+                .list_trusted_files(Some(&site.id))
+                .unwrap()
+                .iter()
+                .all(|item| !item.active)
         );
         drop(database);
         let _ = fs::remove_file(path);

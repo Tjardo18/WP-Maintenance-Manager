@@ -1,16 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { AlertTriangle, ChevronLeft, ChevronRight, CircleAlert, Search, X } from "@lucide/vue";
+import { AlertTriangle, ChevronLeft, ChevronRight, CircleAlert, Search, Trash2, X } from "@lucide/vue";
 import { appApi } from "../services/tauri";
 import { useSitesStore } from "../stores/sites";
 import type { ErrorCategory, ErrorLogFilter, ErrorLogPage, ErrorLogRecord, ErrorSeverity } from "../types";
 import { errorMessage } from "../utils/errors";
+import ConfirmDialog from "../components/ConfirmDialog.vue";
 
 const sites = useSitesStore();
 const page = ref<ErrorLogPage>({ records: [], total: 0, limit: 25, offset: 0 });
 const loading = ref(false);
 const error = ref<string>();
 const selected = ref<ErrorLogRecord>();
+const selectedIds = ref<string[]>([]);
+const pendingDelete = ref<ErrorLogRecord[]>([]);
+const deleting = ref(false);
 const siteId = ref("");
 const category = ref<ErrorCategory | "">("");
 const severity = ref<ErrorSeverity | "">("");
@@ -30,6 +34,8 @@ const categories: Array<{ value: ErrorCategory; label: string }> = [
 
 const pageNumber = computed(() => Math.floor(page.value.offset / page.value.limit) + 1);
 const pageCount = computed(() => Math.max(1, Math.ceil(page.value.total / page.value.limit)));
+const allVisibleSelected = computed(() => Boolean(page.value.records.length) && page.value.records.every((record) => selectedIds.value.includes(record.id)));
+const selectedRecords = computed(() => page.value.records.filter((record) => selectedIds.value.includes(record.id)));
 
 function categoryLabel(value: ErrorCategory) {
   return categories.find((item) => item.value === value)?.label ?? value;
@@ -51,9 +57,36 @@ function filter(offset = 0): ErrorLogFilter {
 async function load(offset = 0) {
   loading.value = true;
   error.value = undefined;
-  try { page.value = await appApi.listErrorLogs(filter(offset)); }
+  try { page.value = await appApi.listErrorLogs(filter(offset)); selectedIds.value = []; }
   catch (cause) { error.value = errorMessage(cause); }
   finally { loading.value = false; }
+}
+
+function toggleRecord(id: string) {
+  selectedIds.value = selectedIds.value.includes(id) ? selectedIds.value.filter((current) => current !== id) : [...selectedIds.value, id];
+}
+
+function toggleVisible() {
+  selectedIds.value = allVisibleSelected.value ? [] : page.value.records.map((record) => record.id);
+}
+
+function requestDelete(records: ErrorLogRecord[]) {
+  pendingDelete.value = records;
+}
+
+async function executeDelete() {
+  if (!pendingDelete.value.length) return;
+  deleting.value = true; error.value = undefined;
+  const ids = pendingDelete.value.map((record) => record.id);
+  const nextTotal = Math.max(0, page.value.total - ids.length);
+  const nextOffset = nextTotal && page.value.offset >= nextTotal ? Math.floor((nextTotal - 1) / page.value.limit) * page.value.limit : page.value.offset;
+  try {
+    await appApi.deleteErrorLogs(ids);
+    if (selected.value && ids.includes(selected.value.id)) selected.value = undefined;
+    pendingDelete.value = [];
+    await load(nextOffset);
+  } catch (cause) { error.value = errorMessage(cause); }
+  finally { deleting.value = false; }
 }
 
 onMounted(() => void load());
@@ -73,8 +106,13 @@ onMounted(() => void load());
       <button class="button secondary" :disabled="loading"><Search :size="14" /> Zoeken</button>
     </form>
 
+    <div v-if="page.records.length" class="table-selection-toolbar">
+      <label class="table-selection-toggle"><input type="checkbox" :checked="allVisibleSelected" :disabled="loading" aria-label="Alle zichtbare fouten selecteren" @change="toggleVisible" /><span>{{ selectedIds.length ? `${selectedIds.length} geselecteerd` : 'Selecteer foutregels om ze te verwijderen' }}</span></label>
+      <button class="button small danger-text" :disabled="loading || !selectedRecords.length" @click="requestDelete(selectedRecords)"><Trash2 :size="14" /> Geselecteerde verwijderen</button>
+    </div>
+
     <div v-if="!loading && !page.records.length" class="empty-state"><CircleAlert :size="38" /><h3>Geen fouten gevonden</h3><p>Nieuwe technische incidenten verschijnen hier zodra een backendactie mislukt.</p></div>
-    <div v-else class="table-scroll"><table class="error-log-table"><thead><tr><th>Datum</th><th>Website</th><th>Categorie</th><th>Actie</th><th>Fout</th><th>Status</th></tr></thead><tbody><tr v-for="record in page.records" :key="record.id" tabindex="0" @click="selected = record" @keydown.enter="selected = record"><td>{{ dateTime(record.createdAt) }}</td><td>{{ record.siteName ?? 'Applicatie' }}</td><td><span :class="['error-category', record.category]">{{ categoryLabel(record.category) }}</span></td><td>{{ record.action }}</td><td><strong>{{ record.summary }}</strong><small>{{ record.id }}</small></td><td><span :class="['error-severity', record.severity]"><AlertTriangle :size="12" /> {{ severityLabel(record.severity) }}</span></td></tr></tbody></table></div>
+    <div v-else class="table-scroll"><table class="error-log-table"><thead><tr><th class="table-select-cell"><span class="sr-only">Selecteren</span></th><th>Datum</th><th>Website</th><th>Categorie</th><th>Actie</th><th>Fout</th><th>Status</th><th></th></tr></thead><tbody><tr v-for="record in page.records" :key="record.id" tabindex="0" @click="selected = record" @keydown.enter="selected = record"><td class="table-select-cell"><input type="checkbox" :checked="selectedIds.includes(record.id)" :aria-label="`${record.id} selecteren`" @click.stop @change="toggleRecord(record.id)" /></td><td>{{ dateTime(record.createdAt) }}</td><td>{{ record.siteName ?? 'Applicatie' }}</td><td><span :class="['error-category', record.category]">{{ categoryLabel(record.category) }}</span></td><td>{{ record.action }}</td><td><strong>{{ record.summary }}</strong><small>{{ record.id }}</small></td><td><span :class="['error-severity', record.severity]"><AlertTriangle :size="12" /> {{ severityLabel(record.severity) }}</span></td><td><button class="button small danger-text" type="button" @click.stop="requestDelete([record])"><Trash2 :size="14" /> Verwijderen</button></td></tr></tbody></table></div>
     <footer v-if="page.total" class="error-log-pagination"><span>{{ page.offset + 1 }}–{{ Math.min(page.offset + page.limit, page.total) }} van {{ page.total }}</span><button class="button small ghost" :disabled="loading || page.offset === 0" @click="load(Math.max(0, page.offset - page.limit))"><ChevronLeft :size="14" /> Vorige</button><strong>{{ pageNumber }} / {{ pageCount }}</strong><button class="button small ghost" :disabled="loading || page.offset + page.limit >= page.total" @click="load(page.offset + page.limit)">Volgende <ChevronRight :size="14" /></button></footer>
   </section>
 
@@ -89,4 +127,8 @@ onMounted(() => void load());
       <p class="error-detail-note">Er wordt geen generieke retry uitgevoerd: alleen acties waarvan veilig exact dezelfde niet-destructieve invoer beschikbaar is, mogen automatisch worden herhaald.</p>
     </article>
   </div>
+
+  <ConfirmDialog v-if="pendingDelete.length" :title="pendingDelete.length === 1 ? 'Foutregel verwijderen?' : `${pendingDelete.length} foutregels verwijderen?`" :confirm-label="pendingDelete.length === 1 ? 'Foutregel verwijderen' : 'Foutregels verwijderen'" :busy="deleting" danger @cancel="pendingDelete = []" @confirm="executeDelete">
+    <p>{{ pendingDelete.length === 1 ? 'Deze foutregel wordt definitief uit de lokale foutenlog verwijderd.' : `De ${pendingDelete.length} geselecteerde foutregels worden definitief uit de lokale foutenlog verwijderd.` }}</p>
+  </ConfirmDialog>
 </template>

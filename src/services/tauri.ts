@@ -315,6 +315,22 @@ export const appApi = {
     browserScan(exception.siteId).checks.flatMap((check) => check.findings).filter((finding) => finding.exceptionId === exceptionId).forEach((finding) => { finding.disposition = "active"; finding.exceptionId = undefined; finding.policyReason = undefined; });
     return { scan: structuredClone(browserScan(exception.siteId)) };
   },
+  async removeFindingExceptions(exceptionIds: string[]): Promise<number> {
+    if (isTauri()) return call("remove_finding_exceptions", { exceptionIds });
+    for (const exceptionId of exceptionIds) await appApi.removeFindingException(exceptionId);
+    return exceptionIds.length;
+  },
+  async cleanupExpiredFindingExceptions(exceptionIds: string[]): Promise<number> {
+    if (isTauri()) return call("cleanup_expired_finding_exceptions", { exceptionIds });
+    const now = Date.now();
+    for (const exceptionId of exceptionIds) {
+      const index = browserExceptions.findIndex((item) => item.id === exceptionId && item.active && item.expiresAt && Date.parse(item.expiresAt) <= now);
+      if (index < 0) throw new Error("Verlopen uitzondering niet gevonden.");
+      const [exception] = browserExceptions.splice(index, 1);
+      browserScan(exception!.siteId).checks.flatMap((check) => check.findings).filter((finding) => finding.exceptionId === exceptionId).forEach((finding) => { finding.disposition = "active"; finding.exceptionId = undefined; finding.policyReason = undefined; });
+    }
+    return exceptionIds.length;
+  },
   async listTrustedFiles(siteId?: string): Promise<TrustedFile[]> { return isTauri() ? call("list_trusted_files", { siteId: siteId ?? null }) : structuredClone(browserTrustedFiles.filter((trusted) => !siteId || trusted.siteId === siteId)); },
   async trustFindingFile(input: TrustedFileInput): Promise<SecurityPolicyMutationResult> {
     if (isTauri()) return call("trust_finding_file", { input });
@@ -337,6 +353,11 @@ export const appApi = {
     const trusted = browserTrustedFiles.find((item) => item.id === trustedFileId && item.active); if (!trusted) throw new Error("Actief vertrouwd bestand niet gevonden."); trusted.active = false;
     browserScan(trusted.siteId).checks.flatMap((check) => check.findings).filter((finding) => finding.trustedFileId === trusted.id).forEach((finding) => { finding.disposition = "active"; finding.trustedFileId = undefined; finding.policyReason = undefined; });
     return { scan: structuredClone(browserScan(trusted.siteId)) };
+  },
+  async revokeTrustedFiles(trustedFileIds: string[]): Promise<number> {
+    if (isTauri()) return call("revoke_trusted_files", { trustedFileIds });
+    for (const trustedFileId of trustedFileIds) await appApi.revokeTrustedFile(trustedFileId);
+    return trustedFileIds.length;
   },
   async previewFindingFile(siteId: string, findingId: string): Promise<FilePreview> { if (isTauri()) return call("preview_checksum_finding", { siteId, findingId }); const finding = demoScan.checks.flatMap((check) => check.findings).find((item) => item.id === findingId); if (!finding?.path) throw new Error("Bestandsfinding niet gevonden."); const parts = finding.path.split("/"); return { finding: structuredClone(finding), fileName: parts[parts.length - 1] ?? finding.path, relativePath: finding.path, sizeBytes: 54, modifiedAt: new Date().toISOString(), fileType: "php-bestand", extension: "php", textContent: "<script>alert('preview wordt als tekst getoond')</script>\n<?php // demo ?>", binary: false, truncated: false }; },
   async deleteChecksumFinding(siteId: string, findingId: string): Promise<ChecksumDeleteResult> { if (isTauri()) return call("delete_checksum_finding", { siteId, findingId }); const path = demoScan.checks.flatMap((check) => check.findings).find((item) => item.id === findingId)?.path; return { requested: 1, deleted: path ? 1 : 0, deletedPaths: path ? [path] : [], failures: [], scan: { ...structuredClone(demoScan), siteId } }; },
@@ -398,4 +419,5 @@ export const appApi = {
   async onWordfenceFeedRefreshUpdated(handler: (job: VulnerabilityRefreshJobState) => void): Promise<UnlistenFn> { if (isTauri()) return listen("wordfence-feed-refresh-updated", (event) => handler(event.payload as VulnerabilityRefreshJobState)); browserWordfenceJobListeners.add(handler); return () => browserWordfenceJobListeners.delete(handler); },
   async listAuditEvents(siteId?: string): Promise<AuditEvent[]> { return isTauri() ? call("list_audit_events", { siteId: siteId ?? null }) : []; },
   async listErrorLogs(filter: ErrorLogFilter = {}): Promise<ErrorLogPage> { return isTauri() ? call("list_error_logs", { filter }) : { records: [], total: 0, limit: filter.limit ?? 50, offset: filter.offset ?? 0 }; },
+  async deleteErrorLogs(errorIds: string[]): Promise<number> { return isTauri() ? call("delete_error_logs", { errorIds }) : errorIds.length; },
 };

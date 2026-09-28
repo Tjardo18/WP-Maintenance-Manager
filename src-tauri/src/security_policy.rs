@@ -394,19 +394,42 @@ mod tests {
     }
 
     #[test]
-    fn expired_exception_reactivates_the_finding() {
+    fn temporary_exception_suppresses_until_expiration_and_then_reactivates_the_finding() {
         let now = Utc::now();
-        let expired = exception(
+        let mut temporary = exception(
             "site-a",
-            "readme.html",
-            "missing",
-            Some((now - Duration::minutes(1)).to_rfc3339()),
+            "wp-settings.php",
+            "modified",
+            Some((now + Duration::minutes(1)).to_rfc3339()),
         );
-        let mut checks = check(vec![finding("readme.html", ChecksumStatus::Missing)]);
-        apply_scan_policy("site-a", &mut checks, &[expired], &[], now);
+        let raw = finding("wp-settings.php", ChecksumStatus::Modified);
+        let mut checks = check(vec![raw.clone()]);
+        apply_scan_policy(
+            "site-a",
+            &mut checks,
+            std::slice::from_ref(&temporary),
+            &[],
+            now,
+        );
+        assert_eq!(
+            checks[0].findings[0].disposition,
+            FindingDisposition::Ignored
+        );
+        assert_eq!(checks[0].status, StepStatus::Success);
+        assert_eq!(calculate_site_status(&checks), SiteStatus::Healthy);
+
+        temporary.expires_at = Some((now - Duration::minutes(1)).to_rfc3339());
+        let mut checks = check(vec![raw]);
+        apply_scan_policy("site-a", &mut checks, &[temporary], &[], now);
         assert_eq!(
             checks[0].findings[0].disposition,
             FindingDisposition::ExpiredException
+        );
+        assert_eq!(checks[0].status, StepStatus::Warning);
+        assert_eq!(calculate_site_status(&checks), SiteStatus::Problem);
+        assert_eq!(
+            checks[0].findings[0].policy_reason.as_deref(),
+            Some("De tijdelijke uitzondering is verlopen.")
         );
     }
 
