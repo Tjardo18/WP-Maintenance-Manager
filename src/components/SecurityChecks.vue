@@ -188,7 +188,7 @@ function canTrust(check: ScanCheck, finding: Finding) {
 function canPreview(check: ScanCheck, finding: Finding) {
   if (!props.isLatestScan || !finding.id || !finding.path) return false;
   if (["php_uploads", "modified_files"].includes(check.key)) return true;
-  return check.key === "core_checksum" && finding.checksumStatus === "unexpected";
+  return check.key === "core_checksum" && ["modified", "unexpected"].includes(finding.checksumStatus ?? "");
 }
 
 function updateFor(finding: Finding) {

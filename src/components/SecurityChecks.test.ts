@@ -182,6 +182,27 @@ describe("SecurityChecks", () => {
     expect(wrapper.findAll(".finding-actions button").some((button) => button.text().includes("Verwijderen"))).toBe(false);
   });
 
+  it("previews existing core checksum deviations but not missing files or scan errors", async () => {
+    const modified = { ...finding("wp-includes/PHPMailer/PHPMailer.php", "wordpress-core-modified", "critical"), id: "modified-core", checksumStatus: "modified" as const };
+    const unexpected = { ...finding("wp-admin/unexpected.php", "wordpress-core-unexpected", "warning"), id: "unexpected-core", checksumStatus: "unexpected" as const };
+    const missing = { ...finding("wp-includes/missing.php", "wordpress-core-missing"), id: "missing-core", checksumStatus: "missing" as const };
+    const scanError = { ...finding("wp-includes/unreadable.php", "wordpress-core-scan-error", "warning"), id: "scan-error-core", checksumStatus: "scan_error" as const };
+    const coreChecks: ScanCheck[] = [{ key: "core_checksum", label: "WordPress core", status: "warning", summary: "Afwijkingen", findings: [missing, scanError, modified, unexpected] }];
+    const wrapper = mount(SecurityChecks, { props: { checks: coreChecks, finishedAt: "2026-09-28T08:40:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: true } });
+
+    const rows = wrapper.findAll("#security-check-core_checksum .finding");
+    const modifiedRow = rows.find((row) => row.text().includes("PHPMailer.php"));
+    const unexpectedRow = rows.find((row) => row.text().includes("unexpected.php"));
+    const missingRow = rows.find((row) => row.text().includes("missing.php"));
+    const scanErrorRow = rows.find((row) => row.text().includes("unreadable.php"));
+
+    await modifiedRow!.get("button").trigger("click");
+    await unexpectedRow!.findAll("button").find((button) => button.text().includes("Bekijken"))!.trigger("click");
+    expect(missingRow!.text()).not.toContain("Bekijken");
+    expect(scanErrorRow!.text()).not.toContain("Bekijken");
+    expect(wrapper.emitted("preview")).toEqual([[modified], [unexpected]]);
+  });
+
   it("does not offer file previews for old scans or unrelated checks", async () => {
     const unrelated: ScanCheck[] = [{ key: "permissions", label: "Bestandsrechten", status: "warning", summary: "Controleer", findings: [{ ...finding("wp-content/test.php", "other"), id: "permission-finding" }] }];
     const current = mount(SecurityChecks, { props: { checks: unrelated, finishedAt: "2026-09-07T11:42:00Z", truncated: false, isLatestScan: true, selectedFindingIds: [], showSummary: true } });

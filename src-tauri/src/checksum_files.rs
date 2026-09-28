@@ -48,7 +48,10 @@ fn validate_preview_context<'a>(
         context.check_type.as_str(),
         "php_uploads" | "modified_files"
     ) || (context.check_type == "core_checksum"
-        && context.finding.checksum_status == Some(ChecksumStatus::Unexpected));
+        && matches!(
+            context.finding.checksum_status,
+            Some(ChecksumStatus::Modified | ChecksumStatus::Unexpected)
+        ));
     if context.site_id != site_id
         || context.scan_run_id.is_empty()
         || context.finding.id.as_deref().is_none_or(str::is_empty)
@@ -427,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_accepts_current_upload_and_modified_file_findings() {
+    fn preview_accepts_findings_that_refer_to_existing_files() {
         assert_eq!(
             validate_preview_context(
                 "site-1",
@@ -441,6 +444,20 @@ mod tests {
                 .unwrap(),
             "wp-config.php"
         );
+        let mut modified_core = context("core_checksum", "wp-includes/PHPMailer/PHPMailer.php");
+        modified_core.finding.checksum_status = Some(ChecksumStatus::Modified);
+        assert_eq!(
+            validate_preview_context("site-1", &modified_core).unwrap(),
+            "wp-includes/PHPMailer/PHPMailer.php"
+        );
+        assert_eq!(
+            validate_preview_context(
+                "site-1",
+                &context("core_checksum", "wp-admin/unexpected.php")
+            )
+            .unwrap(),
+            "wp-admin/unexpected.php"
+        );
     }
 
     #[test]
@@ -453,9 +470,12 @@ mod tests {
             validate_preview_context("site-1", &context("modified_files", "../wp-config.php"))
                 .is_err()
         );
-        let mut modified_core = context("core_checksum", "wp-admin/load.php");
-        modified_core.finding.checksum_status = Some(ChecksumStatus::Modified);
-        assert!(validate_preview_context("site-1", &modified_core).is_err());
+        let mut missing_core = context("core_checksum", "wp-admin/load.php");
+        missing_core.finding.checksum_status = Some(ChecksumStatus::Missing);
+        assert!(validate_preview_context("site-1", &missing_core).is_err());
+        let mut failed_core = context("core_checksum", "wp-admin/load.php");
+        failed_core.finding.checksum_status = Some(ChecksumStatus::ScanError);
+        assert!(validate_preview_context("site-1", &failed_core).is_err());
         assert!(
             validate_preview_context(
                 "another-site",
