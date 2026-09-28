@@ -7,8 +7,8 @@ use crate::{
     },
     snapshot_builder::SnapshotCronInput,
     validation::{
-        validate_checksum_relative_path, validate_role, validate_slug,
-        validate_software_identifier, validate_user_id,
+        validate_checksum_relative_path, validate_role, validate_software_identifier,
+        validate_user_id,
     },
 };
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, SecondsFormat, Timelike, Utc};
@@ -837,11 +837,12 @@ pub fn parse_update_list(output: &str, kind: UpdateKind) -> Result<Vec<UpdateIte
         {
             continue;
         }
-        let slug = string_field(&row, "name", "");
-        validate_slug(&slug)?;
+        let slug = string_field(&row, "name", "").trim().to_owned();
+        validate_software_identifier(&slug)
+            .map_err(|error| with_software_context(error, &kind, "name", &slug, None))?;
         updates.push(UpdateItem {
             kind: kind.clone(),
-            name: string_field(&row, "title", &slug),
+            name: software_display_name(&row, &slug, &kind)?,
             slug,
             current_version: string_field(&row, "version", "onbekend"),
             new_version: update_version,
@@ -880,11 +881,16 @@ pub fn parse_software_inventory(
     rows.into_iter()
         .map(|row| {
             let slug = string_field(&row, "name", "").trim().to_ascii_lowercase();
-            validate_software_identifier(&slug)?;
+            validate_software_identifier(&slug)
+                .map_err(|error| with_software_context(error, &kind, "name", &slug, None))?;
             let version = string_field(&row, "version", "").trim().to_owned();
             if version.len() > 200 || version.chars().any(char::is_control) {
-                return Err(AppError::validation(
-                    "WP-CLI gaf een ongeldige softwareversie terug.",
+                return Err(with_software_context(
+                    AppError::validation("WP-CLI gaf een ongeldige softwareversie terug."),
+                    &kind,
+                    "version",
+                    &version,
+                    Some(&slug),
                 ));
             }
             let version = if version.is_empty() {
@@ -895,7 +901,7 @@ pub fn parse_software_inventory(
             let update_version = string_field(&row, "update_version", "");
             Ok(InstalledSoftware {
                 software_type: software_type.into(),
-                name: software_display_name(&row, &slug)?,
+                name: software_display_name(&row, &slug, &kind)?,
                 slug,
                 version,
                 status: string_field(&row, "status", "unknown"),
@@ -999,17 +1005,60 @@ fn string_field(value: &Value, key: &str, fallback: &str) -> String {
         .to_owned()
 }
 
-fn software_display_name(value: &Value, slug: &str) -> Result<String, AppError> {
+fn software_display_name(value: &Value, slug: &str, kind: &UpdateKind) -> Result<String, AppError> {
     let name = string_field(value, "title", "").trim().to_owned();
     if name.is_empty() {
         return Ok(slug.to_owned());
     }
     if name.chars().count() > 250 || name.chars().any(char::is_control) {
-        return Err(AppError::validation(
-            "WP-CLI gaf een ongeldige plugin- of themanaam terug.",
+        return Err(with_software_context(
+            AppError::validation("WP-CLI gaf een ongeldige plugin- of themanaam terug."),
+            kind,
+            "title",
+            &name,
+            Some(slug),
         ));
     }
     Ok(name)
+}
+
+fn with_software_context(
+    mut error: AppError,
+    kind: &UpdateKind,
+    field: &str,
+    value: &str,
+    identifier: Option<&str>,
+) -> AppError {
+    let item_type = match kind {
+        UpdateKind::Plugin => "plugin",
+        UpdateKind::Theme => "thema",
+        UpdateKind::Core => "WordPress-core",
+        UpdateKind::Language => "vertaling",
+    };
+    let mut details = format!(
+        "WP-CLI-itemtype: {item_type}\nVeld: {field}\nOntvangen waarde: {}",
+        diagnostic_value(value)
+    );
+    if let Some(identifier) = identifier {
+        details.push_str(&format!(
+            "\nBijbehorende identiteit: {}",
+            diagnostic_value(identifier)
+        ));
+    }
+    error.technical_details = Some(details);
+    error
+}
+
+fn diagnostic_value(value: &str) -> String {
+    const MAX_CHARACTERS: usize = 200;
+    let character_count = value.chars().count();
+    let bounded = value.chars().take(MAX_CHARACTERS).collect::<String>();
+    let quoted = serde_json::to_string(&bounded).unwrap_or_else(|_| "\"<onleesbaar>\"".into());
+    if character_count > MAX_CHARACTERS {
+        format!("{quoted}… ({character_count} tekens)")
+    } else {
+        quoted
+    }
 }
 
 fn required_string_field(value: &Value, key: &str, label: &str) -> Result<String, AppError> {
@@ -1228,7 +1277,37 @@ mod tests {
     #[test]
     fn rejects_untrusted_slug_returned_by_wp_cli() {
         let json = r#"[{"name":"safe;id","title":"Bad","version":"1","update_version":"2"}]"#;
-        assert!(parse_update_list(json, UpdateKind::Plugin).is_err());
+        let error = parse_update_list(json, UpdateKind::Plugin).unwrap_err();
+        assert_eq!(error.category, "validation");
+        let details = error.technical_details.unwrap();
+        assert!(details.contains("WP-CLI-itemtype: plugin"));
+        assert!(details.contains("Veld: name"));
+        assert!(details.contains(r#"Ontvangen waarde: "safe;id""#));
+    }
+
+    #[test]
+    fn update_list_accepts_safe_wordpress_identifiers_beyond_repository_slugs() {
+        let json = r#"[
+            {"name":"Plugin_Loader-1.php","title":"Custom Loader","version":"1.0.0","update":"available","update_version":"1.1.0"},
+            {"name":"theme_with_underscores","title":"Custom Theme","version":"2.0.0","update":"available","update_version":"2.1.0"}
+        ]"#;
+
+        let plugins = parse_update_list(json, UpdateKind::Plugin).unwrap();
+
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins[0].slug, "Plugin_Loader-1.php");
+        assert_eq!(plugins[1].slug, "theme_with_underscores");
+    }
+
+    #[test]
+    fn invalid_software_title_reports_the_related_identifier() {
+        let json = "[{\"name\":\"example-plugin\",\"title\":\"Bad\\nTitle\",\"version\":\"1\",\"update\":\"available\",\"update_version\":\"2\"}]";
+
+        let error = parse_update_list(json, UpdateKind::Plugin).unwrap_err();
+
+        assert!(error.technical_details.as_deref().is_some_and(|details| {
+            details.contains("Bijbehorende identiteit: \"example-plugin\"")
+        }));
     }
 
     #[test]
