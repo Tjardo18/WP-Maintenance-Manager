@@ -316,7 +316,7 @@ onMounted(discover);
         <p v-if="discoveryResult?.unexpectedDirectoriesTruncated" class="nested-sites-warning"><AlertTriangle :size="15" />Alleen de eerste 200 gevonden mappen worden weergegeven.</p>
         <p v-if="error" class="error-banner">{{ error }}</p>
         <p v-if="success" class="nested-discovery-success"><Check :size="16" />{{ success }}</p>
-        <div v-if="!candidates.length && !error" class="nested-sites-empty"><Check :size="18" /><span>Geen nieuwe mogelijke child-installaties gevonden.</span></div>
+        <div v-if="!candidates.length && !error" class="nested-sites-empty nested-discovery-empty"><Check :size="18" /><span>Geen nieuwe mogelijke child-installaties gevonden.</span></div>
 
         <div v-else class="nested-sites-list nested-discovery-list">
           <article v-for="candidate in orderedCandidates" :key="candidate.key" class="nested-site" :class="{ saved: candidate.saved }" :style="{ marginLeft: `${Math.min(candidate.depth, 5) * 18}px` }">

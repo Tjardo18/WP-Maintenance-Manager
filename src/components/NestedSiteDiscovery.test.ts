@@ -42,6 +42,17 @@ describe("NestedSiteDiscovery", () => {
     mockApi.saveSite.mockReset();
   });
 
+  it("shows the aligned empty state when no new child installations are found", async () => {
+    mockApi.testConnection.mockResolvedValue(connectionResult());
+
+    const wrapper = mount(NestedSiteDiscovery, { props: { parent, sites: [parent] } });
+    await flushPromises();
+
+    const emptyState = wrapper.get(".nested-discovery-empty");
+    expect(emptyState.classes()).toContain("nested-sites-empty");
+    expect(emptyState.text()).toBe("Geen nieuwe mogelijke child-installaties gevonden.");
+  });
+
   it("discovers directories through the saved parent connection", async () => {
     mockApi.testConnection.mockResolvedValue(connectionResult(["dev"]));
 
