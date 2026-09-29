@@ -1,7 +1,8 @@
 use crate::{
     error::AppError,
     models::{
-        ChecksumFindingRecord, ChecksumStatus, FilePreview, Finding, FindingContext, StoredSite,
+        ChecksumFindingRecord, ChecksumStatus, FileContentPreview, FilePreview, Finding,
+        FindingContext, StoredSite,
     },
     ssh::{RemoteFileRead, SshExecutor},
     validation::{validate_checksum_file_action_path, validate_checksum_relative_path},
@@ -93,6 +94,16 @@ fn validate_delete_record<'a>(
 }
 
 fn build_preview(finding: &Finding, relative_path: &str, remote: RemoteFileRead) -> FilePreview {
+    FilePreview {
+        finding: finding.clone(),
+        content: build_file_content_preview(relative_path, remote),
+    }
+}
+
+pub(crate) fn build_file_content_preview(
+    relative_path: &str,
+    remote: RemoteFileRead,
+) -> FileContentPreview {
     let file_name = relative_path
         .rsplit('/')
         .next()
@@ -152,8 +163,7 @@ fn build_preview(finding: &Finding, relative_path: &str, remote: RemoteFileRead)
         .and_then(|timestamp| i64::try_from(timestamp).ok())
         .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
         .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Secs, true));
-    FilePreview {
-        finding: finding.clone(),
+    FileContentPreview {
         file_name,
         relative_path: relative_path.into(),
         size_bytes: remote.size_bytes,
@@ -333,7 +343,9 @@ mod tests {
             assert!(preview.text_content.is_none(), "{extension}");
             assert_eq!(preview.image_mime_type.as_deref(), Some(mime_type));
             assert_eq!(
-                STANDARD.decode(preview.image_data_base64.unwrap()).unwrap(),
+                STANDARD
+                    .decode(preview.image_data_base64.as_ref().unwrap())
+                    .unwrap(),
                 bytes
             );
         }
@@ -380,7 +392,9 @@ mod tests {
         assert!(preview.truncated);
         assert!(preview.image_data_base64.is_none());
         assert_eq!(
-            STANDARD.decode(preview.raw_data_base64.unwrap()).unwrap(),
+            STANDARD
+                .decode(preview.raw_data_base64.as_ref().unwrap())
+                .unwrap(),
             bytes
         );
     }
@@ -406,7 +420,9 @@ mod tests {
         let original = STANDARD
             .decode(preview.raw_data_base64.as_ref().unwrap())
             .unwrap();
-        let png = STANDARD.decode(preview.image_data_base64.unwrap()).unwrap();
+        let png = STANDARD
+            .decode(preview.image_data_base64.as_ref().unwrap())
+            .unwrap();
         assert!(preview.binary);
         assert_eq!(preview.image_mime_type.as_deref(), Some("image/png"));
         assert_eq!(original, tiff);
@@ -426,7 +442,10 @@ mod tests {
             },
         );
         assert!(preview.truncated);
-        assert_eq!(preview.text_content.unwrap().len(), PREVIEW_LIMIT_BYTES);
+        assert_eq!(
+            preview.text_content.as_ref().unwrap().len(),
+            PREVIEW_LIMIT_BYTES
+        );
     }
 
     #[test]

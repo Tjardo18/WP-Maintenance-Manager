@@ -1,4 +1,6 @@
 /** Local display metadata, not an authenticated remote file session. */
+import type { FileContentPreview } from "../types";
+
 export interface FilemanagerContext {
   siteId: string;
   siteName: string;
@@ -28,3 +30,5 @@ export interface FilemanagerDirectoryListing {
   items: FilemanagerDirectoryItem[];
   truncated: boolean;
 }
+
+export type FilemanagerFilePreview = FileContentPreview;

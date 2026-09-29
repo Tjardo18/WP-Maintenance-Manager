@@ -178,6 +178,18 @@ impl FilemanagerAccessManager {
         })
     }
 
+    pub fn read_file(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        requested: &str,
+    ) -> Result<crate::models::FileContentPreview, AppError> {
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::read_filemanager_file(connection, &site.wordpress_path, requested)
+        })
+    }
+
     fn with_connection<T>(
         &self,
         session: &str,
@@ -203,6 +215,7 @@ impl FilemanagerAccessManager {
                 "filemanager_timeout"
                     | "filemanager_disconnected"
                     | "filemanager_sftp_failed"
+                    | "filemanager_file_read_failed"
                     | "filemanager_invalid_directory_response"
             )
         }) {

@@ -2,7 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FilemanagerAccess from "./FilemanagerAccess.vue";
 
-const api = vi.hoisted(() => ({ beginFilemanagerReauthentication: vi.fn(), openFilemanager: vi.fn(), getFilemanagerAuthorization: vi.fn(), closeFilemanager: vi.fn(), listFilemanagerDirectory: vi.fn() }));
+const api = vi.hoisted(() => ({ beginFilemanagerReauthentication: vi.fn(), openFilemanager: vi.fn(), getFilemanagerAuthorization: vi.fn(), closeFilemanager: vi.fn(), listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), getSettings: vi.fn() }));
 vi.mock("../services/tauri", () => ({ appApi: api }));
 const context = { siteId: "site-a", siteName: "Website A", siteUrl: "https://a.test" };
 const create = () => mount(FilemanagerAccess, { props: { context } });
@@ -21,6 +21,7 @@ describe("filemanager two-password gate", () => {
     api.getFilemanagerAuthorization.mockResolvedValue({ siteId: context.siteId, expiresInSeconds: 899 });
     api.closeFilemanager.mockResolvedValue(undefined);
     api.listFilemanagerDirectory.mockResolvedValue({ currentPath: "/", isRoot: true, parentPath: null, items: [], truncated: false });
+    api.getSettings.mockResolvedValue({ scanConcurrency: 4, filePreviewMode: "normal", markdownPreviewMode: "raw" });
   });
   afterEach(() => { vi.useRealTimers(); });
 

@@ -1,10 +1,11 @@
-# Filemanager — authentication, safe paths and directory browser
+# Filemanager — authentication, safe paths, browser and previews
 
 This feature is developed on `feature/filemanager`, with phase 1 on
 `feature/filemanager-phase-1-foundation` and phase 2 on
 `feature/filemanager-phase-2-auth`, followed by phase 3 on
 `feature/filemanager-phase-3-directory-backend`, followed by phase 4 on
-`feature/filemanager-phase-4-directory-browser`. It must not be merged into `main`
+`feature/filemanager-phase-4-directory-browser` and phase 5 on
+`feature/filemanager-phase-5-file-preview`. It must not be merged into `main`
 without a later explicit instruction. The application version is unchanged.
 
 ## Existing architecture and reuse
@@ -37,9 +38,9 @@ without a later explicit instruction. The application version is unchanged.
   Raw/Preview, fullscreen, Escape and images. Its helpers are `fileSyntax`,
   `markdownPreview`, `svgPreview`, `imagePreview` and `binaryInspector`.
   It is read-only, not an editor. `checksum_files.rs` loads it using the newest
-  authorized finding and SFTP. Its `FilePreview` contract and delete button are
-  currently coupled to findings; reuse must separate presentation from those
-  permissions in the later preview phase, without fabricating a finding.
+  authorized finding and SFTP. Phase 5 separates its generic
+  `FileContentPreview` presentation contract from the optional finding/delete
+  permission, without fabricating a finding for filemanager files.
 - Styles use shared cards/buttons/empty states in `styles.css`. Vitest and Vue
   Test Utils cover views; Rust tests cover auth, terminal, SSH and database.
   `npm run check` and Cargo fmt/test/clippy are the established checks.
@@ -249,16 +250,64 @@ interactive in phase 4. The table is horizontally scrollable on narrow screens,
 long file names truncate visually but retain a full-name tooltip, and breadcrumbs
 scroll horizontally.
 
+## Phase 5: secure file reads and shared preview
+
+Regular files in `FilemanagerBrowser.vue` are keyboard-accessible buttons.
+Selecting one calls `appApi.readFilemanagerFile(siteId, authorizationToken,
+virtualPath)` and shows an accessible loading state. Directories retain their
+phase-4 navigation behavior. A successful response opens the existing
+`ChecksumFilePreview.vue`; closing it, pressing Escape or choosing **Terug naar
+map** reveals the still-mounted directory listing and preserves its history.
+Separate request IDs discard a late response when another file was selected or
+the website/component was unmounted. The response path must exactly equal the
+requested virtual path before it is rendered.
+
+`read_filemanager_file` repeats the app-session and phase-2 filemanager guard
+before transport, loads the current site from SQLite, normalizes the client path
+as a phase-3 `VirtualPath`, and rechecks both guards before returning success.
+The token remains bound to the app session, site UUID and current SSH/root/host
+configuration; a token for website A cannot invoke transport for website B.
+The client cannot submit an SSH host, credentials or physical server root.
+
+`ResolvedFile` extends the phase-3 resolver rather than introducing another path
+scheme. It resolves the target's parent with `ResolvedDirectory`, validates the
+final name, uses SFTP `lstat`/`realpath`, requires a regular file, rejects a final
+symlink and enforces exact root containment. Metadata is compared before opening,
+on the opened handle and after reading. A changed target is discarded. SFTP paths
+are passed as paths, never interpolated into a shell command, so spaces, Unicode,
+quotes and shell punctuation remain literal. The same documented SFTP-v3 remote
+race limitation still applies; server-side confinement is required against a
+hostile process that can replace and restore paths between checks.
+
+The read is bounded centrally in `filemanager_file.rs`: text/unknown formats use
+256 KiB and existing supported image/SVGZ formats use 10 MiB. At most limit + 1
+bytes are read to determine truncation; oversized content is returned as an
+explicitly truncated preview, never loaded without a limit. Invalid UTF-8 or NUL
+content is binary and is not presented as source. Supported binary images reuse
+the existing allowlisted MIME/data-URL path and byte inspector; unsupported
+binaries show the existing no-readable-source state. Missing files, a directory
+at the former file path, permission denial, transport timeout/disconnect and a
+file changed during reading produce typed safe errors without credentials or
+physical paths.
+
+The shared preview provides existing highlighting for PHP templates (including
+embedded HTML/CSS/JavaScript/JSON), JavaScript, CSS/SCSS, HTML/XML/SVG, JSON,
+Markdown, Twig, `.htaccess`/Apache and logs. Plain text, dotfiles and extensionless
+files remain safely visible without artificial highlighting when no grammar is
+known. It provides the same line numbers, fullscreen/Escape behavior and saved
+fullscreen/Markdown defaults as finding previews. Markdown rendering keeps raw
+HTML disabled and only delegates HTTP(S) links to the validated external opener;
+SVG is sanitized before a data URL is created. HTML/XML/JavaScript source is not
+executed. The preview remains strictly read-only.
+
 ## Next phases (not implemented)
 
-Future file operations belong in `filemanager.rs`, with the established `ssh.rs`
-transport providing SFTP, and backend-owned site context and centralized path
-validation. Do not use the current metadata endpoint as file authorization or
-silently substitute stored credentials for the two-password gate. Reconnection
-requires both checks again. Phase 5 may add read-only file opening/preview only
-after a separate backend authorization/path review. It must not make symlinks
-navigable or treat UI state as authorization. Editing, mutations, permissions,
-downloads, archives and bulk operations have not been implemented here.
+Future write operations belong in `filemanager.rs`, with the established
+`ssh.rs` transport, backend-owned site context and centralized path validation.
+Do not use metadata or UI state as authorization and do not substitute stored
+credentials for the two-password gate. Phase 6 may add editing only after a
+separate write, conflict, atomicity and authorization review. Mutations,
+permissions, downloads, archives and bulk operations have not been implemented.
 
 ## Verification
 
@@ -314,6 +363,29 @@ across 34 files and production build), Cargo fmt, `cargo test --manifest-path
 src-tauri/Cargo.toml --all-targets --all-features` (256 tests), Clippy with warnings
 denied, and `git diff --check`. The existing Vite main-chunk warning remains. No
 live SSH server or manual desktop session was used for this phase.
+
+Phase 5 tests cover secure file resolution, traversal underflow, canonical and
+symlink escape, directory-versus-file rejection, file changes around the read,
+central size limits, UTF-8/Unicode, binary classification, authorization before
+transport, website A/B isolation and post-operation authorization. Frontend tests
+cover code/dotfile/space/Unicode opening, escaped active content, line numbers,
+directory-context preservation, safe permission errors, expired/disconnected
+access, binary unsupported state, overlapping file requests and reuse of saved
+Markdown/fullscreen behavior. Existing checksum preview tests remain the
+regression baseline for syntax, Raw/Preview, SVG/Markdown sanitization, images,
+fullscreen, scroll position and Escape.
+
+Phase 5 added `src-tauri/src/filemanager_file.rs`. It updated the shared preview
+contracts, checksum preview builder, phase-3 path resolver, authenticated
+filemanager service/command and SFTP adapter, TypeScript API/types,
+`FilemanagerBrowser.vue` and its tests. There are no dependencies, migrations,
+version changes, routes, writes, deletes, downloads or phase-6 editor controls.
+
+Phase 5 checks completed: `npm run check` (typecheck, lint, 213 frontend tests
+across 34 files and production build), Cargo fmt, `cargo test --all-targets
+--all-features` (262 tests), Clippy with warnings denied and `git diff --check`.
+The existing Vite main-chunk warning above 500 kB remains. Verification used the
+mocked SFTP/API boundaries; no live SSH server or manual desktop session was used.
 
 Phase 3 checks completed: `npm run check` (typecheck, lint, 204 tests across
 33 files and production build), Cargo fmt, `cargo test --manifest-path

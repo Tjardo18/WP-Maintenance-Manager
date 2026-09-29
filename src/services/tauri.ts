@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { FilemanagerAuthorization, FilemanagerContext, FilemanagerDirectoryListing } from "../types/filemanager";
+import type { FilemanagerAuthorization, FilemanagerContext, FilemanagerDirectoryListing, FilemanagerFilePreview } from "../types/filemanager";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteProgress, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, DatabaseCleanupOption, DatabaseCleanupRequest, DatabaseCleanupResult, DatabaseCleanupTarget, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteChangeSummary, SiteInput, SnapshotDiff, SnapshotHistoryItem, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import type { MediaKeyCommand } from "./keyboardShortcuts";
@@ -194,6 +194,10 @@ export const appApi = {
   async listFilemanagerDirectory(siteId: string, authorizationToken: string, requestedPath = "/"): Promise<FilemanagerDirectoryListing> {
     if (!isTauri()) throw new Error("De filemanager is alleen beschikbaar in de desktopapp.");
     return call("list_filemanager_directory", { siteId, authorizationToken, requestedPath });
+  },
+  async readFilemanagerFile(siteId: string, authorizationToken: string, requestedPath: string): Promise<FilemanagerFilePreview> {
+    if (!isTauri()) throw new Error("De filemanager is alleen beschikbaar in de desktopapp.");
+    return call("read_filemanager_file", { siteId, authorizationToken, requestedPath });
   },
   async beginFilemanagerReauthentication(siteId: string, appPassword: string): Promise<TerminalChallengeInfo> {
     if (!isTauri()) throw new Error("Filemanagerverificatie is alleen beschikbaar in de desktopapp.");
