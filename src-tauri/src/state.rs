@@ -16,6 +16,7 @@ pub struct AppState {
     pub auth: AuthManager,
     pub terminals: TerminalManager,
     pub terminal_access: TerminalAccessManager,
+    pub filemanager_access: crate::filemanager::FilemanagerAccessManager,
     pub scan_jobs: ScanJobManager,
     pub vulnerability_jobs: VulnerabilityRefreshManager,
 }

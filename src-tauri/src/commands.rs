@@ -62,6 +62,11 @@ pub fn get_auth_status(
     let authenticated = session_token
         .as_deref()
         .is_some_and(|token| state.auth.validate(token, idle_timeout_minutes).is_ok());
+    if !authenticated {
+        state.filemanager_access.revoke_all();
+    } else {
+        state.filemanager_access.reap_expired();
+    }
     Ok(AuthStatus {
         configured: config.is_some(),
         authenticated,
@@ -126,6 +131,7 @@ pub fn login(password: String, state: State<'_, AppState>) -> Result<LoginResult
     state
         .database
         .save_audit_event(None, "login", "local_app", "success", None)?;
+    state.filemanager_access.revoke_all();
     Ok(LoginResult {
         session_token,
         idle_timeout_minutes: config.idle_timeout_minutes,
@@ -143,6 +149,7 @@ pub fn lock_app(session_token: String, state: State<'_, AppState>) -> Result<(),
     state.terminals.close_all();
     state.terminal_access.revoke_all();
     state.auth.invalidate()?;
+    state.filemanager_access.revoke_all();
     state.database.save_audit_event(
         None,
         "lock",
@@ -182,6 +189,7 @@ fn change_password_internal(state: &AppState, input: &PasswordChangeInput) -> Re
     state.terminals.close_all();
     state.terminal_access.revoke_all();
     state.auth.invalidate()?;
+    state.filemanager_access.revoke_all();
     audit_result
 }
 
@@ -275,6 +283,9 @@ fn require_auth(state: &AppState, session_token: &str) -> Result<(), AppError> {
         state.terminals.close_all();
         state.terminal_access.revoke_all();
     }
+    if result.is_err() {
+        state.filemanager_access.revoke_all();
+    }
     result
 }
 
@@ -349,40 +360,8 @@ fn begin_terminal_reauthentication_internal(
     site_id: &str,
     app_password: Zeroizing<String>,
 ) -> Result<TerminalChallengeInfo, AppError> {
+    verify_feature_password(state, site_id, app_password, "terminal_reauthentication")?;
     let stored = state.database.get_site(site_id)?;
-    let config = state
-        .database
-        .auth_config()?
-        .ok_or_else(|| AppError::validation("Stel eerst een applicatiewachtwoord in."))?;
-    if !auth::verify_password(app_password.as_str(), &config.password_hash) {
-        if let Err(error) = state.database.save_audit_event(
-            Some(site_id),
-            "terminal_reauthentication",
-            &stored.site.ssh_username,
-            "failed",
-            Some("Extra applicatieverificatie voor Terminal mislukt"),
-        ) {
-            eprintln!("security audit write failed category={}", error.category);
-        }
-        state.terminals.close_all();
-        state.terminal_access.revoke_all();
-        if let Err(error) = state.auth.invalidate() {
-            eprintln!("session invalidation failed category={}", error.category);
-        }
-        if let Err(error) = state.database.save_audit_event(
-            Some(site_id),
-            "app_session_revoked",
-            "terminal_reauthentication",
-            "success",
-            Some("Sessie ingetrokken na mislukte extra Terminal-verificatie"),
-        ) {
-            eprintln!("security audit write failed category={}", error.category);
-        }
-        return Err(AppError::unauthorized(
-            "app_session_revoked_reauth_failed",
-            "Sessie beëindigd. De extra beveiligingscontrole voor de Terminal is mislukt. Log opnieuw in om verder te gaan.",
-        ));
-    }
     let challenge = state
         .terminal_access
         .create_challenge(session_token, site_id)?;
@@ -396,6 +375,50 @@ fn begin_terminal_reauthentication_internal(
         eprintln!("security audit write failed category={}", error.category);
     }
     Ok(challenge)
+}
+
+fn verify_feature_password(
+    state: &AppState,
+    site_id: &str,
+    app_password: Zeroizing<String>,
+    purpose: &str,
+) -> Result<(), AppError> {
+    let stored = state.database.get_site(site_id)?;
+    let config = state
+        .database
+        .auth_config()?
+        .ok_or_else(|| AppError::validation("Stel eerst een applicatiewachtwoord in."))?;
+    if !auth::verify_password(app_password.as_str(), &config.password_hash) {
+        if let Err(error) = state.database.save_audit_event(
+            Some(site_id),
+            purpose,
+            &stored.site.ssh_username,
+            "failed",
+            Some("Extra applicatieverificatie mislukt"),
+        ) {
+            eprintln!("security audit write failed category={}", error.category);
+        }
+        state.terminals.close_all();
+        state.terminal_access.revoke_all();
+        state.filemanager_access.revoke_all();
+        if let Err(error) = state.auth.invalidate() {
+            eprintln!("session invalidation failed category={}", error.category);
+        }
+        if let Err(error) = state.database.save_audit_event(
+            Some(site_id),
+            "app_session_revoked",
+            purpose,
+            "success",
+            Some("Sessie ingetrokken na mislukte extra verificatie"),
+        ) {
+            eprintln!("security audit write failed category={}", error.category);
+        }
+        return Err(AppError::unauthorized(
+            "app_session_revoked_reauth_failed",
+            "Sessie beëindigd. De extra beveiligingscontrole is mislukt. Log opnieuw in om verder te gaan.",
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -680,6 +703,90 @@ pub fn list_sites(
 }
 
 #[tauri::command(async)]
+pub fn begin_filemanager_reauthentication(
+    session_token: String,
+    site_id: String,
+    app_password: String,
+    state: State<'_, AppState>,
+) -> Result<TerminalChallengeInfo, AppError> {
+    let password = Zeroizing::new(app_password);
+    require_auth(&state, &session_token)?;
+    validate_uuid(&site_id, "De website-id is ongeldig.")?;
+    verify_feature_password(&state, &site_id, password, "filemanager_reauthentication")?;
+    // The app can have been locked while Argon2 was running.
+    require_auth(&state, &session_token)?;
+    let site = state.database.get_site(&site_id)?.site;
+    if site.ssh_host.trim().is_empty()
+        || site.ssh_username.trim().is_empty()
+        || site.ssh_port == 0
+        || site.pinned_host_key.is_none()
+    {
+        return Err(AppError::validation(
+            "Controleer eerst de SSH-configuratie en vertrouwde hostsleutel van deze website.",
+        ));
+    }
+    state.filemanager_access.begin(&session_token, &site)
+}
+
+#[tauri::command(async)]
+pub fn open_filemanager(
+    session_token: String,
+    site_id: String,
+    challenge_token: String,
+    ssh_password: String,
+    state: State<'_, AppState>,
+) -> Result<crate::filemanager::FilemanagerAuthorization, AppError> {
+    let password = Zeroizing::new(ssh_password);
+    require_auth(&state, &session_token)?;
+    let site = state.database.get_site(&site_id)?.site;
+    let result =
+        state
+            .filemanager_access
+            .connect(&session_token, &site, &challenge_token, &password);
+    drop(password);
+    require_auth(&state, &session_token)?;
+    result?;
+    require_filemanager_auth(&state, &session_token, &site_id, &challenge_token)
+}
+
+// Central boundary for every future filemanager endpoint: app + site + feature authorization.
+fn require_filemanager_auth(
+    state: &AppState,
+    session: &str,
+    site_id: &str,
+    token: &str,
+) -> Result<crate::filemanager::FilemanagerAuthorization, AppError> {
+    require_auth(state, session)?;
+    let site = state.database.get_site(site_id)?.site;
+    state.filemanager_access.authorize(session, &site, token)
+}
+
+#[tauri::command(async)]
+pub fn get_filemanager_authorization(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    state: State<'_, AppState>,
+) -> Result<crate::filemanager::FilemanagerAuthorization, AppError> {
+    require_auth(&state, &session_token)?;
+    require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)
+}
+
+#[tauri::command(async)]
+pub fn close_filemanager(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    require_auth(&state, &session_token)?;
+    state
+        .filemanager_access
+        .close(&session_token, &site_id, &authorization_token);
+    Ok(())
+}
+
+#[tauri::command(async)]
 pub fn save_site(
     session_token: String,
     mut input: SiteInput,
@@ -770,6 +877,7 @@ pub fn delete_site(
     uuid::Uuid::parse_str(&id).map_err(|_| AppError::validation("De website-id is ongeldig."))?;
     state.terminals.close_site(&id);
     state.terminal_access.revoke_site(&id);
+    state.filemanager_access.revoke_site(&id);
     if let Some(reference) = state.database.delete_site(&id)? {
         state.credentials.delete(&reference)?;
     }
@@ -2857,6 +2965,7 @@ pub fn cleanup_database(
     for site_id in &execution.site_ids {
         state.terminals.close_site(site_id);
         state.terminal_access.revoke_site(site_id);
+        state.filemanager_access.revoke_site(site_id);
     }
     let credential_total = u64::try_from(execution.credential_references.len()).unwrap_or(u64::MAX);
     let mut credential_failures = 0_u64;
@@ -4462,6 +4571,7 @@ mod tests {
             auth: AuthManager::default(),
             terminals: crate::terminal::TerminalManager::default(),
             terminal_access: crate::terminal_auth::TerminalAccessManager::default(),
+            filemanager_access: crate::filemanager::FilemanagerAccessManager::default(),
             scan_jobs: crate::scan_jobs::ScanJobManager::new(2),
             vulnerability_jobs: crate::vulnerability_jobs::VulnerabilityRefreshManager::default(),
         }
