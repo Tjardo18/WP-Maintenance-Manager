@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { Code2, Eye, FileImage, Maximize2, Minimize2, Trash2, X } from "@lucide/vue";
-import type { FilePreview, MarkdownPreviewMode } from "../types";
+import type { FileContentPreview, Finding, MarkdownPreviewMode } from "../types";
 import { inspectBinaryImage } from "../services/binaryInspector";
 import { highlightPreviewContent, previewSyntax } from "../services/fileSyntax";
 import { binaryImageDataUrl, isImagePreviewExtension } from "../services/imagePreview";
@@ -10,13 +10,15 @@ import { svgPreviewDataUrl } from "../services/svgPreview";
 import { appApi } from "../services/tauri";
 import { formatDate } from "../utils/format";
 
-const props = withDefaults(defineProps<{ preview: FilePreview; defaultFullscreen?: boolean; defaultMarkdownMode?: MarkdownPreviewMode }>(), {
+type PreviewModel = FileContentPreview & { finding?: Finding };
+const props = withDefaults(defineProps<{ preview: PreviewModel; defaultFullscreen?: boolean; defaultMarkdownMode?: MarkdownPreviewMode; closeLabel?: string }>(), {
   defaultFullscreen: false,
   defaultMarkdownMode: "raw",
+  closeLabel: "Sluiten",
 });
 const emit = defineEmits<{ close: []; delete: [] }>();
 
-const canDelete = computed(() => props.preview.finding.checksumStatus === "unexpected");
+const canDelete = computed(() => props.preview.finding?.checksumStatus === "unexpected");
 const syntax = computed(() => previewSyntax(props.preview.fileName, props.preview.extension));
 const isMarkdown = computed(() => syntax.value === "md");
 const isSvg = computed(() => syntax.value === "svg");
@@ -118,7 +120,7 @@ function checksumLabel(status?: string) {
         <div><dt>Grootte</dt><dd>{{ formatBytes(preview.sizeBytes) }}</dd></div>
         <div><dt>Gewijzigd</dt><dd>{{ formatDate(preview.modifiedAt) }}</dd></div>
         <div><dt>Type</dt><dd>{{ preview.fileType }}</dd></div>
-        <div v-if="preview.finding.checksumStatus"><dt>Checksum</dt><dd>{{ checksumLabel(preview.finding.checksumStatus) }}</dd></div>
+        <div v-if="preview.finding?.checksumStatus"><dt>Checksum</dt><dd>{{ checksumLabel(preview.finding.checksumStatus) }}</dd></div>
       </dl>
       <p v-if="preview.truncated" class="preview-warning">De preview is afgekapt op de veilige bestandsgroottelimiet.</p>
       <p v-if="preview.binary && !isImage" class="preview-warning">Dit bestand kan niet veilig als tekst worden weergegeven.</p>
@@ -148,7 +150,7 @@ function checksumLabel(status?: string) {
         <FileImage :size="30" aria-hidden="true" />
         <div><strong>Binair bestand</strong><p>Dit formaat bevat geen leesbare broncode. De oorspronkelijke bytes worden niet als tekst of kunstmatige syntax weergegeven.</p><code v-if="preview.imageMimeType">{{ preview.imageMimeType }}</code></div>
       </div>
-      <div class="modal-actions"><button class="button secondary" @click="$emit('close')">Sluiten</button><button v-if="canDelete" class="button danger" @click="$emit('delete')"><Trash2 :size="14" /> Bestand verwijderen</button></div>
+      <div class="modal-actions"><button class="button secondary" @click="$emit('close')">{{ closeLabel }}</button><button v-if="canDelete" class="button danger" @click="$emit('delete')"><Trash2 :size="14" /> Bestand verwijderen</button></div>
     </section>
   </div>
 </template>

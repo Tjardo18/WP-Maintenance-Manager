@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import FilemanagerView from "./FilemanagerView.vue";
 import type { FilemanagerContext } from "../types/filemanager";
 
-const api = vi.hoisted(() => ({ getFilemanagerContext: vi.fn(), beginFilemanagerReauthentication: vi.fn(), openFilemanager: vi.fn(), getFilemanagerAuthorization: vi.fn(), closeFilemanager: vi.fn(), listFilemanagerDirectory: vi.fn() }));
+const api = vi.hoisted(() => ({ getFilemanagerContext: vi.fn(), beginFilemanagerReauthentication: vi.fn(), openFilemanager: vi.fn(), getFilemanagerAuthorization: vi.fn(), closeFilemanager: vi.fn(), listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), getSettings: vi.fn() }));
 const route = reactive({ params: { id: "site-a" } });
 vi.mock("../services/tauri", () => ({ appApi: api }));
 vi.mock("vue-router", () => ({ useRoute: () => route, RouterLink: { props: ["to"], template: '<a :href="to"><slot /></a>' } }));
@@ -45,6 +45,7 @@ describe("Filemanager website context", () => {
     api.getFilemanagerAuthorization.mockResolvedValue({ siteId: "site-a", expiresInSeconds: 899 });
     api.closeFilemanager.mockResolvedValue(undefined);
     api.listFilemanagerDirectory.mockResolvedValue({ currentPath: "/", isRoot: true, parentPath: null, items: [], truncated: false });
+    api.getSettings.mockResolvedValue({ scanConcurrency: 4, filePreviewMode: "normal", markdownPreviewMode: "raw" });
     const wrapper = mount(FilemanagerView);
     await flushPromises();
     for (let step = 0; step < 2; step += 1) {
