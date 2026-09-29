@@ -1280,6 +1280,21 @@ mod tests {
     }
 
     #[test]
+    fn filemanager_file_errors_distinguish_missing_permission_and_disconnect() {
+        use ssh2::ErrorCode::{SFTP, Session};
+        let server_message = "permission denied at /internal/secret/path";
+        for (code, expected) in [
+            (SFTP(2), "filemanager_file_missing"),
+            (SFTP(3), "filemanager_permission_denied"),
+            (Session(-13), "filemanager_disconnected"),
+        ] {
+            let error = super::filemanager_file_error(ssh2::Error::new(code, server_message));
+            assert_eq!(error.category, expected);
+            assert!(!format!("{error:?}").contains(server_message));
+        }
+    }
+
+    #[test]
     fn filemanager_contains_ssh2_filename_decoding_panics() {
         let result: Result<(), crate::error::AppError> =
             super::decode_sftp_path(|| panic!("simulated filename decoder failure"));

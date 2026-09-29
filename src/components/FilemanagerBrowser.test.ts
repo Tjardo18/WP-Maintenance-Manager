@@ -99,4 +99,14 @@ describe("Filemanager directorybrowser", () => {
     expect(wrapper.text()).toContain("Binair bestand");
     expect(wrapper.find(".file-preview-code").exists()).toBe(false);
   });
+
+  it("uses the existing fullscreen and Markdown preview preferences", async () => {
+    api.getSettings.mockResolvedValueOnce({ scanConcurrency: 4, filePreviewMode: "fullscreen", markdownPreviewMode: "preview" });
+    api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", [file("README.md", "/README.md", "md")]));
+    api.readFilemanagerFile.mockResolvedValueOnce({ fileName: "README.md", relativePath: "/README.md", sizeBytes: 10, fileType: "md-bestand", extension: "md", textContent: "# Titel", binary: false, truncated: false });
+    const wrapper = create(); await flushPromises(); await wrapper.get('button[aria-label="Bekijk README.md"]').trigger("click"); await flushPromises();
+    expect(wrapper.get(".preview-modal").classes()).toContain("fullscreen");
+    expect(wrapper.get(".markdown-preview h1").text()).toBe("Titel");
+    expect(wrapper.get('button[aria-pressed="true"]').text()).toContain("Preview");
+  });
 });
