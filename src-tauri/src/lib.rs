@@ -11,6 +11,8 @@ mod engine;
 mod error;
 mod error_log;
 mod filemanager;
+mod filemanager_directory;
+mod filemanager_paths;
 mod health;
 mod maintenance;
 mod media_keys;
