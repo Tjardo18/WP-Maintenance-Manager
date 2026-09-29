@@ -1187,7 +1187,7 @@ mod tests {
     #[test]
     fn filemanager_sftp_errors_use_typed_codes_without_server_text() {
         use ssh2::ErrorCode::{SFTP, Session};
-        let sensitive = uuid::Uuid::new_v4().to_string();
+        let server_message = "/internal/server/path: test diagnostic";
         for (code, expected) in [
             (SFTP(2), "filemanager_directory_missing"),
             (SFTP(3), "filemanager_permission_denied"),
@@ -1197,9 +1197,9 @@ mod tests {
             (SFTP(7), "filemanager_disconnected"),
             (Session(-31), "filemanager_sftp_failed"),
         ] {
-            let error = super::filemanager_sftp_error(ssh2::Error::new(code, sensitive.clone()));
+            let error = super::filemanager_sftp_error(ssh2::Error::new(code, server_message));
             assert_eq!(error.category, expected);
-            assert!(!format!("{error:?}").contains(&sensitive));
+            assert!(!format!("{error:?}").contains(server_message));
         }
     }
 
