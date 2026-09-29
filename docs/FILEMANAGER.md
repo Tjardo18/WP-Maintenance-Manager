@@ -1,8 +1,9 @@
-# Filemanager — foundation and website-specific authentication
+# Filemanager — authentication, safe paths and directory backend
 
 This feature is developed on `feature/filemanager`, with phase 1 on
 `feature/filemanager-phase-1-foundation` and phase 2 on
-`feature/filemanager-phase-2-auth`. It must not be merged into `main`
+`feature/filemanager-phase-2-auth`, followed by phase 3 on
+`feature/filemanager-phase-3-directory-backend`. It must not be merged into `main`
 without a later explicit instruction. The application version is unchanged.
 
 ## Existing architecture and reuse
@@ -108,18 +109,113 @@ guard. `get_filemanager_authorization` already exercises this boundary before th
 UI shows the placeholder. Do not treat `get_filemanager_context` or a successful
 terminal login as file authorization.
 
+## Phase 3: safe paths and directory backend
+
+`list_filemanager_directory` is an authenticated Tauri command, not an HTTP
+endpoint. Its arguments are `sessionToken`, `siteId`, `authorizationToken` and
+`requestedPath`. `appApi.listFilemanagerDirectory()` and TypeScript response
+types are available for phase 4, but no directory-browser UI calls them yet.
+The client cannot supply a root, host, port, username or credentials.
+
+The command calls the phase-2 `require_filemanager_auth` guard before invoking
+transport, loads `Site.wordpress_path` from the database, and uses the existing
+password-authenticated SSH session. It checks the app session and authorization
+again before returning successful results. Modified website configuration,
+another site ID, missing/expired access, deleted websites and canceled sessions
+cannot authorize a directory response. There is no vault/key fallback.
+Network I/O uses a per-connection mutex, outside the global authorization mutex:
+concurrent calls for that access return `filemanager_busy`; locking or revoking
+access can proceed while a read is in flight. Revoked results are discarded.
+
+### One path convention and resolver
+
+`filemanager_paths.rs` owns `VirtualPath` and `ResolvedDirectory`. Client paths
+are **virtual, website-root-relative POSIX paths**, optionally starting with `/`.
+`/` and the empty string identify the website root. `/wp-content` identifies a
+child of that root, not the server's `/wp-content`. Even an input that resembles
+a full server path remains virtual and cannot override the configured root.
+The response never includes the server's physical root.
+
+The resolver removes duplicate separators and `.` components, handles `..` with
+a component stack, and rejects an attempt to pop above the website root. Percent
+encoding is **not decoded**: `%2e%2e` is a literal filename, not `..`. Phase 4 must
+pass the returned path unchanged through IPC, without a second decoding layer.
+Backslashes, control characters (including NUL/newlines), replacement characters,
+paths above 4096 bytes and more than 128 components are rejected. Spaces, dots,
+hyphens, underscores, Unicode, quotes and shell punctuation remain literal names.
+The configured root must be absolute and must not normalize to server root `/`.
+
+The remote resolver uses SFTP `lstat` on every component and `realpath` for the
+root and requested directory. Containment accepts only an exact root match or
+a descendant separated by `/`: `public_html_backup` is not within `public_html`.
+Missing/ambiguous directory types fail closed. A `ResolvedDirectory` cannot be
+constructed by the transport or client, only by this shared resolver.
+
+### Symlink policy and remote-race limitation
+
+The phase-3 policy deliberately **does not follow any symlink in a directory
+path**, including the configured root and its ancestors. Internal, external,
+broken and looping symlinks are equally non-navigable. A symlink may appear in
+the listing as `kind: "symlink"`, without its target or followed metadata.
+Hosting layouts that use a symlink for the root or an ancestor are therefore
+blocked; configure the actual physical WordPress root if appropriate. Do not
+relax this rule in frontend code.
+
+Paths are validated before opening the directory, immediately after opening,
+and again after reading. Results are discarded if an observed change creates a
+symlink or changes the resolved target. **SFTP v3 does not provide atomic
+`openat2`/`RESOLVE_BENEATH`/`O_NOFOLLOW` directory traversal or a portable inode
+identity check.** A malicious process that replaces and restores paths between
+these separate operations can evade revalidation. This is defense against path
+input and ordinary/stable symlink escapes, not a filesystem sandbox against a
+hostile server or concurrent attacker with filesystem write access. A stronger
+guarantee requires server-side confinement (for example an SFTP chroot) or an
+appropriately sandboxed server helper. Future write/delete operations require a
+separate design review; they must not assume these read-only checks are atomic.
+
+### Listing transport, metadata and limits
+
+`filemanager_directory.rs` orchestrates resolution and typed listing. Its narrow
+`DirectoryTransport` test seam is implemented in the existing `ssh.rs` using
+`Session::sftp`, `opendir` and handle-based `readdir`. No `ls`, shell construction,
+remote script, recursive walk, file-content read or MIME scan is involved.
+
+Responses contain `currentPath`, `isRoot`, nullable `parentPath`, `items` and
+`truncated`. At `/`, `parentPath` is always null. Every item contains:
+
+- `name`, virtual `path`, and `kind` (`directory`, `file`, `symlink`, `other`);
+- nullable `extension`, regular-file `size` in bytes, octal `permissions`
+  (including special permission bits) and UTC RFC3339 `modifiedAt`;
+- null for missing/unreliable metadata and directory/symlink sizes, never a
+  fabricated recursive directory size.
+
+Dotfiles are included; only literal `.` and `..` entries are skipped. Sorting is
+directories, files, symlinks, other, then Unicode lowercase name and original
+name as a deterministic tie-breaker. The listing is limited to 5000 items and
+5003 `readdir` calls, with a 20-second work budget and a maximum 5-second timeout
+per blocking SFTP call. Handle/channel cleanup may add bounded transport time.
+`truncated` explicitly marks an incomplete subset; there is no pagination yet.
+
+Malformed names, duplicate entries and undecodable UTF-8 fail the entire
+listing rather than silently returning a different or unsafe identifier. This
+includes containing the existing ssh2 Windows filename-decoder panic. No server
+message or absolute path is put in the error response: SFTP diagnostics contain
+numeric error codes only. Typed errors distinguish invalid paths, escaped roots,
+blocked symlinks, non-directories, missing directories, permissions, timeout,
+disconnect and invalid responses. Transport failure/timeout/decoding failure
+revokes filemanager access; ordinary missing-directory/permission errors do not.
+
 ## Next phases (not implemented)
 
 Future file operations belong in `filemanager.rs`, with the established `ssh.rs`
 transport providing SFTP, and backend-owned site context and centralized path
 validation. Do not use the current metadata endpoint as file authorization or
-silently substitute stored credentials for the planned two-password gate.
-Phase 3 must add centralized path validation before any file operation, including
-root confinement and symlink handling. Extend the guarded service to use its
-authenticated connection; never reintroduce a stored-credential fallback after
-connection loss. Reconnection requires both checks again. Directory navigation,
-preview integration, editing, mutations, permissions, downloads, archives and
-bulk operations have not been implemented here.
+silently substitute stored credentials for the two-password gate. Reconnection
+requires both checks again. Phase 4 can build the directory UI around virtual
+paths, nullable parent, item kinds, `truncated` and typed errors. It must not make
+symlinks navigable or treat the path layer as authorization. Breadcrumbs,
+navigation UI, preview integration, editing, mutations, permissions, downloads,
+archives and bulk operations have not been implemented here.
 
 ## Verification
 
@@ -157,3 +253,29 @@ Before use against real servers, manually verify both password steps, refusal of
 an incorrect/changed host key, lock during login, route changes during a slow
 connection, and existing terminal behavior. Automated transport-boundary tests
 do not replace those real desktop/server checks.
+
+Phase 3 checks completed: `npm run check` (typecheck, lint, 204 tests across
+33 files and production build), Cargo fmt, `cargo test --manifest-path
+src-tauri/Cargo.toml --all-targets --all-features` (256 tests), Clippy with warnings
+denied, and `git diff --check`. The existing Vite main-chunk warning remains.
+No real SSH server or manual desktop session was used for verification.
+
+The phase-3 tests explicitly cover normal and dotted paths, traversal underflow,
+duplicate separators, virtual absolute paths, literal encoded input, prefix
+collisions, symlink components/ancestors, canonical escapes, revalidation after
+open/read, shell punctuation, Unicode/space/dotfile names, malformed/duplicate
+entries, metadata/null handling, stable sorting, root/parent navigation and
+bounded large listings. Authorization tests verify no transport invocation for
+missing auth, another website, an unknown website or traversal, and rejection of
+results after lock/revocation. Additional tests verify per-connection concurrency,
+transport-failure revocation, safe SFTP error mapping and decoder-panic handling.
+Existing terminal tests remain green. Remote filesystem behavior is modeled at
+the SFTP boundary; this does not claim to test a real malicious race or hosting
+server. A live smoke test should verify the host's SFTP/realpath support, the
+strict symlink policy, permissions, empty/large directories and reconnect flow.
+
+Phase 3 added `src-tauri/src/filemanager_paths.rs` and
+`src-tauri/src/filemanager_directory.rs`. Updated `src-tauri/src/filemanager.rs`,
+`commands.rs`, `ssh.rs`, `lib.rs`, `src/services/tauri.ts` and its tests,
+`src/types/filemanager.ts`, `ARCHITECTURE.md` and this document. There are no
+database migrations, new dependencies, version changes or phase-4 UI changes.

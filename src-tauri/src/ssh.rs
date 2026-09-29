@@ -18,6 +18,146 @@ use std::{
 const MAX_TERMINAL_PASSWORD_BYTES: usize = 4 * 1024;
 const MAX_FILE_PREVIEW_BYTES: usize = 10 * 1024 * 1024;
 
+// Uses the phase-2 password-authenticated Session; never reconnects with managed credentials.
+pub(crate) fn list_filemanager_directory(
+    session: &Session,
+    root: &str,
+    requested: &str,
+) -> Result<crate::filemanager_directory::DirectoryListing, AppError> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    session.set_timeout(5_000);
+    let sftp = session.sftp().map_err(filemanager_sftp_error)?;
+    let mut remote = FilemanagerSftp {
+        session,
+        sftp,
+        deadline,
+    };
+    crate::filemanager_directory::list_directory(&mut remote, root, requested)
+}
+
+struct FilemanagerSftp<'a> {
+    session: &'a Session,
+    sftp: ssh2::Sftp,
+    deadline: Instant,
+}
+
+impl FilemanagerSftp<'_> {
+    fn before_call(&self) -> Result<(), AppError> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(filemanager_timeout());
+        }
+        self.session
+            .set_timeout(remaining.as_millis().clamp(1, 5_000) as u32);
+        Ok(())
+    }
+}
+
+impl crate::filemanager_paths::RemotePaths for FilemanagerSftp<'_> {
+    fn realpath(&mut self, path: &str) -> Result<String, AppError> {
+        self.before_call()?;
+        let path = decode_sftp_path(|| self.sftp.realpath(Path::new(path)))?;
+        path.to_str()
+            .map(String::from)
+            .ok_or_else(crate::filemanager_directory::malformed_listing)
+    }
+
+    fn lstat(&mut self, path: &str) -> Result<ssh2::FileStat, AppError> {
+        self.before_call()?;
+        self.sftp
+            .lstat(Path::new(path))
+            .map_err(filemanager_sftp_error)
+    }
+}
+
+impl crate::filemanager_directory::DirectoryTransport for FilemanagerSftp<'_> {
+    type Handle = ssh2::File;
+
+    fn open_directory(
+        &mut self,
+        path: &crate::filemanager_paths::ResolvedDirectory,
+    ) -> Result<Self::Handle, AppError> {
+        self.before_call()?;
+        self.sftp
+            .opendir(Path::new(path.absolute()))
+            .map_err(filemanager_sftp_error)
+    }
+
+    fn next_entry(
+        &mut self,
+        handle: &mut Self::Handle,
+    ) -> Result<Option<(String, ssh2::FileStat)>, AppError> {
+        self.before_call()?;
+        // ssh2's Windows filename conversion panics for non-UTF-8 server names.
+        // Contain that decoding failure; never return a lossy, potentially different path.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.readdir()))
+            .map_err(|_| crate::filemanager_directory::malformed_listing())?;
+        match result {
+            Ok((path, stat)) => Ok(Some((
+                path.to_str()
+                    .ok_or_else(crate::filemanager_directory::malformed_listing)?
+                    .into(),
+                stat,
+            ))),
+            // ssh2::File::readdir uses LIBSSH2_ERROR_FILE exclusively to signal EOF.
+            Err(error) if error.code() == ssh2::ErrorCode::Session(-16) => Ok(None),
+            Err(error) => Err(filemanager_sftp_error(error)),
+        }
+    }
+}
+
+fn decode_sftp_path<T>(operation: impl FnOnce() -> Result<T, ssh2::Error>) -> Result<T, AppError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+        .map_err(|_| crate::filemanager_directory::malformed_listing())?
+        .map_err(filemanager_sftp_error)
+}
+
+fn filemanager_timeout() -> AppError {
+    let mut error = AppError::unauthorized(
+        "filemanager_timeout",
+        "Het ophalen van de map duurde te lang. Verbind opnieuw en probeer het nogmaals.",
+    );
+    error.retryable = true;
+    error
+}
+
+fn filemanager_sftp_error(error: ssh2::Error) -> AppError {
+    use ssh2::ErrorCode::{SFTP, Session};
+    let (category, message, retryable) = match error.code() {
+        SFTP(2 | 10) => (
+            "filemanager_directory_missing",
+            "De map bestaat niet meer of is niet toegankelijk.",
+            false,
+        ),
+        SFTP(3) => (
+            "filemanager_permission_denied",
+            "De SSH-gebruiker heeft geen toegang tot deze map.",
+            false,
+        ),
+        SFTP(19) => (
+            "filemanager_not_directory",
+            "Het aangevraagde pad is geen map.",
+            false,
+        ),
+        Session(-9 | -37) => return filemanager_timeout(),
+        Session(-7 | -13 | -43 | -45) | SFTP(6 | 7) => (
+            "filemanager_disconnected",
+            "De SSH-verbinding is verbroken. Bevestig beide wachtwoorden opnieuw.",
+            true,
+        ),
+        _ => (
+            "filemanager_sftp_failed",
+            "De map kon niet veilig via SFTP worden opgehaald. Verbind opnieuw en probeer het nogmaals.",
+            true,
+        ),
+    };
+    let mut result = AppError::unauthorized(category, message);
+    // Numeric diagnostics only: server messages may contain sensitive paths or other data.
+    result.technical_details = Some(format!("SFTP status: {:?}", error.code()));
+    result.retryable = retryable;
+    result
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecOutput {
     pub stdout: Vec<u8>,
@@ -1044,6 +1184,34 @@ fn map_ssh_error(category: &str, message: &str, error: ssh2::Error) -> AppError 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn filemanager_sftp_errors_use_typed_codes_without_server_text() {
+        use ssh2::ErrorCode::{SFTP, Session};
+        let server_message = "/internal/server/path: test diagnostic";
+        for (code, expected) in [
+            (SFTP(2), "filemanager_directory_missing"),
+            (SFTP(3), "filemanager_permission_denied"),
+            (SFTP(19), "filemanager_not_directory"),
+            (Session(-9), "filemanager_timeout"),
+            (Session(-13), "filemanager_disconnected"),
+            (SFTP(7), "filemanager_disconnected"),
+            (Session(-31), "filemanager_sftp_failed"),
+        ] {
+            let error = super::filemanager_sftp_error(ssh2::Error::new(code, server_message));
+            assert_eq!(error.category, expected);
+            assert!(!format!("{error:?}").contains(server_message));
+        }
+    }
+
+    #[test]
+    fn filemanager_contains_ssh2_filename_decoding_panics() {
+        let result: Result<(), crate::error::AppError> =
+            super::decode_sftp_path(|| panic!("simulated filename decoder failure"));
+        assert_eq!(
+            result.unwrap_err().category,
+            "filemanager_invalid_directory_response"
+        );
+    }
     use super::*;
 
     #[test]
