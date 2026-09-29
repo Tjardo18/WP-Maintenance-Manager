@@ -1,6 +1,6 @@
 # Architectuur
 
-Het geïsoleerde filemanagerfundament en de hergebruikspunten voor volgende fases staan in [docs/FILEMANAGER.md](docs/FILEMANAGER.md). Fase 2 beveiligt de placeholderpagina met het app-wachtwoord en expliciete SSH-wachtwoordauthenticatie voor de gekozen website. De centrale backendguard bindt toegang aan appsessie, website, configuratie en filemanagerdoel. Fase 3 voegt een centrale POSIX-padresolver en begrensde read-only SFTP-directorylisting toe binnen de opgeslagen WordPress-root. Symlinks in het directorypad (ook root/ancestors) worden niet gevolgd; beperkingen bij gelijktijdige remote filesystemwijzigingen zijn expliciet gedocumenteerd. Een directorybrowser-UI en bestandsacties zijn nog niet gebouwd.
+Het geïsoleerde filemanagerfundament en de hergebruikspunten voor volgende fases staan in [docs/FILEMANAGER.md](docs/FILEMANAGER.md). Fase 2 beveiligt de placeholderpagina met het app-wachtwoord en expliciete SSH-wachtwoordauthenticatie voor de gekozen website. De centrale backendguard bindt toegang aan appsessie, website, configuratie en filemanagerdoel. Fase 3 voegt een centrale POSIX-padresolver en begrensde read-only SFTP-directorylisting toe binnen de opgeslagen WordPress-root. Symlinks in het directorypad (ook root/ancestors) worden niet gevolgd; beperkingen bij gelijktijdige remote filesystemwijzigingen zijn expliciet gedocumenteerd. Fase 4 presenteert deze veilige listing in een websitegebonden browser met virtuele breadcrumbs, Up en Back; er zijn nog geen bestandsacties of previews.
 
 ## Grenzen en execution modes
 
