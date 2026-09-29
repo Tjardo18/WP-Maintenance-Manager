@@ -89,6 +89,16 @@ describe("Tauri authentication boundary", () => {
     expect(invokeMock).toHaveBeenCalledOnce();
   });
 
+  it("lists a virtual directory through authenticated IPC without accepting a root or SSH configuration", async () => {
+    const authorizationToken = crypto.randomUUID();
+    invokeMock.mockResolvedValueOnce({ currentPath: "/wp-content", parentPath: "/", isRoot: false, items: [], truncated: false });
+    await appApi.listFilemanagerDirectory("site-a", authorizationToken, "/wp-content");
+    expect(invokeMock).toHaveBeenCalledWith("list_filemanager_directory", { siteId: "site-a", authorizationToken, requestedPath: "/wp-content", sessionToken: "active-app-session" });
+    authApi.setSessionToken();
+    await expect(appApi.listFilemanagerDirectory("site-b", authorizationToken)).rejects.toMatchObject({ category: "locked" });
+    expect(invokeMock).toHaveBeenCalledOnce();
+  });
+
   it("forwards a media key without exposing or requiring the app session", async () => {
     invokeMock.mockResolvedValueOnce(undefined);
 

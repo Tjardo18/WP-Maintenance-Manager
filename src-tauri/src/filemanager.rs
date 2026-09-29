@@ -5,7 +5,7 @@ use crate::{
 };
 use serde::Serialize;
 use std::{
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
@@ -18,7 +18,7 @@ struct Access {
     site_id: String,
     configuration: [u8; 32],
     expires: Instant,
-    connection: Option<ssh2::Session>,
+    connection: Option<Arc<Mutex<ssh2::Session>>>,
 }
 
 #[derive(Default)]
@@ -140,7 +140,7 @@ impl FilemanagerAccessManager {
             }
         };
         self.with_entry(session, site, token, false, |entry| {
-            entry.connection = Some(connection);
+            entry.connection = Some(Arc::new(Mutex::new(connection)));
             entry.expires = Instant::now() + ACCESS_TTL;
             Ok(())
         })?;
@@ -164,6 +164,54 @@ impl FilemanagerAccessManager {
                     .as_secs(),
             })
         })
+    }
+
+    pub fn list_directory(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        requested: &str,
+    ) -> Result<crate::filemanager_directory::DirectoryListing, AppError> {
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::list_filemanager_directory(connection, &site.wordpress_path, requested)
+        })
+    }
+
+    fn with_connection<T>(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        operation: impl FnOnce(&ssh2::Session) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let connection = self.with_entry(session, site, token, true, |entry| {
+            entry.connection.clone().ok_or_else(denied)
+        })?;
+        // Never hold the global authorization mutex during network I/O. Closing/locking remains responsive.
+        let guard = connection.try_lock().map_err(|_| {
+            AppError::unauthorized(
+                "filemanager_busy",
+                "Er is al een filemanageractie bezig voor deze toegang. Probeer het zo opnieuw.",
+            )
+        })?;
+        let result = operation(&guard);
+        drop(guard);
+        if result.as_ref().is_err_and(|error| {
+            matches!(
+                error.category.as_str(),
+                "filemanager_timeout"
+                    | "filemanager_disconnected"
+                    | "filemanager_sftp_failed"
+                    | "filemanager_invalid_directory_response"
+            )
+        }) {
+            self.close(session, &site.id, token);
+        } else {
+            // A result from an expired/revoked/replaced attempt must not reach the client.
+            self.authorize(session, site, token)?;
+        }
+        result
     }
 
     fn with_entry<T>(
@@ -438,5 +486,49 @@ mod tests {
                 .category,
             "filemanager_ssh_rate_limited"
         );
+    }
+
+    #[test]
+    fn directory_operations_release_global_lock_and_discard_revoked_results() {
+        let manager = FilemanagerAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        let token = manager.install_test_access(&session, &site);
+        assert!(
+            manager
+                .with_connection(&session, &site, &token, |_| {
+                    // No global mutex is held, so close can complete while I/O is in flight.
+                    manager.close(&session, &site.id, &token);
+                    Ok(())
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn same_connection_is_serialized_and_transport_failure_revokes_access() {
+        let manager = FilemanagerAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        for category in [
+            "filemanager_timeout",
+            "filemanager_disconnected",
+            "filemanager_invalid_directory_response",
+        ] {
+            let token = manager.install_test_access(&session, &site);
+            let result: Result<(), AppError> =
+                manager.with_connection(&session, &site, &token, |_| {
+                    assert_eq!(
+                        manager
+                            .with_connection(&session, &site, &token, |_| Ok(()))
+                            .unwrap_err()
+                            .category,
+                        "filemanager_busy"
+                    );
+                    Err(AppError::unauthorized(category, "Test"))
+                });
+            assert_eq!(result.unwrap_err().category, category);
+            assert!(manager.authorize(&session, &site, &token).is_err());
+        }
     }
 }

@@ -807,6 +807,54 @@ pub fn close_filemanager(
 }
 
 #[tauri::command(async)]
+pub fn list_filemanager_directory(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    requested_path: String,
+    state: State<'_, AppState>,
+) -> Result<crate::filemanager_directory::DirectoryListing, AppError> {
+    require_auth(&state, &session_token)?;
+    list_filemanager_directory_internal(
+        &state,
+        &session_token,
+        &site_id,
+        &authorization_token,
+        &requested_path,
+        |site, path| {
+            state.filemanager_access.list_directory(
+                &session_token,
+                site,
+                &authorization_token,
+                path,
+            )
+        },
+    )
+}
+
+fn list_filemanager_directory_internal(
+    state: &AppState,
+    session: &str,
+    site_id: &str,
+    token: &str,
+    requested: &str,
+    operation: impl FnOnce(
+        &Site,
+        &str,
+    ) -> Result<crate::filemanager_directory::DirectoryListing, AppError>,
+) -> Result<crate::filemanager_directory::DirectoryListing, AppError> {
+    require_filemanager_auth(state, session, site_id, token)?;
+    let site = state.database.get_site(site_id)?.site;
+    let requested = crate::filemanager_paths::VirtualPath::parse(requested)?;
+    let result = operation(&site, requested.as_str());
+    require_auth(state, session)?;
+    if result.is_ok() {
+        require_filemanager_auth(state, session, site_id, token)?;
+    }
+    result
+}
+
+#[tauri::command(async)]
 pub fn save_site(
     session_token: String,
     mut input: SiteInput,
@@ -5049,6 +5097,82 @@ mod tests {
             .install_test_access(&session, &site);
         database.delete_site(&site.id).unwrap();
         assert!(require_filemanager_auth(&state, &session, &site.id, &token).is_err());
+        drop(state);
+        drop(database);
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
+    }
+
+    #[test]
+    fn directory_endpoint_authorizes_before_transport_and_rechecks_afterwards() {
+        use std::cell::Cell;
+        let temp = std::env::temp_dir().join(format!("wpmm-directory-auth-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        database
+            .create_auth_config(&auth::hash_password(&Uuid::new_v4().to_string()).unwrap())
+            .unwrap();
+        let a = database.save_site(&site_input(), None).unwrap();
+        let b = database.save_site(&site_input(), None).unwrap();
+        let state = app_state(database.clone(), &temp);
+        let session = state.auth.create_session().unwrap();
+        let token = state.filemanager_access.install_test_access(&session, &a);
+        let calls = Cell::new(0);
+        let response = || crate::filemanager_directory::DirectoryListing {
+            current_path: "/".into(),
+            is_root: true,
+            parent_path: None,
+            items: vec![],
+            truncated: false,
+        };
+        let operation = |site: &Site, path: &str| {
+            calls.set(calls.get() + 1);
+            assert_eq!(site.id, a.id);
+            assert_eq!(site.wordpress_path, a.wordpress_path);
+            assert_eq!(path, "/");
+            Ok(response())
+        };
+        for (app_session, site_id, auth_token, path) in [
+            (session.as_str(), a.id.as_str(), "", "/"),
+            (session.as_str(), b.id.as_str(), token.as_str(), "/"),
+            (session.as_str(), "missing", token.as_str(), "/"),
+            (session.as_str(), a.id.as_str(), token.as_str(), "../../etc"),
+        ] {
+            assert!(
+                list_filemanager_directory_internal(
+                    &state,
+                    app_session,
+                    site_id,
+                    auth_token,
+                    path,
+                    operation
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(calls.get(), 0);
+        assert!(
+            list_filemanager_directory_internal(&state, &session, &a.id, &token, "/", operation)
+                .is_ok()
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(
+            list_filemanager_directory_internal(&state, &session, &a.id, &token, "/", |_, _| {
+                state.filemanager_access.close(&session, &a.id, &token);
+                Ok(response())
+            })
+            .is_err()
+        );
+        let token = state.filemanager_access.install_test_access(&session, &a);
+        assert!(
+            list_filemanager_directory_internal(&state, &session, &a.id, &token, "/", |_, _| {
+                state.auth.invalidate().unwrap();
+                Ok(response())
+            })
+            .is_err()
+        );
+        assert!(
+            list_filemanager_directory_internal(&state, "", &a.id, &token, "/", operation).is_err()
+        );
+        assert_eq!(calls.get(), 1);
         drop(state);
         drop(database);
         let _ = std::fs::remove_file(temp.with_extension("sqlite3"));

@@ -100,6 +100,7 @@ pub fn run() {
             commands::begin_filemanager_reauthentication,
             commands::open_filemanager,
             commands::get_filemanager_authorization,
+            commands::list_filemanager_directory,
             commands::close_filemanager,
             commands::save_site,
             commands::delete_site,
