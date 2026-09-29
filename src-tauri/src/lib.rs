@@ -60,6 +60,7 @@ pub fn run() {
                 auth: auth::AuthManager::default(),
                 terminals: terminal::TerminalManager::default(),
                 terminal_access: terminal_auth::TerminalAccessManager::default(),
+                filemanager_access: filemanager::FilemanagerAccessManager::default(),
                 scan_jobs: scan_jobs::ScanJobManager::new(scan_concurrency),
                 vulnerability_jobs: vulnerability_jobs::VulnerabilityRefreshManager::default(),
             });
@@ -94,6 +95,10 @@ pub fn run() {
             commands::close_terminal,
             commands::list_sites,
             commands::get_filemanager_context,
+            commands::begin_filemanager_reauthentication,
+            commands::open_filemanager,
+            commands::get_filemanager_authorization,
+            commands::close_filemanager,
             commands::save_site,
             commands::delete_site,
             commands::accept_host_key,

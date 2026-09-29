@@ -4,3 +4,8 @@ export interface FilemanagerContext {
   siteName: string;
   siteUrl: string;
 }
+
+export interface FilemanagerAuthorization {
+  siteId: string;
+  expiresInSeconds: number;
+}

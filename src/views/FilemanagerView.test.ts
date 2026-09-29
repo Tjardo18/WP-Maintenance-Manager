@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import FilemanagerView from "./FilemanagerView.vue";
 import type { FilemanagerContext } from "../types/filemanager";
 
-const api = vi.hoisted(() => ({ getFilemanagerContext: vi.fn() }));
+const api = vi.hoisted(() => ({ getFilemanagerContext: vi.fn(), beginFilemanagerReauthentication: vi.fn(), openFilemanager: vi.fn(), getFilemanagerAuthorization: vi.fn(), closeFilemanager: vi.fn() }));
 const route = reactive({ params: { id: "site-a" } });
 vi.mock("../services/tauri", () => ({ appApi: api }));
 vi.mock("vue-router", () => ({ useRoute: () => route, RouterLink: { props: ["to"], template: '<a :href="to"><slot /></a>' } }));
@@ -34,6 +34,29 @@ describe("Filemanager website context", () => {
     route.params.id = "missing";
     await flushPromises();
     expect(wrapper.get('[role="alert"]').text()).toContain("Website niet gevonden");
+    expect(wrapper.text()).not.toContain("site-a");
+    wrapper.unmount();
+  });
+
+  it("closes authorized site A and requires both passwords again for site B", async () => {
+    api.getFilemanagerContext.mockImplementation(async (id: string) => context(id));
+    api.beginFilemanagerReauthentication.mockResolvedValue({ challengeToken: "site-a-challenge", expiresInSeconds: 60 });
+    api.openFilemanager.mockResolvedValue({ siteId: "site-a", expiresInSeconds: 900 });
+    api.getFilemanagerAuthorization.mockResolvedValue({ siteId: "site-a", expiresInSeconds: 899 });
+    api.closeFilemanager.mockResolvedValue(undefined);
+    const wrapper = mount(FilemanagerView);
+    await flushPromises();
+    for (let step = 0; step < 2; step += 1) {
+      await wrapper.get('input').setValue(crypto.randomUUID());
+      await wrapper.get('form').trigger('submit');
+      await flushPromises();
+    }
+    expect(wrapper.text()).toContain("Bestandsbeheer wordt");
+    route.params.id = "site-b";
+    await flushPromises();
+    expect(api.closeFilemanager).toHaveBeenCalledWith("site-a", "site-a-challenge");
+    expect(wrapper.text()).toContain("App-wachtwoord vereist");
+    expect(wrapper.text()).not.toContain("Bestandsbeheer wordt");
     expect(wrapper.text()).not.toContain("site-a");
     wrapper.unmount();
   });

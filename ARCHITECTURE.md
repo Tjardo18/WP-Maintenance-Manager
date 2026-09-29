@@ -1,6 +1,6 @@
 # Architectuur
 
-Het geïsoleerde filemanagerfundament en de hergebruikspunten voor volgende fases staan in [docs/FILEMANAGER.md](docs/FILEMANAGER.md). Fase 1 biedt uitsluitend lokale websitecontext en een placeholderpagina; er zijn nog geen remote filemanageracties.
+Het geïsoleerde filemanagerfundament en de hergebruikspunten voor volgende fases staan in [docs/FILEMANAGER.md](docs/FILEMANAGER.md). Fase 2 beveiligt de placeholderpagina met het app-wachtwoord en expliciete SSH-wachtwoordauthenticatie voor de gekozen website. De centrale backendguard bindt toegang aan appsessie, website, configuratie en filemanagerdoel. Er zijn nog geen remote bestandsacties of directorybrowser.
 
 ## Grenzen en execution modes
 
