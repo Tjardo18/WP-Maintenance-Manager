@@ -855,6 +855,48 @@ fn list_filemanager_directory_internal(
 }
 
 #[tauri::command(async)]
+pub fn read_filemanager_file(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    requested_path: String,
+    state: State<'_, AppState>,
+) -> Result<crate::models::FileContentPreview, AppError> {
+    require_auth(&state, &session_token)?;
+    read_filemanager_file_internal(
+        &state,
+        &session_token,
+        &site_id,
+        &authorization_token,
+        &requested_path,
+        |site, path| {
+            state
+                .filemanager_access
+                .read_file(&session_token, site, &authorization_token, path)
+        },
+    )
+}
+
+fn read_filemanager_file_internal(
+    state: &AppState,
+    session: &str,
+    site_id: &str,
+    token: &str,
+    requested: &str,
+    operation: impl FnOnce(&Site, &str) -> Result<crate::models::FileContentPreview, AppError>,
+) -> Result<crate::models::FileContentPreview, AppError> {
+    require_filemanager_auth(state, session, site_id, token)?;
+    let site = state.database.get_site(site_id)?.site;
+    let requested = crate::filemanager_paths::VirtualPath::parse(requested)?;
+    let result = operation(&site, requested.as_str());
+    require_auth(state, session)?;
+    if result.is_ok() {
+        require_filemanager_auth(state, session, site_id, token)?;
+    }
+    result
+}
+
+#[tauri::command(async)]
 pub fn save_site(
     session_token: String,
     mut input: SiteInput,
@@ -5173,6 +5215,85 @@ mod tests {
             list_filemanager_directory_internal(&state, "", &a.id, &token, "/", operation).is_err()
         );
         assert_eq!(calls.get(), 1);
+        drop(state);
+        drop(database);
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
+    }
+
+    #[test]
+    fn file_read_endpoint_is_site_scoped_normalizes_paths_and_rechecks_authorization() {
+        use std::cell::Cell;
+        let temp = std::env::temp_dir().join(format!("wpmm-file-read-auth-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        database
+            .create_auth_config(&auth::hash_password(&Uuid::new_v4().to_string()).unwrap())
+            .unwrap();
+        let a = database.save_site(&site_input(), None).unwrap();
+        let b = database.save_site(&site_input(), None).unwrap();
+        let state = app_state(database.clone(), &temp);
+        let session = state.auth.create_session().unwrap();
+        let token = state.filemanager_access.install_test_access(&session, &a);
+        let calls = Cell::new(0);
+        let operation = |site: &Site, path: &str| {
+            calls.set(calls.get() + 1);
+            assert_eq!(site.id, a.id);
+            assert_eq!(path, "/my plugin.php");
+            Ok(crate::models::FileContentPreview {
+                file_name: "my plugin.php".into(),
+                relative_path: path.into(),
+                size_bytes: 4,
+                modified_at: None,
+                file_type: "php-bestand".into(),
+                extension: Some("php".into()),
+                text_content: Some("test".into()),
+                image_mime_type: None,
+                image_data_base64: None,
+                raw_data_base64: None,
+                binary: false,
+                truncated: false,
+            })
+        };
+        for (site_id, auth_token, path) in [
+            (a.id.as_str(), "", "/my plugin.php"),
+            (b.id.as_str(), token.as_str(), "/my plugin.php"),
+            (a.id.as_str(), token.as_str(), "../../../etc/passwd"),
+        ] {
+            assert!(
+                read_filemanager_file_internal(
+                    &state, &session, site_id, auth_token, path, operation,
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(calls.get(), 0);
+        assert!(
+            read_filemanager_file_internal(
+                &state,
+                &session,
+                &a.id,
+                &token,
+                "/my plugin.php",
+                operation,
+            )
+            .is_ok()
+        );
+        assert_eq!(calls.get(), 1);
+        let token = state.filemanager_access.install_test_access(&session, &a);
+        assert!(
+            read_filemanager_file_internal(
+                &state,
+                &session,
+                &a.id,
+                &token,
+                "/my plugin.php",
+                |_, path| {
+                    state.filemanager_access.close(&session, &a.id, &token);
+                    operation(&a, path)
+                },
+            )
+            .is_err()
+        );
+
         drop(state);
         drop(database);
         let _ = std::fs::remove_file(temp.with_extension("sqlite3"));

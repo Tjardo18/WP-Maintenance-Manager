@@ -670,8 +670,7 @@ pub struct ChecksumFindingRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct FilePreview {
-    pub finding: Finding,
+pub struct FileContentPreview {
     pub file_name: String,
     pub relative_path: String,
     pub size_bytes: u64,
@@ -684,6 +683,22 @@ pub struct FilePreview {
     pub raw_data_base64: Option<String>,
     pub binary: bool,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePreview {
+    pub finding: Finding,
+    #[serde(flatten)]
+    pub content: FileContentPreview,
+}
+
+impl std::ops::Deref for FilePreview {
+    type Target = FileContentPreview;
+
+    fn deref(&self) -> &Self::Target {
+        &self.content
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

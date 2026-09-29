@@ -64,6 +64,35 @@ pub struct ResolvedDirectory {
     relative: VirtualPath,
 }
 
+// Fields private: file targets can only be constructed through the root-confined resolver.
+#[derive(Debug)]
+pub struct ResolvedFile {
+    root: String,
+    absolute: String,
+    relative: VirtualPath,
+    stat: ssh2::FileStat,
+}
+
+impl ResolvedFile {
+    pub fn absolute(&self) -> &str {
+        &self.absolute
+    }
+    pub fn relative(&self) -> &VirtualPath {
+        &self.relative
+    }
+    pub fn stat(&self) -> &ssh2::FileStat {
+        &self.stat
+    }
+
+    pub fn revalidate(&self, remote: &mut impl RemotePaths) -> Result<ssh2::FileStat, AppError> {
+        let again = resolve_file(remote, &self.root, self.relative.as_str())?;
+        if again.absolute != self.absolute || !same_file_snapshot(&self.stat, &again.stat) {
+            return Err(file_changed());
+        }
+        Ok(again.stat)
+    }
+}
+
 impl ResolvedDirectory {
     pub fn absolute(&self) -> &str {
         &self.absolute
@@ -121,6 +150,92 @@ pub fn resolve_directory(
         absolute,
         relative,
     })
+}
+
+pub fn resolve_file(
+    remote: &mut impl RemotePaths,
+    configured_root: &str,
+    requested: &str,
+) -> Result<ResolvedFile, AppError> {
+    let relative = VirtualPath::parse(requested)?;
+    if relative.as_str() == "/" {
+        return Err(not_file());
+    }
+    let (parent, name) = relative
+        .as_str()
+        .rsplit_once('/')
+        .ok_or_else(invalid_path)?;
+    validate_name(name)?;
+    let parent = if parent.is_empty() { "/" } else { parent };
+    let directory = resolve_directory(remote, configured_root, parent)?;
+    let absolute = format!("{}/{}", directory.absolute().trim_end_matches('/'), name);
+    if absolute.len() > MAX_PATH_BYTES {
+        return Err(invalid_path());
+    }
+    let stat = remote.lstat(&absolute).map_err(map_file_lookup_error)?;
+    require_regular_file(&stat)?;
+    let canonical_target = canonical(remote.realpath(&absolute).map_err(map_file_lookup_error)?)?;
+    ensure_contained(&directory.root, &canonical_target)?;
+    if canonical_target != absolute {
+        return Err(symlink_denied());
+    }
+    Ok(ResolvedFile {
+        root: directory.root,
+        absolute,
+        relative,
+        stat,
+    })
+}
+
+fn require_regular_file(stat: &ssh2::FileStat) -> Result<(), AppError> {
+    match stat.perm.map(|mode| mode & 0o170000) {
+        Some(0o100000) => Ok(()),
+        Some(0o040000) => Err(not_file()),
+        Some(0o120000) => Err(symlink_denied()),
+        Some(_) => Err(AppError::unauthorized(
+            "filemanager_unsupported_file",
+            "Dit serverobject is geen normaal bestand en kan niet worden bekeken.",
+        )),
+        None => Err(AppError::unauthorized(
+            "filemanager_metadata_invalid",
+            "Het bestandstype kon niet betrouwbaar worden vastgesteld.",
+        )),
+    }
+}
+
+pub fn same_file_snapshot(left: &ssh2::FileStat, right: &ssh2::FileStat) -> bool {
+    left.size == right.size
+        && left.mtime == right.mtime
+        && left.uid == right.uid
+        && left.gid == right.gid
+        && left.perm == right.perm
+}
+
+fn map_file_lookup_error(error: AppError) -> AppError {
+    if error.category == "filemanager_directory_missing" {
+        AppError::unauthorized(
+            "filemanager_file_missing",
+            "Het bestand bestaat niet meer of is niet toegankelijk.",
+        )
+    } else {
+        error
+    }
+}
+
+fn not_file() -> AppError {
+    AppError::unauthorized(
+        "filemanager_not_file",
+        "Het aangevraagde pad is geen bestand.",
+    )
+}
+
+fn file_changed() -> AppError {
+    let mut error = AppError::unauthorized(
+        "filemanager_file_changed",
+        "Het bestand veranderde tijdens het openen. Probeer het opnieuw.",
+    );
+    error.retryable = true;
+    error
 }
 
 fn verify_directory_chain(remote: &mut impl RemotePaths, path: &str) -> Result<(), AppError> {
@@ -371,5 +486,52 @@ mod tests {
         assert!(result.revalidate(&mut remote).is_err());
         assert!(resolve_directory(&mut remote, "/", "/").is_err());
         assert!(resolve_directory(&mut remote, "relative", "/").is_err());
+    }
+
+    #[test]
+    fn files_use_the_same_root_confinement_and_reject_directories_and_symlinks() {
+        let mut remote = Remote::default();
+        remote
+            .modes
+            .insert("/server/root/my plugin.php".into(), 0o100640);
+        let file = resolve_file(&mut remote, "/server/root", "/my plugin.php").unwrap();
+        assert_eq!(file.absolute(), "/server/root/my plugin.php");
+        assert_eq!(file.relative().as_str(), "/my plugin.php");
+        assert!(file.revalidate(&mut remote).is_ok());
+
+        remote.modes.insert("/server/root/folder".into(), 0o040755);
+        assert_eq!(
+            resolve_file(&mut remote, "/server/root", "/folder")
+                .unwrap_err()
+                .category,
+            "filemanager_not_file"
+        );
+        remote.modes.insert("/server/root/link".into(), 0o120777);
+        assert_eq!(
+            resolve_file(&mut remote, "/server/root", "/link")
+                .unwrap_err()
+                .category,
+            "filemanager_symlink_blocked"
+        );
+    }
+
+    #[test]
+    fn file_traversal_and_canonical_escape_are_rejected() {
+        let mut remote = Remote::default();
+        assert!(resolve_file(&mut remote, "/server/root", "../../../etc/passwd").is_err());
+        assert!(remote.seen.is_empty());
+
+        remote
+            .modes
+            .insert("/server/root/escape.php".into(), 0o100644);
+        remote
+            .aliases
+            .insert("/server/root/escape.php".into(), "/etc/passwd".into());
+        assert_eq!(
+            resolve_file(&mut remote, "/server/root", "/escape.php")
+                .unwrap_err()
+                .category,
+            "filemanager_outside_root"
+        );
     }
 }

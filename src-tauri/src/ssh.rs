@@ -35,6 +35,58 @@ pub(crate) fn list_filemanager_directory(
     crate::filemanager_directory::list_directory(&mut remote, root, requested)
 }
 
+// Uses the same authenticated phase-2 SFTP session and phase-3 root resolver as listings.
+pub(crate) fn read_filemanager_file(
+    session: &Session,
+    root: &str,
+    requested: &str,
+) -> Result<crate::models::FileContentPreview, AppError> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    session.set_timeout(5_000);
+    let sftp = session.sftp().map_err(filemanager_sftp_error)?;
+    let mut remote = FilemanagerSftp {
+        session,
+        sftp,
+        deadline,
+    };
+    let resolved = crate::filemanager_paths::resolve_file(&mut remote, root, requested)?;
+    let limit = crate::filemanager_file::preview_limit(resolved.relative().as_str());
+    remote.before_call()?;
+    let mut file = remote
+        .sftp
+        .open(Path::new(resolved.absolute()))
+        .map_err(filemanager_file_error)?;
+    let opened = file.stat().map_err(filemanager_file_error)?;
+    if !crate::filemanager_paths::same_file_snapshot(resolved.stat(), &opened) {
+        return Err(filemanager_file_changed());
+    }
+    let mut bytes = Vec::with_capacity(limit.min(opened.size.unwrap_or(0) as usize));
+    file.by_ref()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            let mut result = AppError::unauthorized(
+                "filemanager_file_read_failed",
+                "Het bestand kon niet veilig worden gelezen.",
+            );
+            result.technical_details = Some(error.to_string());
+            result.retryable = true;
+            result
+        })?;
+    let final_stat = resolved.revalidate(&mut remote)?;
+    let truncated = bytes.len() > limit || final_stat.size.is_some_and(|size| size > limit as u64);
+    bytes.truncate(limit);
+    Ok(crate::filemanager_file::build_preview(
+        resolved.relative().as_str(),
+        RemoteFileRead {
+            bytes,
+            size_bytes: final_stat.size.unwrap_or(0),
+            modified_unix: final_stat.mtime,
+            truncated,
+        },
+    ))
+}
+
 struct FilemanagerSftp<'a> {
     session: &'a Session,
     sftp: ssh2::Sftp,
@@ -156,6 +208,30 @@ fn filemanager_sftp_error(error: ssh2::Error) -> AppError {
     result.technical_details = Some(format!("SFTP status: {:?}", error.code()));
     result.retryable = retryable;
     result
+}
+
+fn filemanager_file_error(error: ssh2::Error) -> AppError {
+    let mapped = filemanager_sftp_error(error);
+    match mapped.category.as_str() {
+        "filemanager_directory_missing" => AppError::unauthorized(
+            "filemanager_file_missing",
+            "Het bestand bestaat niet meer of is niet toegankelijk.",
+        ),
+        "filemanager_not_directory" => AppError::unauthorized(
+            "filemanager_not_file",
+            "Het aangevraagde pad is geen bestand.",
+        ),
+        _ => mapped,
+    }
+}
+
+fn filemanager_file_changed() -> AppError {
+    let mut error = AppError::unauthorized(
+        "filemanager_file_changed",
+        "Het bestand veranderde tijdens het openen. Probeer het opnieuw.",
+    );
+    error.retryable = true;
+    error
 }
 
 #[derive(Debug, Clone)]

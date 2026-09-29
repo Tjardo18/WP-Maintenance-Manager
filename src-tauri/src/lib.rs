@@ -12,6 +12,7 @@ mod error;
 mod error_log;
 mod filemanager;
 mod filemanager_directory;
+mod filemanager_file;
 mod filemanager_paths;
 mod health;
 mod maintenance;
@@ -101,6 +102,7 @@ pub fn run() {
             commands::open_filemanager,
             commands::get_filemanager_authorization,
             commands::list_filemanager_directory,
+            commands::read_filemanager_file,
             commands::close_filemanager,
             commands::save_site,
             commands::delete_site,
