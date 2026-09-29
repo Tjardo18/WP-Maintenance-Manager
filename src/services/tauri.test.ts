@@ -62,6 +62,33 @@ describe("Tauri authentication boundary", () => {
     expect(invokeMock).toHaveBeenCalledTimes(1);
   });
 
+  it("uses dedicated site-bound filemanager endpoints and requires the app session on each", async () => {
+    const password = crypto.randomUUID();
+    const token = crypto.randomUUID();
+    invokeMock.mockResolvedValue(undefined);
+    await appApi.beginFilemanagerReauthentication("site-a", password);
+    await appApi.openFilemanager("site-a", token, password);
+    await appApi.getFilemanagerAuthorization("site-a", token);
+    await appApi.closeFilemanager("site-a", token);
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "begin_filemanager_reauthentication", { siteId: "site-a", appPassword: password, sessionToken: "active-app-session" });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "open_filemanager", { siteId: "site-a", challengeToken: token, sshPassword: password, sessionToken: "active-app-session" });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "get_filemanager_authorization", { siteId: "site-a", authorizationToken: token, sessionToken: "active-app-session" });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, "close_filemanager", { siteId: "site-a", authorizationToken: token, sessionToken: "active-app-session" });
+    authApi.setSessionToken();
+    await expect(appApi.beginFilemanagerReauthentication("site-a", password)).rejects.toMatchObject({ category: "locked" });
+    await expect(appApi.openFilemanager("site-a", token, password)).rejects.toMatchObject({ category: "locked" });
+    await expect(appApi.getFilemanagerAuthorization("site-a", token)).rejects.toMatchObject({ category: "locked" });
+    await expect(appApi.closeFilemanager("site-a", token)).rejects.toMatchObject({ category: "locked" });
+    expect(invokeMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("invalidates the app session when filemanager app-password verification fails", async () => {
+    invokeMock.mockRejectedValueOnce({ category: "app_session_revoked_reauth_failed", userMessage: "Log opnieuw in." });
+    await expect(appApi.beginFilemanagerReauthentication("site-a", crypto.randomUUID())).rejects.toMatchObject({ category: "app_session_revoked_reauth_failed" });
+    await expect(appApi.getFilemanagerAuthorization("site-a", crypto.randomUUID())).rejects.toMatchObject({ category: "locked" });
+    expect(invokeMock).toHaveBeenCalledOnce();
+  });
+
   it("forwards a media key without exposing or requiring the app session", async () => {
     invokeMock.mockResolvedValueOnce(undefined);
 

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute } from "vue-router";
-import { FolderOpen, LoaderCircle } from "@lucide/vue";
+import { LoaderCircle } from "@lucide/vue";
+import FilemanagerAccess from "../components/FilemanagerAccess.vue";
 import { appApi } from "../services/tauri";
 import type { FilemanagerContext } from "../types/filemanager";
 import { errorMessage } from "../utils/errors";
@@ -42,10 +43,6 @@ onUnmounted(() => { requestId += 1; });
   <p v-if="error" class="error-banner" role="alert">{{ error }}</p>
   <section v-else class="card" :aria-busy="loading">
     <div v-if="loading" class="empty-state"><LoaderCircle class="spin" :size="32" /><p>Website laden…</p></div>
-    <div v-else-if="context" class="empty-state">
-      <FolderOpen :size="38" />
-      <h3>Filemanager voor {{ context.siteName }}</h3>
-      <p>De filemanager is in ontwikkeling. Bestandsbeheer wordt in volgende fases beschikbaar.</p>
-    </div>
+    <FilemanagerAccess v-else-if="context" :key="context.siteId" :context="context" />
   </section>
 </template>
