@@ -2,7 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FilemanagerAccess from "./FilemanagerAccess.vue";
 
-const api = vi.hoisted(() => ({ beginFilemanagerReauthentication: vi.fn(), openFilemanager: vi.fn(), getFilemanagerAuthorization: vi.fn(), closeFilemanager: vi.fn() }));
+const api = vi.hoisted(() => ({ beginFilemanagerReauthentication: vi.fn(), openFilemanager: vi.fn(), getFilemanagerAuthorization: vi.fn(), closeFilemanager: vi.fn(), listFilemanagerDirectory: vi.fn() }));
 vi.mock("../services/tauri", () => ({ appApi: api }));
 const context = { siteId: "site-a", siteName: "Website A", siteUrl: "https://a.test" };
 const create = () => mount(FilemanagerAccess, { props: { context } });
@@ -20,13 +20,14 @@ describe("filemanager two-password gate", () => {
     api.openFilemanager.mockResolvedValue({ siteId: context.siteId, expiresInSeconds: 900 });
     api.getFilemanagerAuthorization.mockResolvedValue({ siteId: context.siteId, expiresInSeconds: 899 });
     api.closeFilemanager.mockResolvedValue(undefined);
+    api.listFilemanagerDirectory.mockResolvedValue({ currentPath: "/", isRoot: true, parentPath: null, items: [], truncated: false });
   });
   afterEach(() => { vi.useRealTimers(); });
 
   it("hides workspace until both checks and the server guard succeed, then closes on departure", async () => {
     const wrapper = create();
     expect(wrapper.text()).toContain("App-wachtwoord vereist");
-    expect(wrapper.text()).not.toContain("Bestandsbeheer wordt");
+    expect(wrapper.text()).not.toContain("Deze map is leeg");
     expect(wrapper.get('input').attributes('type')).toBe('password');
     await submit(wrapper);
     expect(wrapper.text()).toContain("SSH-wachtwoord vereist");
@@ -35,7 +36,7 @@ describe("filemanager two-password gate", () => {
     await submit(wrapper);
     expect(api.openFilemanager).toHaveBeenCalledWith("site-a", "challenge-a", expect.any(String));
     expect(api.getFilemanagerAuthorization).toHaveBeenCalledWith("site-a", "challenge-a");
-    expect(wrapper.text()).toContain("Bestandsbeheer wordt");
+    expect(wrapper.text()).toContain("Deze map is leeg");
     wrapper.unmount();
     expect(api.closeFilemanager).toHaveBeenCalledWith("site-a", "challenge-a");
   });
@@ -79,7 +80,7 @@ describe("filemanager two-password gate", () => {
     await submit(wrapper);
     if (stage !== "app") await submit(wrapper);
     expect(wrapper.get('[role="alert"]').text()).toContain("Verificatie mislukt");
-    expect(wrapper.text()).not.toContain("Bestandsbeheer wordt");
+    expect(wrapper.text()).not.toContain("Deze map is leeg");
     expect(wrapper.get('input').element.value).toBe("");
     wrapper.unmount();
   });
@@ -89,7 +90,7 @@ describe("filemanager two-password gate", () => {
     const wrapper = create();
     await submit(wrapper); await submit(wrapper);
     expect(wrapper.get('[role="alert"]').text()).toContain("komt niet overeen");
-    expect(wrapper.text()).not.toContain("Bestandsbeheer wordt");
+    expect(wrapper.text()).not.toContain("Deze map is leeg");
     wrapper.unmount();
   });
 
