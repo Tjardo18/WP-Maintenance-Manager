@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { onUnmounted, ref } from "vue";
-import { FolderOpen, LoaderCircle, LockKeyhole, ShieldCheck } from "@lucide/vue";
+import { LoaderCircle, LockKeyhole } from "@lucide/vue";
 import { appApi } from "../services/tauri";
 import type { FilemanagerContext } from "../types/filemanager";
 import { errorMessage } from "../utils/errors";
+import FilemanagerBrowser from "./FilemanagerBrowser.vue";
 
 // Parent keys this component by website: every navigation starts a fresh gate.
 const props = defineProps<{ context: FilemanagerContext }>();
@@ -73,13 +74,7 @@ onUnmounted(() => reset());
 </script>
 
 <template>
-  <div v-if="step === 'ready'" class="empty-state">
-    <FolderOpen :size="38" />
-    <h3>Filemanager voor {{ context.siteName }}</h3>
-    <p><ShieldCheck :size="16" /> App-wachtwoord en SSH-wachtwoord geverifieerd voor {{ context.siteUrl }}.</p>
-    <p>De filemanager is in ontwikkeling. Bestandsbeheer wordt in volgende fases beschikbaar.</p>
-    <button class="button secondary" @click="reset()">Toegang sluiten</button>
-  </div>
+  <FilemanagerBrowser v-if="step === 'ready' && token" :context="context" :authorization-token="token" @expired="reset('De filemanagerverificatie is verlopen. Bevestig beide wachtwoorden opnieuw.')" />
   <form v-else class="filemanager-auth" :aria-busy="busy" @submit.prevent="submit">
     <LockKeyhole :size="28" />
     <h3>{{ step === 'app' ? 'App-wachtwoord vereist' : 'SSH-wachtwoord vereist' }}</h3>

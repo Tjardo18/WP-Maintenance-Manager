@@ -1,9 +1,10 @@
-# Filemanager — authentication, safe paths and directory backend
+# Filemanager — authentication, safe paths and directory browser
 
 This feature is developed on `feature/filemanager`, with phase 1 on
 `feature/filemanager-phase-1-foundation` and phase 2 on
 `feature/filemanager-phase-2-auth`, followed by phase 3 on
-`feature/filemanager-phase-3-directory-backend`. It must not be merged into `main`
+`feature/filemanager-phase-3-directory-backend`, followed by phase 4 on
+`feature/filemanager-phase-4-directory-browser`. It must not be merged into `main`
 without a later explicit instruction. The application version is unchanged.
 
 ## Existing architecture and reuse
@@ -205,17 +206,59 @@ blocked symlinks, non-directories, missing directories, permissions, timeout,
 disconnect and invalid responses. Transport failure/timeout/decoding failure
 revokes filemanager access; ordinary missing-directory/permission errors do not.
 
+## Phase 4: directory browser and navigation
+
+`FilemanagerAccess.vue` still owns the two-password flow and its one
+authorization token. Only after its server-side guard succeeds does it mount
+`FilemanagerBrowser.vue`; the browser receives the current website context and
+that ephemeral token as props. An authorization error from a directory request
+emits `expired` back to the access component, which immediately unmounts the
+browser, clears its state, revokes access through the existing cleanup flow and
+returns to the app-password step. No directory content remains visible.
+
+The browser makes exactly one `appApi.listFilemanagerDirectory(siteId, token,
+virtualPath)` request for each successful navigation. It does not derive a server
+root, construct physical paths, run SSH, request per-file metadata, or validate
+path traversal itself. It displays the phase-3 response unchanged in security
+terms: virtual root-relative paths only. The backend remains authoritative for
+authorization, website isolation, root enforcement, normalization and symlinks.
+
+`FilemanagerBreadcrumbs.vue` derives display segments only from the backend's
+safe `currentPath`: **Hoofdmap** followed by virtual directory segments. Each
+ancestor returns the exact virtual path to the same directory API; the active
+segment is disabled. No physical server path is invented, exposed or stored in
+the route. Directory state is intentionally internal rather than query state:
+a deep link first authenticates and then safely starts at `/`.
+
+The browser maintains a per-mounted-component history stack. A successful normal
+navigation records the preceding directory; back navigation loads and removes
+only the prior successful path. Failed requests never affect history. One-level
+up uses the backend's nullable `parentPath`, not frontend string slicing; at root
+the Up control is disabled. A new website context keys and unmounts the complete
+access/browser tree, so token, current listing, history, breadcrumbs and pending
+responses from website A cannot appear for website B.
+
+While a listing is loading, directory, back, up, breadcrumb and refresh controls
+are disabled. A monotonically increasing request ID also discards an older result
+when a newer request exists, including during unmount. The interface shows a
+spinner, a distinct empty-folder state, a bounded-list warning and existing safe
+error banner. It formats backend byte values locally (without recursively sizing
+directories), uses the existing Dutch date formatter, and renders permissions
+read-only. Directories are buttons with keyboard focus and labels; files are not
+interactive in phase 4. The table is horizontally scrollable on narrow screens,
+long file names truncate visually but retain a full-name tooltip, and breadcrumbs
+scroll horizontally.
+
 ## Next phases (not implemented)
 
 Future file operations belong in `filemanager.rs`, with the established `ssh.rs`
 transport providing SFTP, and backend-owned site context and centralized path
 validation. Do not use the current metadata endpoint as file authorization or
 silently substitute stored credentials for the two-password gate. Reconnection
-requires both checks again. Phase 4 can build the directory UI around virtual
-paths, nullable parent, item kinds, `truncated` and typed errors. It must not make
-symlinks navigable or treat the path layer as authorization. Breadcrumbs,
-navigation UI, preview integration, editing, mutations, permissions, downloads,
-archives and bulk operations have not been implemented here.
+requires both checks again. Phase 5 may add read-only file opening/preview only
+after a separate backend authorization/path review. It must not make symlinks
+navigable or treat UI state as authorization. Editing, mutations, permissions,
+downloads, archives and bulk operations have not been implemented here.
 
 ## Verification
 
@@ -253,6 +296,24 @@ Before use against real servers, manually verify both password steps, refusal of
 an incorrect/changed host key, lock during login, route changes during a slow
 connection, and existing terminal behavior. Automated transport-boundary tests
 do not replace those real desktop/server checks.
+
+Phase 4 tests cover initial root load, metadata rendering, ordinary directory
+opening, Up, Back, virtual breadcrumbs, root-disabled navigation, empty folders,
+safe server errors, authorization expiry, website A/B isolation and late A
+responses after unmount. The access/view tests ensure the browser is mounted only
+after both passwords and uses the existing cleanup on context changes. Tests use
+mocked API responses and do not create an alternate browser/demo directory API.
+
+Phase 4 added `src/components/FilemanagerBrowser.vue`,
+`FilemanagerBreadcrumbs.vue` and `FilemanagerBrowser.test.ts`. It updated
+`FilemanagerAccess.vue` and existing filemanager access/view tests. There are no
+backend, database, dependency, version, route query or file-operation changes.
+
+Phase 4 checks completed: `npm run check` (typecheck, lint, 209 frontend tests
+across 34 files and production build), Cargo fmt, `cargo test --manifest-path
+src-tauri/Cargo.toml --all-targets --all-features` (256 tests), Clippy with warnings
+denied, and `git diff --check`. The existing Vite main-chunk warning remains. No
+live SSH server or manual desktop session was used for this phase.
 
 Phase 3 checks completed: `npm run check` (typecheck, lint, 204 tests across
 33 files and production build), Cargo fmt, `cargo test --manifest-path
