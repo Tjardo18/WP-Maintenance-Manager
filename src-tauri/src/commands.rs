@@ -711,11 +711,21 @@ pub fn begin_filemanager_reauthentication(
 ) -> Result<TerminalChallengeInfo, AppError> {
     let password = Zeroizing::new(app_password);
     require_auth(&state, &session_token)?;
-    validate_uuid(&site_id, "De website-id is ongeldig.")?;
-    verify_feature_password(&state, &site_id, password, "filemanager_reauthentication")?;
+    begin_filemanager_reauthentication_internal(&state, &session_token, &site_id, password)
+}
+
+fn begin_filemanager_reauthentication_internal(
+    state: &AppState,
+    session_token: &str,
+    site_id: &str,
+    password: Zeroizing<String>,
+) -> Result<TerminalChallengeInfo, AppError> {
+    require_auth(state, session_token)?;
+    validate_uuid(site_id, "De website-id is ongeldig.")?;
+    verify_feature_password(state, site_id, password, "filemanager_reauthentication")?;
     // The app can have been locked while Argon2 was running.
-    require_auth(&state, &session_token)?;
-    let site = state.database.get_site(&site_id)?.site;
+    require_auth(state, session_token)?;
+    let site = state.database.get_site(site_id)?.site;
     if site.ssh_host.trim().is_empty()
         || site.ssh_username.trim().is_empty()
         || site.ssh_port == 0
@@ -725,7 +735,17 @@ pub fn begin_filemanager_reauthentication(
             "Controleer eerst de SSH-configuratie en vertrouwde hostsleutel van deze website.",
         ));
     }
-    state.filemanager_access.begin(&session_token, &site)
+    let challenge = state.filemanager_access.begin(session_token, &site)?;
+    if let Err(error) = state.database.save_audit_event(
+        Some(site_id),
+        "filemanager_reauthentication",
+        &site.ssh_username,
+        "success",
+        Some("Extra applicatieverificatie bevestigd; tijdelijke challenge uitgegeven"),
+    ) {
+        eprintln!("security audit write failed category={}", error.category);
+    }
+    Ok(challenge)
 }
 
 #[tauri::command(async)]
@@ -4919,6 +4939,118 @@ mod tests {
                 .is_ok()
         );
 
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
+    }
+
+    #[test]
+    fn filemanager_requires_app_session_password_site_configuration_and_ssh() {
+        let temp = std::env::temp_dir().join(format!("wpmm-filemanager-auth-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        let password = Uuid::new_v4().to_string();
+        database
+            .create_auth_config(&auth::hash_password(&password).unwrap())
+            .unwrap();
+        let mut input = site_input();
+        let site = database.save_site(&input, None).unwrap();
+        let state = app_state(database.clone(), &temp);
+        let begin = |session: &str, id: &str| {
+            begin_filemanager_reauthentication_internal(
+                &state,
+                session,
+                id,
+                Zeroizing::new(password.clone()),
+            )
+        };
+        assert!(begin("", &site.id).is_err());
+        assert!(require_filemanager_auth(&state, "", &site.id, "").is_err());
+        let session = state.auth.create_session().unwrap();
+        assert!(begin(&session, &Uuid::new_v4().to_string()).is_err());
+        assert!(
+            begin(&session, &site.id)
+                .unwrap_err()
+                .user_message
+                .contains("SSH-configuratie")
+        );
+        input.pinned_host_key = Some("test-fingerprint".into());
+        database.save_site(&input, None).unwrap();
+        let token = begin(&session, &site.id).unwrap().challenge_token;
+        assert!(require_filemanager_auth(&state, &session, &site.id, &token).is_err());
+        assert!(
+            state
+                .terminal_access
+                .consume_challenge(&session, &site.id, &token)
+                .is_err()
+        );
+        let error = begin_filemanager_reauthentication_internal(
+            &state,
+            &session,
+            &site.id,
+            Zeroizing::new(Uuid::new_v4().to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(error.category, "app_session_revoked_reauth_failed");
+        assert!(require_auth(&state, &session).is_err());
+        assert!(
+            database
+                .list_audit_events(Some(&site.id))
+                .unwrap()
+                .iter()
+                .any(|event| event.action_type == "filemanager_reauthentication"
+                    && event.status == "failed")
+        );
+        drop(state);
+        drop(database);
+        let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
+    }
+
+    #[test]
+    fn filemanager_guard_rechecks_app_session_site_existence_and_password_changes() {
+        let temp = std::env::temp_dir().join(format!("wpmm-filemanager-guard-{}", Uuid::new_v4()));
+        let database = Database::initialize(temp.with_extension("sqlite3")).unwrap();
+        let password = Uuid::new_v4().to_string();
+        database
+            .create_auth_config(&auth::hash_password(&password).unwrap())
+            .unwrap();
+        let site = database.save_site(&site_input(), None).unwrap();
+        let state = app_state(database.clone(), &temp);
+        let session = state.auth.create_session().unwrap();
+        let token = state
+            .filemanager_access
+            .install_test_access(&session, &site);
+        assert!(require_filemanager_auth(&state, &session, &site.id, &token).is_ok());
+        assert!(
+            require_filemanager_auth(&state, &session, &Uuid::new_v4().to_string(), &token)
+                .is_err()
+        );
+        let new_session = state.auth.create_session().unwrap();
+        assert!(require_filemanager_auth(&state, &new_session, &site.id, &token).is_err());
+        assert!(require_filemanager_auth(&state, &session, &site.id, &token).is_err());
+        let token = state
+            .filemanager_access
+            .install_test_access(&new_session, &site);
+        change_password_internal(
+            &state,
+            &PasswordChangeInput {
+                current_password: password,
+                new_password: Uuid::new_v4().to_string(),
+            },
+        )
+        .unwrap();
+        assert!(require_filemanager_auth(&state, &new_session, &site.id, &token).is_err());
+        assert!(
+            state
+                .filemanager_access
+                .authorize(&new_session, &site, &token)
+                .is_err()
+        );
+        let session = state.auth.create_session().unwrap();
+        let token = state
+            .filemanager_access
+            .install_test_access(&session, &site);
+        database.delete_site(&site.id).unwrap();
+        assert!(require_filemanager_auth(&state, &session, &site.id, &token).is_err());
+        drop(state);
+        drop(database);
         let _ = std::fs::remove_file(temp.with_extension("sqlite3"));
     }
 

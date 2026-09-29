@@ -28,7 +28,7 @@ pub struct FilemanagerAccessManager {
     access: Mutex<Vec<Access>>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilemanagerAuthorization {
     pub site_id: String,
@@ -224,6 +224,14 @@ impl FilemanagerAccessManager {
             entries.retain(|entry| entry.expires > Instant::now());
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn install_test_access(&self, session: &str, site: &Site) -> String {
+        let token = self.begin(session, site).unwrap().challenge_token;
+        self.connect_with(session, site, &token, || Ok(ssh2::Session::new().unwrap()))
+            .unwrap();
+        token
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -242,4 +250,193 @@ pub fn context(database: &Database, site_id: &str) -> Result<FilemanagerContext,
         site_name: stored.site.name,
         site_url: stored.site.url,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn site() -> Site {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4().to_string(), "name": "Test", "url": "https://example.test",
+            "sshHost": "example.test", "sshPort": 22, "sshUsername": "deploy", "authMethod": "password",
+            "wordpressPath": "/srv/wordpress", "pinnedHostKey": "test-fingerprint", "status": "unscanned",
+            "updateCount": 0, "createdAt": "2026-09-29", "updatedAt": "2026-09-29"
+        })).unwrap()
+    }
+
+    // Transport is injected at the verified-password boundary, never via a production bypass.
+    fn verified_transport() -> Result<ssh2::Session, AppError> {
+        Ok(ssh2::Session::new().unwrap())
+    }
+
+    #[test]
+    fn app_challenge_alone_cannot_open_workspace_and_success_is_site_and_session_bound() {
+        let manager = FilemanagerAccessManager::default();
+        let a = site();
+        let mut b = a.clone();
+        b.id = Uuid::new_v4().to_string(); // identical host/user/path is not the same website
+        let session = Uuid::new_v4().to_string();
+        let token = manager.begin(&session, &a).unwrap().challenge_token;
+        assert!(manager.authorize(&session, &a, &token).is_err());
+        assert_eq!(
+            manager
+                .connect_with(&session, &a, &token, verified_transport)
+                .unwrap()
+                .site_id,
+            a.id
+        );
+        assert!(manager.authorize(&session, &a, &token).is_ok());
+        assert!(manager.authorize(&session, &b, &token).is_err());
+        assert!(
+            manager
+                .authorize(&Uuid::new_v4().to_string(), &a, &token)
+                .is_err()
+        );
+        assert!(
+            manager
+                .connect_with(&session, &a, &token, || panic!("challenge reused"))
+                .is_err()
+        );
+        let mut changed = a.clone();
+        changed.ssh_host = "changed.test".into();
+        assert!(manager.authorize(&session, &changed, &token).is_err());
+    }
+
+    #[test]
+    fn terminal_challenges_never_authorize_filemanager() {
+        let manager = FilemanagerAccessManager::default();
+        let terminal = TerminalAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        let token = terminal
+            .create_challenge(&session, &site.id)
+            .unwrap()
+            .challenge_token;
+        assert!(
+            manager
+                .connect_with(&session, &site, &token, || panic!("wrong purpose"))
+                .is_err()
+        );
+        let token = manager.begin(&session, &site).unwrap().challenge_token;
+        assert!(
+            terminal
+                .consume_challenge(&session, &site.id, &token)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn transport_failures_never_authorize_or_echo_sensitive_details() {
+        for category in [
+            "ssh_authentication",
+            "network",
+            "connection_timeout",
+            "storage",
+            "host_key_mismatch",
+        ] {
+            let manager = FilemanagerAccessManager::default();
+            let site = site();
+            let session = Uuid::new_v4().to_string();
+            let secret = Uuid::new_v4().to_string();
+            let token = manager.begin(&session, &site).unwrap().challenge_token;
+            let error = manager
+                .connect_with(&session, &site, &token, || {
+                    Err(AppError::ssh(category, &secret, &secret, false))
+                })
+                .unwrap_err();
+            assert!(!format!("{error:?}").contains(&secret));
+            assert!(manager.authorize(&session, &site, &token).is_err());
+        }
+    }
+
+    #[test]
+    fn canceled_or_revoked_inflight_login_cannot_reactivate_access() {
+        let manager = FilemanagerAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        for global in [false, true] {
+            let token = manager.begin(&session, &site).unwrap().challenge_token;
+            assert!(
+                manager
+                    .connect_with(&session, &site, &token, || {
+                        if global {
+                            manager.revoke_all();
+                        } else {
+                            manager.close(&session, &site.id, &token);
+                        }
+                        verified_transport()
+                    })
+                    .is_err()
+            );
+            assert!(manager.authorize(&session, &site, &token).is_err());
+        }
+    }
+
+    #[test]
+    fn stale_close_does_not_revoke_a_new_attempt_and_site_deletion_does() {
+        let manager = FilemanagerAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        let old = manager.begin(&session, &site).unwrap().challenge_token;
+        let current = manager.begin(&session, &site).unwrap().challenge_token;
+        manager.close(&session, &site.id, &old);
+        assert!(
+            manager
+                .connect_with(&session, &site, &current, verified_transport)
+                .is_ok()
+        );
+        manager.revoke_site(&site.id);
+        assert!(manager.authorize(&session, &site, &current).is_err());
+    }
+
+    #[test]
+    fn expired_pending_and_active_access_are_rejected() {
+        let manager = FilemanagerAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        for active in [false, true] {
+            let token = manager.begin(&session, &site).unwrap().challenge_token;
+            if active {
+                manager
+                    .connect_with(&session, &site, &token, verified_transport)
+                    .unwrap();
+            }
+            manager.access.lock().unwrap()[0].expires = Instant::now() - Duration::from_secs(1);
+            assert!(manager.authorize(&session, &site, &token).is_err());
+            assert!(
+                manager
+                    .connect_with(&session, &site, &token, || panic!("expired"))
+                    .is_err()
+            );
+            assert!(manager.access.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn repeated_wrong_passwords_use_existing_rate_limit() {
+        let manager = FilemanagerAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        for _ in 0..3 {
+            let token = manager.begin(&session, &site).unwrap().challenge_token;
+            assert!(
+                manager
+                    .connect_with(&session, &site, &token, || Err(AppError::unauthorized(
+                        "ssh_authentication",
+                        "denied"
+                    )))
+                    .is_err()
+            );
+        }
+        let token = manager.begin(&session, &site).unwrap().challenge_token;
+        assert_eq!(
+            manager
+                .connect_with(&session, &site, &token, || panic!("rate limited"))
+                .unwrap_err()
+                .category,
+            "filemanager_ssh_rate_limited"
+        );
+    }
 }
