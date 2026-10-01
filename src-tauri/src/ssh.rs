@@ -129,6 +129,51 @@ pub(crate) fn save_filemanager_file(
     crate::filemanager_edit::save(&mut writer, root, requested, content, expected, authorize)
 }
 
+pub(crate) fn create_filemanager_file(
+    session: &Session,
+    root: &str,
+    input: &crate::filemanager_mutation::CreateInput,
+) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+    mutate_filemanager(session, root, |remote| {
+        crate::filemanager_mutation::create_file(remote, root, input)
+    })
+}
+
+pub(crate) fn create_filemanager_directory(
+    session: &Session,
+    root: &str,
+    input: &crate::filemanager_mutation::CreateInput,
+) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+    mutate_filemanager(session, root, |remote| {
+        crate::filemanager_mutation::create_directory(remote, root, input)
+    })
+}
+
+pub(crate) fn delete_filemanager_item(
+    session: &Session,
+    root: &str,
+    input: &crate::filemanager_mutation::DeleteInput,
+) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+    mutate_filemanager(session, root, |remote| {
+        crate::filemanager_mutation::delete_item(remote, root, input)
+    })
+}
+
+fn mutate_filemanager<T>(
+    session: &Session,
+    _root: &str,
+    operation: impl FnOnce(&mut FilemanagerSftp<'_>) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    session.set_timeout(5_000);
+    let sftp = session.sftp().map_err(filemanager_file_error)?;
+    let mut remote = FilemanagerSftp {
+        session,
+        sftp,
+        deadline: Instant::now() + Duration::from_secs(20),
+    };
+    operation(&mut remote)
+}
+
 struct FilemanagerWriter<'a, 'b> {
     remote: &'a mut FilemanagerSftp<'b>,
     channel: ssh2::Channel,
@@ -389,6 +434,65 @@ impl crate::filemanager_directory::DirectoryTransport for FilemanagerSftp<'_> {
             Err(error) if error.code() == ssh2::ErrorCode::Session(-16) => Ok(None),
             Err(error) => Err(filemanager_sftp_error(error)),
         }
+    }
+}
+
+impl crate::filemanager_mutation::MutationTransport for FilemanagerSftp<'_> {
+    fn create_file_exclusive(&mut self, path: &str) -> Result<(), AppError> {
+        self.before_call()?;
+        let mut file = self
+            .sftp
+            .open_mode(
+                Path::new(path),
+                ssh2::OpenFlags::WRITE | ssh2::OpenFlags::CREATE | ssh2::OpenFlags::EXCLUSIVE,
+                0o666,
+                ssh2::OpenType::File,
+            )
+            .map_err(crate::filemanager_mutation::map_create_error)?;
+        file.close().map_err(filemanager_file_error)
+    }
+    fn create_directory(&mut self, path: &str) -> Result<(), AppError> {
+        self.before_call()?;
+        self.sftp
+            .mkdir(Path::new(path), 0o777)
+            .map_err(crate::filemanager_mutation::map_create_error)
+    }
+    fn is_directory_empty(&mut self, path: &str) -> Result<bool, AppError> {
+        self.before_call()?;
+        let mut handle = self
+            .sftp
+            .opendir(Path::new(path))
+            .map_err(filemanager_file_error)?;
+        loop {
+            self.before_call()?;
+            let entry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.readdir()))
+                .map_err(|_| crate::filemanager_directory::malformed_listing())?;
+            match entry {
+                Ok((name, _)) => match name.to_str() {
+                    Some(".") | Some("..") => continue,
+                    Some(_) => return Ok(false),
+                    None => return Err(crate::filemanager_directory::malformed_listing()),
+                },
+                Err(error) if error.code() == ssh2::ErrorCode::Session(-16) => return Ok(true),
+                Err(error) => return Err(filemanager_file_error(error)),
+            }
+        }
+    }
+    fn unlink(&mut self, path: &str) -> Result<(), AppError> {
+        self.before_call()?;
+        self.sftp
+            .unlink(Path::new(path))
+            .map_err(filemanager_file_error)
+    }
+    fn remove_directory(&mut self, path: &str) -> Result<(), AppError> {
+        self.before_call()?;
+        self.sftp.rmdir(Path::new(path)).map_err(|error| {
+            if matches!(error.code(), ssh2::ErrorCode::SFTP(4)) {
+                crate::filemanager_mutation::error_not_empty()
+            } else {
+                filemanager_file_error(error)
+            }
+        })
     }
 }
 

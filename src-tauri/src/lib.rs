@@ -14,6 +14,7 @@ mod filemanager;
 mod filemanager_directory;
 mod filemanager_edit;
 mod filemanager_file;
+mod filemanager_mutation;
 mod filemanager_paths;
 mod health;
 mod maintenance;
@@ -106,6 +107,9 @@ pub fn run() {
             commands::list_filemanager_directory,
             commands::read_filemanager_file,
             commands::save_filemanager_file,
+            commands::create_filemanager_file,
+            commands::create_filemanager_directory,
+            commands::delete_filemanager_item,
             commands::close_filemanager,
             commands::save_site,
             commands::delete_site,

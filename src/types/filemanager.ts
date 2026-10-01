@@ -32,3 +32,6 @@ export interface FilemanagerDirectoryListing {
 }
 
 export type FilemanagerFilePreview = FileContentPreview;
+
+export type FilemanagerMutationKind = "file" | "directory" | "symlink";
+export interface FilemanagerMutationResult { path: string; name: string; kind: FilemanagerMutationKind; }
