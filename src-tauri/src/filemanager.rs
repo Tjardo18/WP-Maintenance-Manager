@@ -289,6 +289,42 @@ impl FilemanagerAccessManager {
         })
     }
 
+    pub fn change_permissions(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        input: &crate::filemanager_mutation::PermissionInput,
+    ) -> Result<(), AppError> {
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::change_filemanager_permissions(connection, &site.wordpress_path, input)
+        })
+    }
+
+    pub fn change_permissions_bulk(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        input: &crate::filemanager_mutation::BulkPermissionInput,
+    ) -> Result<crate::filemanager_mutation::BulkResult, AppError> {
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::change_filemanager_permissions_bulk(connection, &site.wordpress_path, input)
+        })
+    }
+
+    pub fn delete_bulk(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        input: &crate::filemanager_mutation::BulkInput,
+    ) -> Result<crate::filemanager_mutation::BulkResult, AppError> {
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::delete_filemanager_bulk(connection, &site.wordpress_path, input)
+        })
+    }
+
     fn with_entry<T>(
         &self,
         session: &str,

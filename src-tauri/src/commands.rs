@@ -1016,6 +1016,87 @@ pub fn delete_filemanager_item(
     )
 }
 
+#[tauri::command(async)]
+pub fn change_filemanager_permissions(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    input: crate::filemanager_mutation::PermissionInput,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    require_auth(&state, &session_token)?;
+    crate::filemanager_mutation::parse_mode(&input.mode)?;
+    mutate_filemanager_item(
+        &state,
+        &session_token,
+        &site_id,
+        &authorization_token,
+        &input.path,
+        |site, path| {
+            state.filemanager_access.change_permissions(
+                &session_token,
+                site,
+                &authorization_token,
+                &crate::filemanager_mutation::PermissionInput {
+                    path: path.into(),
+                    expected_kind: input.expected_kind,
+                    mode: input.mode.clone(),
+                },
+            )
+        },
+    )
+}
+
+#[tauri::command(async)]
+pub fn change_filemanager_permissions_bulk(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    input: crate::filemanager_mutation::BulkPermissionInput,
+    state: State<'_, AppState>,
+) -> Result<crate::filemanager_mutation::BulkResult, AppError> {
+    require_auth(&state, &session_token)?;
+    crate::filemanager_mutation::parse_mode(&input.mode)?;
+    crate::filemanager_mutation::validate_bulk(&crate::filemanager_mutation::BulkInput {
+        directory: input.directory.clone(),
+        items: input.items.clone(),
+    })?;
+    require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
+    let site = state.database.get_site(&site_id)?.site;
+    let result = state.filemanager_access.change_permissions_bulk(
+        &session_token,
+        &site,
+        &authorization_token,
+        &input,
+    )?;
+    require_auth(&state, &session_token)?;
+    require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
+    Ok(result)
+}
+
+#[tauri::command(async)]
+pub fn delete_filemanager_bulk(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    input: crate::filemanager_mutation::BulkInput,
+    state: State<'_, AppState>,
+) -> Result<crate::filemanager_mutation::BulkResult, AppError> {
+    require_auth(&state, &session_token)?;
+    crate::filemanager_mutation::validate_bulk(&input)?;
+    require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
+    let site = state.database.get_site(&site_id)?.site;
+    let result = state.filemanager_access.delete_bulk(
+        &session_token,
+        &site,
+        &authorization_token,
+        &input,
+    )?;
+    require_auth(&state, &session_token)?;
+    require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
+    Ok(result)
+}
+
 fn mutate_filemanager_item<T>(
     state: &AppState,
     session: &str,

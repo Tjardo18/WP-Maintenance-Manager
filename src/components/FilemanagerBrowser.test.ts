@@ -4,7 +4,7 @@ import FilemanagerBrowser from "./FilemanagerBrowser.vue";
 import type { FilemanagerDirectoryListing } from "../types/filemanager";
 import { createMemoryHistory, createRouter } from "vue-router";
 
-const api = vi.hoisted(() => ({ listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), saveFilemanagerFile: vi.fn(), createFilemanagerFile: vi.fn(), createFilemanagerDirectory: vi.fn(), deleteFilemanagerItem: vi.fn(), getSettings: vi.fn() }));
+const api = vi.hoisted(() => ({ listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), saveFilemanagerFile: vi.fn(), createFilemanagerFile: vi.fn(), createFilemanagerDirectory: vi.fn(), deleteFilemanagerItem: vi.fn(), changeFilemanagerPermissions: vi.fn(), changeFilemanagerPermissionsBulk: vi.fn(), deleteFilemanagerBulk: vi.fn(), getSettings: vi.fn() }));
 vi.mock("../services/tauri", () => ({ appApi: api }));
 const context = { siteId: "site-a", siteName: "Website A", siteUrl: "https://a.test" };
 const listing = (path: string, items: FilemanagerDirectoryListing["items"] = []): FilemanagerDirectoryListing => ({ currentPath: path, isRoot: path === "/", parentPath: path === "/" ? null : path.slice(0, path.lastIndexOf("/")) || "/", items, truncated: false });
@@ -35,6 +35,79 @@ describe("Filemanager directorybrowser", () => {
     expect(router.currentRoute.value.path).toBe('/site-b'); w.unmount();
   });
   beforeEach(() => { vi.resetAllMocks(); api.getSettings.mockResolvedValue({ scanConcurrency: 4, filePreviewMode: "normal", markdownPreviewMode: "raw" }); });
+
+  it("selects the current listing, clears selection on navigation and changes one item's permissions", async () => {
+    const items = [directory("uploads", "/uploads"), file("index.php", "/index.php")];
+    api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", items)).mockResolvedValueOnce(listing("/", [{ ...items[0], permissions: "750" }, items[1]])).mockResolvedValueOnce(listing("/uploads", []));
+    api.changeFilemanagerPermissions.mockResolvedValue(undefined);
+    const wrapper = create(); await flushPromises();
+    await wrapper.get('[aria-label="Selecteer uploads"]').setValue(true);
+    expect(wrapper.text()).toContain("1 item geselecteerd");
+    await wrapper.get('[aria-label="Selecteer alle items in deze map"]').setValue(true);
+    expect(wrapper.text()).toContain("2 items geselecteerd");
+    await wrapper.get('[aria-label="Permissions wijzigen van uploads"]').trigger("click");
+    await wrapper.get("#filemanager-permissions").setValue("750");
+    await wrapper.get('[aria-label="Permissions wijzigen"] .button.primary').trigger("click"); await flushPromises();
+    expect(api.changeFilemanagerPermissions).toHaveBeenCalledWith("site-a", "token-a", { path: "/uploads", expectedKind: "directory", mode: "750" });
+    expect(wrapper.get(".filemanager-table").text()).toContain("750");
+    await wrapper.get('[title="Open uploads"]').trigger("click"); await flushPromises();
+    expect(wrapper.text()).not.toContain("geselecteerd");
+  });
+
+  it("confirms bulk deletion and shows itemized partial failure", async () => {
+    const items = [file("a.php", "/a.php"), file("b.php", "/b.php")];
+    api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", items)).mockResolvedValueOnce(listing("/", [items[1]]));
+    api.deleteFilemanagerBulk.mockResolvedValue({ requested: 2, succeeded: 1, failed: 1, failures: [{ path: "/b.php", reason: "Geen schrijfrechten." }] });
+    const wrapper = create(); await flushPromises();
+    await wrapper.get('[aria-label="Selecteer alle items in deze map"]').setValue(true);
+    await wrapper.get(".filemanager-bulk-toolbar .button.danger").trigger("click");
+    expect(wrapper.text()).toContain("deze 2 items wilt verwijderen");
+    await wrapper.get('[aria-label="Geselecteerde items verwijderen?"] .button.secondary').trigger("click");
+    expect(api.deleteFilemanagerBulk).not.toHaveBeenCalled();
+    await wrapper.get(".filemanager-bulk-toolbar .button.danger").trigger("click");
+    await wrapper.get('[aria-label="Geselecteerde items verwijderen?"] .button.danger').trigger("click"); await flushPromises();
+    expect(api.deleteFilemanagerBulk).toHaveBeenCalledWith("site-a", "token-a", { directory: "/", items: [{ path: "/a.php", expectedKind: "file" }, { path: "/b.php", expectedKind: "file" }] });
+    expect(wrapper.text()).toContain("1 van 2 items verwijderd");
+    expect(wrapper.text()).toContain("Geen schrijfrechten");
+  });
+
+  it("drops selection when switching websites in the same browser instance", async () => {
+    api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", [file("a.php", "/a.php")])).mockResolvedValueOnce(listing("/", [file("b.php", "/b.php")]));
+    const wrapper = create(); await flushPromises();
+    await wrapper.get('[aria-label="Selecteer a.php"]').setValue(true);
+    expect(wrapper.text()).toContain("1 item geselecteerd");
+    await wrapper.setProps({ context: { siteId: "site-b", siteName: "Website B", siteUrl: "https://b.test" }, authorizationToken: "token-b" }); await flushPromises();
+    expect(api.listFilemanagerDirectory).toHaveBeenLastCalledWith("site-b", "token-b", "/");
+    expect(wrapper.text()).toContain("b.php");
+    expect(wrapper.text()).not.toContain("1 item geselecteerd");
+  });
+
+  it("ignores an in-flight listing from the previous website", async () => {
+    let finishOld!: (value: FilemanagerDirectoryListing) => void;
+    api.listFilemanagerDirectory.mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve; })).mockResolvedValueOnce(listing("/", [file("b.php", "/b.php")]));
+    const wrapper = create();
+    await wrapper.setProps({ context: { siteId: "site-b", siteName: "Website B", siteUrl: "https://b.test" }, authorizationToken: "token-b" });
+    await flushPromises();
+    finishOld(listing("/", [file("a.php", "/a.php")])); await flushPromises();
+    expect(wrapper.text()).toContain("b.php");
+    expect(wrapper.text()).not.toContain("a.php");
+  });
+
+  it("does not bulk-delete an open file with unsaved edits without the discard guard", async () => {
+    api.listFilemanagerDirectory.mockResolvedValue(listing("/", [file("edit.php", "/edit.php")]));
+    api.readFilemanagerFile.mockResolvedValue({ fileName: "edit.php", relativePath: "/edit.php", sizeBytes: 3, fileType: "php", extension: "php", textContent: "old", binary: false, truncated: false, editVersion: "a".repeat(64) });
+    const wrapper = create(); await flushPromises();
+    await wrapper.get('[aria-label="Bekijk edit.php"]').trigger("click"); await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "Bewerken")!.trigger("click");
+    await wrapper.get("textarea").setValue("unsaved");
+    await wrapper.get('[aria-label="Selecteer edit.php"]').setValue(true);
+    await wrapper.get(".filemanager-bulk-toolbar .button.danger").trigger("click");
+    await wrapper.get('[aria-label="Geselecteerde items verwijderen?"] .button.danger').trigger("click"); await flushPromises();
+    expect(wrapper.text()).toContain("Wijzigingen verwerpen?");
+    expect(api.deleteFilemanagerBulk).not.toHaveBeenCalled();
+    await wrapper.get('[aria-label="Wijzigingen verwerpen?"] .button.secondary').trigger("click"); await flushPromises();
+    expect(api.deleteFilemanagerBulk).not.toHaveBeenCalled();
+  });
 
   it("creates a file in the current directory, refreshes and opens it", async () => {
     api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", [directory("wp-content", "/wp-content")])).mockResolvedValueOnce(listing("/wp-content", [])).mockResolvedValueOnce(listing("/wp-content", [file("test.php", "/wp-content/test.php")]));
