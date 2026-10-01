@@ -8,10 +8,13 @@ This feature is developed on `feature/filemanager`, with phase 1 on
 `feature/filemanager-phase-5-file-preview`, followed by phase 6 on
 `feature/filemanager-phase-6-file-editing`, followed by phase 7 on
 `feature/filemanager-phase-7-create-delete`, followed by phase 8 on
-`feature/filemanager-phase-8-permissions-bulk`. It must not be merged into `main`
+`feature/filemanager-phase-8-permissions-bulk`, followed by phase 9 on
+`feature/filemanager-phase-9-downloads`. It must not be merged into `main`
 without a later explicit instruction. The application version is unchanged.
 Phase 8 permission and bulk safety rules are in
 [`FILEMANAGER_PERMISSIONS_BULK.md`](FILEMANAGER_PERMISSIONS_BULK.md).
+Phase 9 download and archive safety rules are in
+[`FILEMANAGER_DOWNLOADS.md`](FILEMANAGER_DOWNLOADS.md).
 
 ## Existing architecture and reuse
 
@@ -321,7 +324,8 @@ Future write operations belong in `filemanager.rs`, with the established
 Do not use metadata or UI state as authorization and do not substitute stored
 credentials for the two-password gate. Phase 7 adds only named create and
 individual non-recursive delete; see [FILEMANAGER_MUTATIONS.md](FILEMANAGER_MUTATIONS.md).
-Permission controls, downloads, archives and bulk operations have not been implemented.
+Permission controls, downloads, archives and bulk operations are documented in
+the phase 8 and phase 9 documents linked above.
 
 ## Verification
 
