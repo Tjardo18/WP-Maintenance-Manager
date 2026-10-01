@@ -9,14 +9,60 @@ import { renderMarkdownPreview } from "../services/markdownPreview";
 import { svgPreviewDataUrl } from "../services/svgPreview";
 import { appApi } from "../services/tauri";
 import { formatDate } from "../utils/format";
+import { errorMessage } from "../utils/errors";
+import ConfirmDialog from "./ConfirmDialog.vue";
+import FileTextEditor from "./FileTextEditor.vue";
 
 type PreviewModel = FileContentPreview & { finding?: Finding };
-const props = withDefaults(defineProps<{ preview: PreviewModel; defaultFullscreen?: boolean; defaultMarkdownMode?: MarkdownPreviewMode; closeLabel?: string }>(), {
+const props = withDefaults(defineProps<{ preview: PreviewModel; defaultFullscreen?: boolean; defaultMarkdownMode?: MarkdownPreviewMode; closeLabel?: string; saveFile?: (content: string, version: string) => Promise<FileContentPreview>; reloadFile?: () => Promise<void> }>(), {
   defaultFullscreen: false,
   defaultMarkdownMode: "raw",
   closeLabel: "Sluiten",
 });
-const emit = defineEmits<{ close: []; delete: [] }>();
+const emit = defineEmits<{ close: []; delete: []; saved: [preview: FileContentPreview] }>();
+const editing = ref(false);
+const draft = ref("");
+const saving = ref(false);
+const saveError = ref<string>();
+const saved = ref(false);
+const dirty = computed(() => editing.value && draft.value !== props.preview.textContent);
+const canEdit = computed(() => !saving.value && !!props.saveFile && !!props.preview.editVersion && !props.preview.binary && !props.preview.truncated && typeof props.preview.textContent === "string");
+const confirmingDiscard = ref(false);
+let finishDiscard: ((allowed: boolean) => void) | undefined;
+async function requestLeave(): Promise<boolean> {
+  if (saving.value) return false;
+  if (!dirty.value) return true;
+  if (confirmingDiscard.value) return false;
+  confirmingDiscard.value = true;
+  return new Promise((resolve) => { finishDiscard = resolve; });
+}
+function answerDiscard(allowed: boolean) {
+  confirmingDiscard.value = false;
+  if (allowed) { editing.value = false; draft.value = props.preview.textContent ?? ""; }
+  finishDiscard?.(allowed); finishDiscard = undefined;
+}
+async function requestClose() { if (await requestLeave()) emit("close"); }
+async function cancelEdit() { if (await requestLeave()) { editing.value = false; draft.value = props.preview.textContent ?? ""; saveError.value = undefined; } }
+function startEdit() { draft.value = props.preview.textContent ?? ""; editing.value = true; saved.value = false; saveError.value = undefined; }
+async function saveEdit() {
+  if (!dirty.value || saving.value || !props.saveFile || !props.preview.editVersion) return;
+  saving.value = true; saveError.value = undefined; saved.value = false;
+  try {
+    const result = await props.saveFile(draft.value, props.preview.editVersion);
+    emit("saved", result); editing.value = false; saved.value = true; draft.value = "";
+  } catch (cause) { saveError.value = errorMessage(cause); }
+  finally { saving.value = false; }
+}
+async function reload() {
+  if (!props.reloadFile || !(await requestLeave())) return;
+  editing.value = false;
+  saving.value = true;
+  try { await props.reloadFile(); saveError.value = undefined; saved.value = false; }
+  catch (cause) { saveError.value = errorMessage(cause); }
+  finally { saving.value = false; }
+}
+function beforeUnload(event: { preventDefault: () => void; returnValue: unknown }) { if (dirty.value || saving.value) { event.preventDefault(); event.returnValue = ""; } }
+defineExpose({ requestLeave, hasUnsavedChanges: () => dirty.value || saving.value });
 
 const canDelete = computed(() => props.preview.finding?.checksumStatus === "unexpected");
 const syntax = computed(() => previewSyntax(props.preview.fileName, props.preview.extension));
@@ -52,7 +98,8 @@ const handleKeydown = (event: { key: string; preventDefault: () => void; stopPro
   if (event.key !== "Escape") return;
   event.preventDefault();
   event.stopPropagation();
-  emit("close");
+  if (confirmingDiscard.value) answerDiscard(false);
+  else void requestClose();
 };
 
 onMounted(() => {
@@ -61,9 +108,12 @@ onMounted(() => {
   window.document.body.style.overflow = "hidden";
   window.document.documentElement.style.overflow = "hidden";
   window.addEventListener("keydown", handleKeydown, true);
+  window.addEventListener("beforeunload", beforeUnload);
 });
 
 onBeforeUnmount(() => {
+  answerDiscard(false);
+  window.removeEventListener("beforeunload", beforeUnload);
   window.removeEventListener("keydown", handleKeydown, true);
   window.document.body.style.overflow = previousBodyOverflow;
   window.document.documentElement.style.overflow = previousDocumentOverflow;
@@ -105,14 +155,14 @@ function checksumLabel(status?: string) {
 </script>
 
 <template>
-  <div :class="['modal-backdrop', 'file-preview-backdrop', { fullscreen }]" role="presentation" @click.self="$emit('close')">
-    <section :class="['modal', 'preview-modal', { fullscreen }]" role="dialog" aria-modal="true" aria-label="Bestandspreview">
+  <div :class="['modal-backdrop', 'file-preview-backdrop', { fullscreen }]" role="presentation" @click.self="requestClose">
+    <section :class="['modal', 'preview-modal', { fullscreen }]" :inert="confirmingDiscard" role="dialog" aria-modal="true" aria-label="Bestandspreview">
       <div class="preview-window-actions">
         <button class="icon-button" :aria-label="fullscreen ? 'Fullscreen verlaten' : 'Fullscreen openen'" :title="fullscreen ? 'Fullscreen verlaten' : 'Fullscreen openen'" @click="toggleFullscreen">
           <Minimize2 v-if="fullscreen" :size="18" />
           <Maximize2 v-else :size="18" />
         </button>
-        <button class="icon-button" aria-label="Sluiten" title="Sluiten" @click="$emit('close')"><X :size="18" /></button>
+        <button class="icon-button" aria-label="Sluiten" title="Sluiten" :disabled="saving" @click="requestClose"><X :size="18" /></button>
       </div>
       <h2>{{ preview.fileName }}</h2>
       <code class="preview-path">{{ preview.relativePath }}</code>
@@ -124,11 +174,16 @@ function checksumLabel(status?: string) {
       </dl>
       <p v-if="preview.truncated" class="preview-warning">De preview is afgekapt op de veilige bestandsgroottelimiet.</p>
       <p v-if="preview.binary && !isImage" class="preview-warning">Dit bestand kan niet veilig als tekst worden weergegeven.</p>
-      <div v-if="supportsRenderedPreview" class="preview-mode-toggle" role="group" :aria-label="previewViewLabel">
+      <p v-if="saveError" class="error-banner" role="alert">{{ saveError }} <button v-if="reloadFile" class="button small secondary" :disabled="saving" @click="reload">Herlaad bestand</button></p>
+      <p v-if="saved" role="status" class="preview-save-status">Bestand opgeslagen.</p>
+      <p v-if="saving && !editing" role="status">Bestand herladen…</p>
+      <p v-if="editing" class="preview-edit-status">Bewerken · {{ dirty ? 'Niet-opgeslagen wijzigingen' : 'Geen wijzigingen' }}</p>
+      <div v-if="supportsRenderedPreview && !editing" class="preview-mode-toggle" role="group" :aria-label="previewViewLabel">
         <button type="button" :class="{ active: contentMode === 'raw' }" :aria-pressed="contentMode === 'raw'" @click="contentMode = 'raw'"><Code2 :size="14" /> Raw</button>
         <button type="button" :class="{ active: contentMode === 'preview' }" :aria-pressed="contentMode === 'preview'" @click="contentMode = 'preview'"><Eye :size="14" /> Preview</button>
       </div>
-      <div v-if="!preview.binary && isMarkdown && contentMode === 'preview'" ref="previewScroller" class="markdown-preview" role="region" aria-label="Gerenderde Markdown-preview" tabindex="0" v-html="renderedMarkdown" @click="openMarkdownLink"></div>
+      <FileTextEditor v-if="editing" v-model="draft" :original="preview.textContent ?? ''" :disabled="saving" />
+      <div v-else-if="!preview.binary && isMarkdown && contentMode === 'preview'" ref="previewScroller" class="markdown-preview" role="region" aria-label="Gerenderde Markdown-preview" tabindex="0" v-html="renderedMarkdown" @click="openMarkdownLink"></div>
       <div v-else-if="isImage && contentMode === 'preview'" ref="previewScroller" :class="['image-preview', { 'svg-preview': isSvg }]" role="region" :aria-label="`Gerenderde afbeeldingspreview van ${preview.fileName}`" tabindex="0">
         <img v-if="renderedImage" :src="renderedImage" :alt="`Preview van ${preview.fileName}`" draggable="false" />
         <p v-else class="image-preview-error">Deze afbeelding kan niet worden weergegeven. De Raw-weergave blijft beschikbaar.</p>
@@ -150,7 +205,16 @@ function checksumLabel(status?: string) {
         <FileImage :size="30" aria-hidden="true" />
         <div><strong>Binair bestand</strong><p>Dit formaat bevat geen leesbare broncode. De oorspronkelijke bytes worden niet als tekst of kunstmatige syntax weergegeven.</p><code v-if="preview.imageMimeType">{{ preview.imageMimeType }}</code></div>
       </div>
-      <div class="modal-actions"><button class="button secondary" @click="$emit('close')">{{ closeLabel }}</button><button v-if="canDelete" class="button danger" @click="$emit('delete')"><Trash2 :size="14" /> Bestand verwijderen</button></div>
+      <div class="modal-actions">
+        <template v-if="editing"><button class="button secondary" :disabled="saving" @click="cancelEdit">Annuleren</button><button class="button primary" :disabled="!dirty || saving" @click="saveEdit">{{ saving ? 'Opslaan…' : 'Opslaan' }}</button></template>
+        <template v-else><button class="button secondary" @click="requestClose">{{ closeLabel }}</button><button v-if="canEdit" class="button primary" @click="startEdit">Bewerken</button><button v-if="canDelete" class="button danger" @click="$emit('delete')"><Trash2 :size="14" /> Bestand verwijderen</button></template>
+      </div>
     </section>
   </div>
+  <ConfirmDialog v-if="confirmingDiscard" title="Wijzigingen verwerpen?" confirm-label="Verwerpen" danger @cancel="answerDiscard(false)" @confirm="answerDiscard(true)"><p>Je hebt niet-opgeslagen wijzigingen. Weet je zeker dat je deze wilt verwerpen?</p></ConfirmDialog>
 </template>
+
+<style scoped>
+.preview-save-status { color:#27694f;font-size:12px;margin:0 0 10px; }
+.preview-edit-status { color:#795f38;font-size:12px;margin:0 0 10px; }
+</style>

@@ -1,11 +1,12 @@
-# Filemanager — authentication, safe paths, browser and previews
+# Filemanager — authentication, safe paths, browser, previews and editing
 
 This feature is developed on `feature/filemanager`, with phase 1 on
 `feature/filemanager-phase-1-foundation` and phase 2 on
 `feature/filemanager-phase-2-auth`, followed by phase 3 on
 `feature/filemanager-phase-3-directory-backend`, followed by phase 4 on
 `feature/filemanager-phase-4-directory-browser` and phase 5 on
-`feature/filemanager-phase-5-file-preview`. It must not be merged into `main`
+`feature/filemanager-phase-5-file-preview`, followed by phase 6 on
+`feature/filemanager-phase-6-file-editing`. It must not be merged into `main`
 without a later explicit instruction. The application version is unchanged.
 
 ## Existing architecture and reuse
@@ -37,7 +38,8 @@ without a later explicit instruction. The application version is unchanged.
 - `ChecksumFilePreview.vue` already supports syntax highlighting, line numbers,
   Raw/Preview, fullscreen, Escape and images. Its helpers are `fileSyntax`,
   `markdownPreview`, `svgPreview`, `imagePreview` and `binaryInspector`.
-  It is read-only, not an editor. `checksum_files.rs` loads it using the newest
+  Scan previews remain read-only; phase 6 adds optional filemanager edit callbacks.
+  `checksum_files.rs` loads it using the newest
   authorized finding and SFTP. Phase 5 separates its generic
   `FileContentPreview` presentation contract from the optional finding/delete
   permission, without fabricating a finding for filemanager files.
@@ -298,16 +300,23 @@ known. It provides the same line numbers, fullscreen/Escape behavior and saved
 fullscreen/Markdown defaults as finding previews. Markdown rendering keeps raw
 HTML disabled and only delegates HTTP(S) links to the validated external opener;
 SVG is sanitized before a data URL is created. HTML/XML/JavaScript source is not
-executed. The preview remains strictly read-only.
+executed. Phase 5's read-only view is retained; phase 6 optionally adds editing below.
+
+## Phase 6: editing existing text files
+
+The shared preview now offers explicit edit/save/cancel for backend-approved
+UTF-8 text, with dirty-navigation guards and conflict detection. The authorized
+SFTP backend stages, verifies and atomically replaces existing files without
+truncating the original. See [FILEMANAGER_EDITING.md](FILEMANAGER_EDITING.md) for
+the full flow, permission/ownership handling, limits and live-verification steps.
 
 ## Next phases (not implemented)
 
 Future write operations belong in `filemanager.rs`, with the established
 `ssh.rs` transport, backend-owned site context and centralized path validation.
 Do not use metadata or UI state as authorization and do not substitute stored
-credentials for the two-password gate. Phase 6 may add editing only after a
-separate write, conflict, atomicity and authorization review. Mutations,
-permissions, downloads, archives and bulk operations have not been implemented.
+credentials for the two-password gate. Creating/deleting files, permission
+controls, downloads, archives and bulk operations have not been implemented.
 
 ## Verification
 

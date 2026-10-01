@@ -164,6 +164,7 @@ pub(crate) fn build_file_content_preview(
         .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
         .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Secs, true));
     FileContentPreview {
+        edit_version: None,
         file_name,
         relative_path: relative_path.into(),
         size_bytes: remote.size_bytes,

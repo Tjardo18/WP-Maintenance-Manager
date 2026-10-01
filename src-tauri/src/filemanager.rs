@@ -23,6 +23,8 @@ struct Access {
 
 #[derive(Default)]
 pub struct FilemanagerAccessManager {
+    // Serialize saves across access tokens, including two editors of the same site.
+    saves: Mutex<()>,
     // Separate instance: terminal challenges can never authorize this feature.
     challenges: TerminalAccessManager,
     access: Mutex<Vec<Access>>,
@@ -225,6 +227,32 @@ impl FilemanagerAccessManager {
             self.authorize(session, site, token)?;
         }
         result
+    }
+
+    pub fn save_file(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        input: &crate::filemanager_edit::SaveInput,
+        authorize: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::models::FileContentPreview, AppError> {
+        let _save = self.saves.try_lock().map_err(|_| {
+            AppError::unauthorized(
+                "filemanager_busy",
+                "Er wordt al een bestand opgeslagen. Probeer het zo opnieuw.",
+            )
+        })?;
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::save_filemanager_file(
+                connection,
+                &site.wordpress_path,
+                &input.path,
+                &input.content,
+                &input.expected_version,
+                &authorize,
+            )
+        })
     }
 
     fn with_entry<T>(
@@ -543,5 +571,39 @@ mod tests {
             assert_eq!(result.unwrap_err().category, category);
             assert!(manager.authorize(&session, &site, &token).is_err());
         }
+    }
+
+    #[test]
+    fn save_rejects_other_site_and_simultaneous_writes_before_transport() {
+        let manager = FilemanagerAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        let token = manager.install_test_access(&session, &site);
+        let mut other = site.clone();
+        other.id = Uuid::new_v4().to_string();
+        let input = crate::filemanager_edit::SaveInput {
+            path: "/test.php".into(),
+            content: "text".into(),
+            expected_version: "a".repeat(64),
+        };
+        assert_eq!(
+            manager
+                .save_file(&session, &other, &token, &input, || panic!(
+                    "cross-site transport"
+                ))
+                .unwrap_err()
+                .category,
+            "filemanager_auth_required"
+        );
+        let _locked = manager.saves.lock().unwrap();
+        assert_eq!(
+            manager
+                .save_file(&session, &site, &token, &input, || panic!(
+                    "concurrent transport"
+                ))
+                .unwrap_err()
+                .category,
+            "filemanager_busy"
+        );
     }
 }

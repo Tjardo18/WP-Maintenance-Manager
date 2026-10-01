@@ -13,6 +13,10 @@ const step = ref<"app" | "ssh" | "ready">("app");
 const password = ref("");
 const busy = ref(false);
 const error = ref<string>();
+const browser = ref<InstanceType<typeof FilemanagerBrowser>>();
+async function reauthenticate() {
+  if (await browser.value?.requestLeave() ?? true) reset();
+}
 let token: string | undefined;
 let generation = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
@@ -34,7 +38,12 @@ function reset(message?: string) {
 
 function expireAfter(seconds: number) {
   globalThis.clearTimeout(timer);
-  timer = setTimeout(() => reset("De verificatie is verlopen. Bevestig beide wachtwoorden opnieuw."), Math.max(0, seconds) * 1000);
+  timer = setTimeout(() => {
+    if (step.value === "ready" && browser.value?.hasUnsavedChanges()) {
+      void release(token);
+      error.value = "De verificatie is verlopen. Niet-opgeslagen tekst blijft zichtbaar; kopieer deze indien nodig voordat je opnieuw verifieert.";
+    } else reset("De verificatie is verlopen. Bevestig beide wachtwoorden opnieuw.");
+  }, Math.max(0, seconds) * 1000);
 }
 
 async function submit() {
@@ -74,7 +83,10 @@ onUnmounted(() => reset());
 </script>
 
 <template>
-  <FilemanagerBrowser v-if="step === 'ready' && token" :context="context" :authorization-token="token" @expired="reset('De filemanagerverificatie is verlopen. Bevestig beide wachtwoorden opnieuw.')" />
+  <template v-if="step === 'ready' && token">
+    <p v-if="error" class="error-banner" role="alert">{{ error }} <button class="button small secondary" @click="reauthenticate">Opnieuw verifiëren</button></p>
+    <FilemanagerBrowser ref="browser" :context="context" :authorization-token="token" @expired="reset('De filemanagerverificatie is verlopen. Bevestig beide wachtwoorden opnieuw.')" />
+  </template>
   <form v-else class="filemanager-auth" :aria-busy="busy" @submit.prevent="submit">
     <LockKeyhole :size="28" />
     <h3>{{ step === 'app' ? 'App-wachtwoord vereist' : 'SSH-wachtwoord vereist' }}</h3>
