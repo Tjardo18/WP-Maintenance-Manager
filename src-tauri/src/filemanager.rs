@@ -325,6 +325,19 @@ impl FilemanagerAccessManager {
         })
     }
 
+    pub fn download<W: std::io::Write + std::io::Seek>(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        input: &crate::filemanager_mutation::BulkInput,
+        output: &mut W,
+    ) -> Result<crate::filemanager_download::DownloadResult, AppError> {
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::write_filemanager_download(connection, &site.wordpress_path, input, output)
+        })
+    }
+
     fn with_entry<T>(
         &self,
         session: &str,
@@ -675,5 +688,31 @@ mod tests {
                 .category,
             "filemanager_busy"
         );
+    }
+
+    #[test]
+    fn download_rejects_other_site_before_sftp() {
+        let manager = FilemanagerAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        let token = manager.install_test_access(&session, &site);
+        let mut other = site.clone();
+        other.id = Uuid::new_v4().to_string();
+        let input = crate::filemanager_mutation::BulkInput {
+            directory: "/".into(),
+            items: vec![crate::filemanager_mutation::DeleteInput {
+                path: "/index.php".into(),
+                expected_kind: crate::filemanager_mutation::ItemKind::File,
+            }],
+        };
+        let mut output = std::io::Cursor::new(Vec::new());
+        assert_eq!(
+            manager
+                .download(&session, &other, &token, &input, &mut output)
+                .unwrap_err()
+                .category,
+            "filemanager_auth_required"
+        );
+        assert!(output.get_ref().is_empty());
     }
 }

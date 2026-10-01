@@ -4,7 +4,7 @@ import FilemanagerBrowser from "./FilemanagerBrowser.vue";
 import type { FilemanagerDirectoryListing } from "../types/filemanager";
 import { createMemoryHistory, createRouter } from "vue-router";
 
-const api = vi.hoisted(() => ({ listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), saveFilemanagerFile: vi.fn(), createFilemanagerFile: vi.fn(), createFilemanagerDirectory: vi.fn(), deleteFilemanagerItem: vi.fn(), changeFilemanagerPermissions: vi.fn(), changeFilemanagerPermissionsBulk: vi.fn(), deleteFilemanagerBulk: vi.fn(), getSettings: vi.fn() }));
+const api = vi.hoisted(() => ({ listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), saveFilemanagerFile: vi.fn(), createFilemanagerFile: vi.fn(), createFilemanagerDirectory: vi.fn(), deleteFilemanagerItem: vi.fn(), changeFilemanagerPermissions: vi.fn(), changeFilemanagerPermissionsBulk: vi.fn(), deleteFilemanagerBulk: vi.fn(), downloadFilemanagerItems: vi.fn(), getSettings: vi.fn() }));
 vi.mock("../services/tauri", () => ({ appApi: api }));
 const context = { siteId: "site-a", siteName: "Website A", siteUrl: "https://a.test" };
 const listing = (path: string, items: FilemanagerDirectoryListing["items"] = []): FilemanagerDirectoryListing => ({ currentPath: path, isRoot: path === "/", parentPath: path === "/" ? null : path.slice(0, path.lastIndexOf("/")) || "/", items, truncated: false });
@@ -35,6 +35,44 @@ describe("Filemanager directorybrowser", () => {
     expect(router.currentRoute.value.path).toBe('/site-b'); w.unmount();
   });
   beforeEach(() => { vi.resetAllMocks(); api.getSettings.mockResolvedValue({ scanConcurrency: 4, filePreviewMode: "normal", markdownPreviewMode: "raw" }); });
+
+  it("downloads one server file directly and keeps the selection after a bulk archive", async () => {
+    const items = [file("index.php", "/index.php"), directory("wp-content", "/wp-content")];
+    api.listFilemanagerDirectory.mockResolvedValue(listing("/", items));
+    api.downloadFilemanagerItems.mockResolvedValueOnce({ fileName: "index.php", bytes: 12, archived: false, savedTo: "C:\\Downloads\\index.php" }).mockResolvedValueOnce({ fileName: "filemanager-download.zip", bytes: 20, archived: true, savedTo: "C:\\Downloads\\filemanager-download.zip" });
+    const wrapper = create(); await flushPromises();
+    await wrapper.get('[aria-label="Download index.php"]').trigger("click"); await flushPromises();
+    expect(api.downloadFilemanagerItems).toHaveBeenCalledWith("site-a", "token-a", { directory: "/", items: [{ path: "/index.php", expectedKind: "file" }] });
+    expect(wrapper.text()).toContain("Download opgeslagen");
+    await wrapper.get('[aria-label="Selecteer alle items in deze map"]').setValue(true);
+    await wrapper.findAll(".filemanager-bulk-toolbar button").find((button) => button.text().includes("Downloaden"))!.trigger("click"); await flushPromises();
+    expect(api.downloadFilemanagerItems).toHaveBeenLastCalledWith("site-a", "token-a", { directory: "/", items: [{ path: "/index.php", expectedKind: "file" }, { path: "/wp-content", expectedKind: "directory" }] });
+    expect(wrapper.text()).toContain("2 items geselecteerd");
+    expect(wrapper.text()).toContain("filemanager-download.zip");
+  });
+
+  it("shows download failures and disables duplicate requests while saving", async () => {
+    api.listFilemanagerDirectory.mockResolvedValue(listing("/", [file("large.bin", "/large.bin", "bin")]));
+    let reject!: (reason: unknown) => void;
+    api.downloadFilemanagerItems.mockReturnValue(new Promise((_resolve, rejected) => { reject = rejected; }));
+    const wrapper = create(); await flushPromises();
+    await wrapper.get('[aria-label="Download large.bin"]').trigger("click"); await flushPromises();
+    expect(wrapper.text()).toContain("Download voorbereiden");
+    expect(wrapper.get('[aria-label="Download large.bin"]').attributes("disabled")).toBeDefined();
+    reject({ category: "filemanager_download_write_failed", userMessage: "Onvoldoende schijfruimte." }); await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toContain("Onvoldoende schijfruimte");
+  });
+
+  it("downloads one directory as an archive and reports a server read failure", async () => {
+    api.listFilemanagerDirectory.mockResolvedValue(listing("/", [directory("wp-content", "/wp-content")]));
+    api.downloadFilemanagerItems.mockResolvedValueOnce({ fileName: "wp-content.zip", bytes: 12, archived: true, savedTo: "C:\\Downloads\\wp-content.zip" }).mockRejectedValueOnce({ category: "filemanager_file_read_failed", userMessage: "Een bestand kon niet worden gelezen." });
+    const wrapper = create(); await flushPromises();
+    await wrapper.get('[aria-label="Download wp-content"]').trigger("click"); await flushPromises();
+    expect(api.downloadFilemanagerItems).toHaveBeenCalledWith("site-a", "token-a", { directory: "/", items: [{ path: "/wp-content", expectedKind: "directory" }] });
+    expect(wrapper.text()).toContain("wp-content.zip");
+    await wrapper.get('[aria-label="Download wp-content"]').trigger("click"); await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toContain("Een bestand kon niet worden gelezen");
+  });
 
   it("selects the current listing, clears selection on navigation and changes one item's permissions", async () => {
     const items = [directory("uploads", "/uploads"), file("index.php", "/index.php")];

@@ -37,3 +37,4 @@ export type FilemanagerMutationKind = "file" | "directory" | "symlink";
 export interface FilemanagerMutationResult { path: string; name: string; kind: FilemanagerMutationKind; }
 export interface FilemanagerBulkItem { path: string; expectedKind: FilemanagerMutationKind; }
 export interface FilemanagerBulkResult { requested: number; succeeded: number; failed: number; failures: { path: string; reason: string }[]; }
+export interface FilemanagerDownloadResult { fileName: string; bytes: number; archived: boolean; savedTo: string | null; }

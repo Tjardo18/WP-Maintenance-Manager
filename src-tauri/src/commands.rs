@@ -42,6 +42,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use zeroize::Zeroizing;
 
@@ -1095,6 +1096,63 @@ pub fn delete_filemanager_bulk(
     require_auth(&state, &session_token)?;
     require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
     Ok(result)
+}
+
+#[tauri::command(async)]
+pub fn download_filemanager_items(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    input: crate::filemanager_mutation::BulkInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::filemanager_download::DownloadResult>, AppError> {
+    require_auth(&state, &session_token)?;
+    crate::filemanager_mutation::validate_bulk(&input)?;
+    require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
+    let site = state.database.get_site(&site_id)?.site;
+    let name = crate::filemanager_download::suggested_name(&input);
+    let selected = app
+        .dialog()
+        .file()
+        .set_file_name(&name)
+        .blocking_save_file();
+    let Some(destination) = selected else {
+        return Ok(None);
+    };
+    require_auth(&state, &session_token)?;
+    require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
+    let destination = destination.into_path().map_err(|_| {
+        AppError::validation("Kies een gewone lokale bestandslocatie voor de download.")
+    })?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AppError::validation("De gekozen downloadlocatie is ongeldig."))?;
+    if !destination.is_absolute() || destination.exists() {
+        return Err(AppError::validation(
+            "Kies een nieuwe lokale bestandsnaam; bestaande bestanden worden niet overschreven.",
+        ));
+    }
+    let mut staged = tempfile::Builder::new()
+        .prefix(".wpmm-download-")
+        .tempfile_in(parent)
+        .map_err(|_| AppError::validation("De gekozen downloadmap is niet schrijfbaar."))?;
+    let mut result = state.filemanager_access.download(
+        &session_token,
+        &site,
+        &authorization_token,
+        &input,
+        staged.as_file_mut(),
+    )?;
+    staged
+        .as_file()
+        .sync_all()
+        .map_err(|_| AppError::validation("De download kon niet veilig worden weggeschreven."))?;
+    require_auth(&state, &session_token)?;
+    require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
+    staged.persist_noclobber(&destination).map_err(|_| AppError::validation("Het downloadbestand kon niet worden opgeslagen. Controleer of de naam inmiddels bestaat en of er voldoende ruimte is."))?;
+    result.saved_to = Some(destination.to_string_lossy().into_owned());
+    Ok(Some(result))
 }
 
 fn mutate_filemanager_item<T>(
