@@ -7,8 +7,11 @@ This feature is developed on `feature/filemanager`, with phase 1 on
 `feature/filemanager-phase-4-directory-browser` and phase 5 on
 `feature/filemanager-phase-5-file-preview`, followed by phase 6 on
 `feature/filemanager-phase-6-file-editing`, followed by phase 7 on
-`feature/filemanager-phase-7-create-delete`. It must not be merged into `main`
+`feature/filemanager-phase-7-create-delete`, followed by phase 8 on
+`feature/filemanager-phase-8-permissions-bulk`. It must not be merged into `main`
 without a later explicit instruction. The application version is unchanged.
+Phase 8 permission and bulk safety rules are in
+[`FILEMANAGER_PERMISSIONS_BULK.md`](FILEMANAGER_PERMISSIONS_BULK.md).
 
 ## Existing architecture and reuse
 

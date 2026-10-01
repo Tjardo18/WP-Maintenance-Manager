@@ -71,6 +71,17 @@ describe("Filemanager directorybrowser", () => {
     expect(wrapper.text()).toContain("Geen schrijfrechten");
   });
 
+  it("drops selection when switching websites in the same browser instance", async () => {
+    api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", [file("a.php", "/a.php")])).mockResolvedValueOnce(listing("/", [file("b.php", "/b.php")]));
+    const wrapper = create(); await flushPromises();
+    await wrapper.get('[aria-label="Selecteer a.php"]').setValue(true);
+    expect(wrapper.text()).toContain("1 item geselecteerd");
+    await wrapper.setProps({ context: { siteId: "site-b", siteName: "Website B", siteUrl: "https://b.test" }, authorizationToken: "token-b" }); await flushPromises();
+    expect(api.listFilemanagerDirectory).toHaveBeenLastCalledWith("site-b", "token-b", "/");
+    expect(wrapper.text()).toContain("b.php");
+    expect(wrapper.text()).not.toContain("1 item geselecteerd");
+  });
+
   it("creates a file in the current directory, refreshes and opens it", async () => {
     api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", [directory("wp-content", "/wp-content")])).mockResolvedValueOnce(listing("/wp-content", [])).mockResolvedValueOnce(listing("/wp-content", [file("test.php", "/wp-content/test.php")]));
     api.createFilemanagerFile.mockResolvedValue({ path: "/wp-content/test.php", name: "test.php", kind: "file" });

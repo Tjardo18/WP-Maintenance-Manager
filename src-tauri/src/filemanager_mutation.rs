@@ -197,12 +197,29 @@ fn bulk_apply(
     for item in &input.items {
         let path = VirtualPath::parse(&item.path)?;
         let name = path.as_str().rsplit('/').next().unwrap_or_default();
-        child(remote, root, &input.directory, name)?;
+        let (_, absolute, _) = child(remote, root, &input.directory, name)?;
         if mode.is_some() && item.expected_kind == ItemKind::Symlink {
             return Err(failure(
                 "filemanager_symlink_blocked",
                 "Symlinks kunnen niet in een permissionactie worden opgenomen.",
             ));
+        }
+        if mode.is_some() {
+            match remote.lstat(&absolute) {
+                Ok(stat) if matches!(actual_kind(stat.perm), Ok(ItemKind::Symlink)) => {
+                    return Err(failure(
+                        "filemanager_symlink_blocked",
+                        "Permissions van symlinks kunnen niet veilig worden gewijzigd.",
+                    ));
+                }
+                Err(error)
+                    if error.category != "filemanager_directory_missing"
+                        && error.category != "filemanager_item_missing" =>
+                {
+                    return Err(error);
+                }
+                _ => {}
+            }
         }
     }
     let mut result = BulkResult {
@@ -720,5 +737,61 @@ mod tests {
         let result = change_permissions_bulk(&mut r, "/srv/site/root", &chmod).unwrap();
         assert_eq!((result.succeeded, result.failed), (1, 1));
         assert_eq!(r.nodes["/srv/site/root/current/b.php"], 0o100755);
+
+        r.nodes
+            .insert("/srv/site/root/current/link".into(), 0o120777);
+        let forged = BulkPermissionInput {
+            directory: "/current".into(),
+            items: vec![
+                DeleteInput {
+                    path: "/current/b.php".into(),
+                    expected_kind: ItemKind::File,
+                },
+                DeleteInput {
+                    path: "/current/link".into(),
+                    expected_kind: ItemKind::File,
+                },
+            ],
+            mode: "600".into(),
+        };
+        assert!(change_permissions_bulk(&mut r, "/srv/site/root", &forged).is_err());
+        assert_eq!(r.nodes["/srv/site/root/current/b.php"], 0o100755);
+    }
+
+    #[test]
+    fn bulk_delete_keeps_non_empty_directory_and_symlink_target_intact() {
+        let mut r = remote();
+        r.nodes
+            .insert("/srv/site/root/current/old.php".into(), 0o100644);
+        r.nodes
+            .insert("/srv/site/root/current/full".into(), 0o040755);
+        r.nodes
+            .insert("/srv/site/root/current/link".into(), 0o120777);
+        r.children.insert("/srv/site/root/current/full".into());
+        let result = delete_bulk(
+            &mut r,
+            "/srv/site/root",
+            &BulkInput {
+                directory: "/current".into(),
+                items: vec![
+                    DeleteInput {
+                        path: "/current/old.php".into(),
+                        expected_kind: ItemKind::File,
+                    },
+                    DeleteInput {
+                        path: "/current/full".into(),
+                        expected_kind: ItemKind::Directory,
+                    },
+                    DeleteInput {
+                        path: "/current/link".into(),
+                        expected_kind: ItemKind::Symlink,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        assert_eq!((result.succeeded, result.failed), (2, 1));
+        assert!(r.nodes.contains_key("/srv/site/root/current/full"));
+        assert!(!r.nodes.contains_key("/srv/site/root/current/link"));
     }
 }
