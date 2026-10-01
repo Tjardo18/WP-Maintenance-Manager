@@ -2,7 +2,8 @@
 use crate::{
     error::AppError,
     filemanager_paths::{
-        RemotePaths, ResolvedDirectory, VirtualPath, resolve_directory, validate_name,
+        MAX_PATH_BYTES, RemotePaths, ResolvedDirectory, VirtualPath, invalid_path,
+        resolve_directory, validate_name,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -193,11 +194,17 @@ fn bulk_apply(
     if let Some(mode) = mode {
         parse_mode(mode)?;
     }
-    // Resolve every parent and reject unsafe paths/symlinks before any mutation.
+    // Every target is a validated direct child of this one resolved directory.
+    let parent = resolve_directory(remote, root, &input.directory)?;
+    parent.revalidate(remote)?;
     for item in &input.items {
         let path = VirtualPath::parse(&item.path)?;
         let name = path.as_str().rsplit('/').next().unwrap_or_default();
-        let (_, absolute, _) = child(remote, root, &input.directory, name)?;
+        validate_name(name)?;
+        let absolute = format!("{}/{}", parent.absolute().trim_end_matches('/'), name);
+        if absolute.len() > MAX_PATH_BYTES {
+            return Err(invalid_path());
+        }
         if mode.is_some() && item.expected_kind == ItemKind::Symlink {
             return Err(failure(
                 "filemanager_symlink_blocked",
@@ -318,6 +325,9 @@ fn child(
     let parent = resolve_directory(remote, root, directory)?;
     let relative = parent.relative().child(name)?;
     let absolute = format!("{}/{}", parent.absolute().trim_end_matches('/'), name);
+    if absolute.len() > MAX_PATH_BYTES {
+        return Err(invalid_path());
+    }
     Ok((parent, absolute, relative))
 }
 

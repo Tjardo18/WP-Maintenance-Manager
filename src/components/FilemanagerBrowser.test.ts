@@ -82,6 +82,33 @@ describe("Filemanager directorybrowser", () => {
     expect(wrapper.text()).not.toContain("1 item geselecteerd");
   });
 
+  it("ignores an in-flight listing from the previous website", async () => {
+    let finishOld!: (value: FilemanagerDirectoryListing) => void;
+    api.listFilemanagerDirectory.mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve; })).mockResolvedValueOnce(listing("/", [file("b.php", "/b.php")]));
+    const wrapper = create();
+    await wrapper.setProps({ context: { siteId: "site-b", siteName: "Website B", siteUrl: "https://b.test" }, authorizationToken: "token-b" });
+    await flushPromises();
+    finishOld(listing("/", [file("a.php", "/a.php")])); await flushPromises();
+    expect(wrapper.text()).toContain("b.php");
+    expect(wrapper.text()).not.toContain("a.php");
+  });
+
+  it("does not bulk-delete an open file with unsaved edits without the discard guard", async () => {
+    api.listFilemanagerDirectory.mockResolvedValue(listing("/", [file("edit.php", "/edit.php")]));
+    api.readFilemanagerFile.mockResolvedValue({ fileName: "edit.php", relativePath: "/edit.php", sizeBytes: 3, fileType: "php", extension: "php", textContent: "old", binary: false, truncated: false, editVersion: "a".repeat(64) });
+    const wrapper = create(); await flushPromises();
+    await wrapper.get('[aria-label="Bekijk edit.php"]').trigger("click"); await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "Bewerken")!.trigger("click");
+    await wrapper.get("textarea").setValue("unsaved");
+    await wrapper.get('[aria-label="Selecteer edit.php"]').setValue(true);
+    await wrapper.get(".filemanager-bulk-toolbar .button.danger").trigger("click");
+    await wrapper.get('[aria-label="Geselecteerde items verwijderen?"] .button.danger').trigger("click"); await flushPromises();
+    expect(wrapper.text()).toContain("Wijzigingen verwerpen?");
+    expect(api.deleteFilemanagerBulk).not.toHaveBeenCalled();
+    await wrapper.get('[aria-label="Wijzigingen verwerpen?"] .button.secondary').trigger("click"); await flushPromises();
+    expect(api.deleteFilemanagerBulk).not.toHaveBeenCalled();
+  });
+
   it("creates a file in the current directory, refreshes and opens it", async () => {
     api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", [directory("wp-content", "/wp-content")])).mockResolvedValueOnce(listing("/wp-content", [])).mockResolvedValueOnce(listing("/wp-content", [file("test.php", "/wp-content/test.php")]));
     api.createFilemanagerFile.mockResolvedValue({ path: "/wp-content/test.php", name: "test.php", kind: "file" });
