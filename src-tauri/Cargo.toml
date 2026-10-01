@@ -38,9 +38,11 @@ sha2 = "0.11"
 ssh2 = "0.9.6"
 subtle = "2.6"
 thiserror = "2"
+tempfile = "3"
 url = "2"
 uuid = { version = "1.25", features = ["v4", "serde"] }
 zeroize = "1.8"
+zip = { version = "8.6", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }

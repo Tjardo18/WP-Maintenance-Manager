@@ -189,6 +189,22 @@ pub(crate) fn delete_filemanager_bulk(
     })
 }
 
+pub(crate) fn write_filemanager_download<W: std::io::Write + std::io::Seek>(
+    session: &Session,
+    root: &str,
+    input: &crate::filemanager_mutation::BulkInput,
+    output: &mut W,
+) -> Result<crate::filemanager_download::DownloadResult, AppError> {
+    session.set_timeout(5_000);
+    let sftp = session.sftp().map_err(filemanager_sftp_error)?;
+    let mut remote = FilemanagerSftp {
+        session,
+        sftp,
+        deadline: Instant::now() + crate::filemanager_download::DOWNLOAD_TIMEOUT,
+    };
+    crate::filemanager_download::write_download(&mut remote, root, input, output)
+}
+
 fn mutate_filemanager<T>(
     session: &Session,
     _root: &str,
@@ -539,6 +555,57 @@ impl crate::filemanager_mutation::MutationTransport for FilemanagerSftp<'_> {
                 filemanager_file_error(error)
             }
         })
+    }
+}
+
+impl crate::filemanager_download::DownloadTransport for FilemanagerSftp<'_> {
+    fn copy_file(
+        &mut self,
+        target: &crate::filemanager_paths::ResolvedFile,
+        sink: &mut dyn std::io::Write,
+        budget: &mut crate::filemanager_download::Budget,
+    ) -> Result<u64, AppError> {
+        self.before_call()?;
+        let mut source = self
+            .sftp
+            .open(Path::new(target.absolute()))
+            .map_err(filemanager_file_error)?;
+        let opened = source.stat().map_err(filemanager_file_error)?;
+        if !crate::filemanager_paths::same_file_snapshot(target.stat(), &opened) {
+            return Err(filemanager_file_changed());
+        }
+        target.revalidate(self)?;
+        let mut copied = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            self.before_call()?;
+            budget.check()?;
+            let count = source.read(&mut buffer).map_err(|_| {
+                AppError::unauthorized(
+                    "filemanager_file_read_failed",
+                    "De download is onderbroken tijdens het lezen van de server.",
+                )
+            })?;
+            if count == 0 {
+                break;
+            }
+            budget.add_bytes(count)?;
+            sink.write_all(&buffer[..count]).map_err(|_| {
+                AppError::unauthorized(
+                    "filemanager_download_write_failed",
+                    "Het lokale downloadbestand kon niet volledig worden geschreven.",
+                )
+            })?;
+            copied += count as u64;
+        }
+        let final_stat = source.stat().map_err(filemanager_file_error)?;
+        if final_stat.size != Some(copied)
+            || !crate::filemanager_paths::same_file_snapshot(&opened, &final_stat)
+        {
+            return Err(filemanager_file_changed());
+        }
+        target.revalidate(self)?;
+        Ok(copied)
     }
 }
 

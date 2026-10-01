@@ -12,6 +12,7 @@ mod error;
 mod error_log;
 mod filemanager;
 mod filemanager_directory;
+mod filemanager_download;
 mod filemanager_edit;
 mod filemanager_file;
 mod filemanager_mutation;
@@ -113,6 +114,7 @@ pub fn run() {
             commands::change_filemanager_permissions,
             commands::change_filemanager_permissions_bulk,
             commands::delete_filemanager_bulk,
+            commands::download_filemanager_items,
             commands::close_filemanager,
             commands::save_site,
             commands::delete_site,
