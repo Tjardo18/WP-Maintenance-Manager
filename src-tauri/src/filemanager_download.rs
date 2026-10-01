@@ -391,10 +391,11 @@ mod tests {
                 .chain(self.files.keys())
                 .chain(self.links.iter())
             {
-                if let Some(name) = candidate.strip_prefix(&prefix) {
-                    if !name.is_empty() && !name.contains('/') {
-                        entries.push_back((name.into(), self.stat(candidate)?));
-                    }
+                if let Some(name) = candidate.strip_prefix(&prefix)
+                    && !name.is_empty()
+                    && !name.contains('/')
+                {
+                    entries.push_back((name.into(), self.stat(candidate)?));
                 }
             }
             Ok(entries)
