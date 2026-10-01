@@ -106,4 +106,22 @@ describe("filemanager two-password gate", () => {
     expect(api.closeFilemanager).toHaveBeenCalledWith("site-a", "challenge-a");
     wrapper.unmount();
   });
+
+  it("revokes timed-out access but keeps an unsaved draft until confirmed discarded", async () => {
+    vi.useFakeTimers();
+    api.listFilemanagerDirectory.mockResolvedValue({ currentPath: '/', isRoot: true, parentPath: null, items: [{ name: 'a.php', path: '/a.php', kind: 'file', size: 3, extension: 'php', permissions: '644', modifiedAt: null }], truncated: false });
+    api.readFilemanagerFile.mockResolvedValue({ fileName: 'a.php', relativePath: '/a.php', fileType: 'php', sizeBytes: 3, textContent: 'old', binary: false, truncated: false, editVersion: 'a'.repeat(64) });
+    const w = create(); await submit(w); await submit(w);
+    await w.get('[aria-label="Bekijk a.php"]').trigger('click'); await flushPromises();
+    await w.findAll('button').find((b) => b.text() === 'Bewerken')!.trigger('click');
+    await w.get('textarea').setValue('draft');
+    await vi.advanceTimersByTimeAsync(899000);
+    expect(api.closeFilemanager).toHaveBeenCalledWith('site-a', 'challenge-a');
+    expect((w.get('textarea').element as HTMLTextAreaElement).value).toBe('draft');
+    expect(w.text()).toContain('verlopen');
+    await w.findAll('button').find((b) => b.text() === 'Opnieuw verifiëren')!.trigger('click'); await flushPromises();
+    expect(w.text()).toContain('Wijzigingen verwerpen?');
+    await w.findAll('button').find((b) => b.text() === 'Verwerpen')!.trigger('click'); await flushPromises();
+    expect(w.text()).toContain('App-wachtwoord vereist'); w.unmount();
+  });
 });

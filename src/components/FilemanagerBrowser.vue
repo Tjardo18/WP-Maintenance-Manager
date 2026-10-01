@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
+import { routerKey } from "vue-router";
 import { AlertTriangle, ArrowLeft, ChevronUp, Eye, File, FileArchive, FileCode2, FileQuestion, Folder, FolderOpen, LoaderCircle, RefreshCw } from "@lucide/vue";
 import type { FilePreviewMode, MarkdownPreviewMode } from "../types";
 import type { FilemanagerContext, FilemanagerDirectoryItem, FilemanagerDirectoryListing, FilemanagerFilePreview } from "../types/filemanager";
@@ -18,6 +19,11 @@ const history = ref<string[]>([]);
 let requestId = 0;
 let previewRequestId = 0;
 const preview = ref<FilemanagerFilePreview>();
+const previewComponent = ref<InstanceType<typeof ChecksumFilePreview>>();
+const router = inject(routerKey, undefined);
+const removeNavigationGuard = router?.beforeEach(async () => await previewComponent.value?.requestLeave() ?? true);
+async function requestLeave() { return await previewComponent.value?.requestLeave() ?? true; }
+defineExpose({ requestLeave, hasUnsavedChanges: () => previewComponent.value?.hasUnsavedChanges() ?? false });
 const previewLoadingPath = ref<string>();
 const previewError = ref<string>();
 const filePreviewMode = ref<FilePreviewMode>("normal");
@@ -33,6 +39,10 @@ function itemIcon(item: FilemanagerDirectoryItem) { return item.kind === "direct
 
 async function load(path: string, source: "normal" | "back" | "refresh" = "normal") {
   if (loading.value && source !== "refresh") return;
+  if (preview.value) {
+    if (!(await previewComponent.value?.requestLeave() ?? true)) return;
+  }
+  closePreview();
   const request = ++requestId;
   loading.value = true; error.value = undefined;
   try {
@@ -52,6 +62,7 @@ async function load(path: string, source: "normal" | "back" | "refresh" = "norma
 function openDirectory(item: FilemanagerDirectoryItem) { if (item.kind === "directory") void load(item.path); }
 async function openFile(item: FilemanagerDirectoryItem) {
   if (item.kind !== "file" || previewLoadingPath.value === item.path) return;
+  if (!(await previewComponent.value?.requestLeave() ?? true)) return;
   const request = ++previewRequestId;
   previewLoadingPath.value = item.path;
   previewError.value = undefined;
@@ -69,6 +80,27 @@ async function openFile(item: FilemanagerDirectoryItem) {
   }
 }
 function closePreview() { previewRequestId += 1; preview.value = undefined; previewLoadingPath.value = undefined; previewError.value = undefined; }
+async function saveFile(content: string, expectedVersion: string) {
+  const path = preview.value?.relativePath;
+  const request = previewRequestId;
+  if (!path) throw new Error("Open het bestand opnieuw.");
+  const result = await appApi.saveFilemanagerFile(props.context.siteId, props.authorizationToken, { path, content, expectedVersion });
+  if (request !== previewRequestId || result.relativePath !== path) throw new Error("De bestandscontext is gewijzigd. Open het bestand opnieuw.");
+  return result;
+}
+function fileSaved(result: FilemanagerFilePreview) {
+  if (preview.value?.relativePath !== result.relativePath) return;
+  preview.value = result;
+  const item = listing.value?.items.find((entry) => entry.path === result.relativePath);
+  if (item) { item.size = result.sizeBytes; item.modifiedAt = result.modifiedAt ?? null; }
+}
+async function reloadFile() {
+  const path = preview.value?.relativePath;
+  const request = previewRequestId;
+  if (!path) return;
+  const result = await appApi.readFilemanagerFile(props.context.siteId, props.authorizationToken, path);
+  if (request === previewRequestId && result.relativePath === path) fileSaved(result);
+}
 function goBack() { const path = history.value[history.value.length - 1]; if (path) void load(path, "back"); }
 function goUp() { if (listing.value?.parentPath) void load(listing.value.parentPath); }
 onMounted(() => {
@@ -78,7 +110,7 @@ onMounted(() => {
     markdownPreviewMode.value = settings.markdownPreviewMode;
   }).catch(() => undefined);
 });
-onBeforeUnmount(() => { requestId += 1; previewRequestId += 1; });
+onBeforeUnmount(() => { removeNavigationGuard?.(); requestId += 1; previewRequestId += 1; });
 </script>
 
 <template>
@@ -89,7 +121,7 @@ onBeforeUnmount(() => { requestId += 1; previewRequestId += 1; });
     <div v-if="previewLoadingPath" class="filemanager-preview-loading" role="status"><LoaderCircle class="spin" :size="18" /><span><strong>Bestand laden…</strong><code>{{ previewLoadingPath }}</code></span></div>
     <div v-if="loading" class="empty-state compact" role="status"><LoaderCircle class="spin" :size="32" /><h3>Map laden…</h3><p>De beveiligde directorylisting wordt opgehaald.</p></div><div v-else-if="listing && !listing.items.length" class="empty-state compact"><FolderOpen :size="35" /><h3>Deze map is leeg</h3><p>Er zijn geen bestanden of mappen in {{ listing.currentPath }}.</p></div>
     <div v-else-if="listing" class="filemanager-table-scroll"><table class="filemanager-table"><thead><tr><th>Naam</th><th>Type</th><th>Grootte</th><th>Permissions</th><th>Gewijzigd</th></tr></thead><tbody><tr v-for="item in listing.items" :key="item.path" :class="{ directory: item.kind === 'directory', file: item.kind === 'file' }"><td><button v-if="item.kind === 'directory'" type="button" class="filemanager-name-button" :disabled="loading" :title="`Open ${item.name}`" @click="openDirectory(item)"><component :is="itemIcon(item)" :size="18" /><strong>{{ item.name }}</strong></button><button v-else-if="item.kind === 'file'" type="button" class="filemanager-name-button file" :aria-label="`Bekijk ${item.name}`" :title="`Bekijk ${item.name}`" @click="openFile(item)"><component :is="itemIcon(item)" :size="18" /><strong>{{ item.name }}</strong><Eye :size="14" class="filemanager-preview-icon" /></button><div v-else class="filemanager-name"><component :is="itemIcon(item)" :size="18" /><strong :title="item.name">{{ item.name }}</strong></div></td><td>{{ typeLabel(item) }}</td><td>{{ formatBytes(item.size) }}</td><td><code>{{ item.permissions ?? '—' }}</code></td><td>{{ item.modifiedAt ? formatDate(item.modifiedAt) : '—' }}</td></tr></tbody></table></div>
-    <ChecksumFilePreview v-if="preview" :preview="preview" :default-fullscreen="filePreviewMode === 'fullscreen'" :default-markdown-mode="markdownPreviewMode" close-label="Terug naar map" @close="closePreview" />
+    <ChecksumFilePreview v-if="preview" ref="previewComponent" :preview="preview" :save-file="saveFile" :reload-file="reloadFile" :default-fullscreen="filePreviewMode === 'fullscreen'" :default-markdown-mode="markdownPreviewMode" close-label="Terug naar map" @saved="fileSaved" @close="closePreview" />
   </section>
 </template>
 

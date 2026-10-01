@@ -191,6 +191,10 @@ export const systemInputApi = {
 };
 
 export const appApi = {
+  async saveFilemanagerFile(siteId: string, authorizationToken: string, input: { path: string; content: string; expectedVersion: string }): Promise<FilemanagerFilePreview> {
+    if (!isTauri()) throw new Error("De filemanager is alleen beschikbaar in de desktopapp.");
+    return call("save_filemanager_file", { siteId, authorizationToken, input });
+  },
   async listFilemanagerDirectory(siteId: string, authorizationToken: string, requestedPath = "/"): Promise<FilemanagerDirectoryListing> {
     if (!isTauri()) throw new Error("De filemanager is alleen beschikbaar in de desktopapp.");
     return call("list_filemanager_directory", { siteId, authorizationToken, requestedPath });

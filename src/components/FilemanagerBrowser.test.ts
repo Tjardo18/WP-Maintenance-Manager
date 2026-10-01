@@ -2,8 +2,9 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import FilemanagerBrowser from "./FilemanagerBrowser.vue";
 import type { FilemanagerDirectoryListing } from "../types/filemanager";
+import { createMemoryHistory, createRouter } from "vue-router";
 
-const api = vi.hoisted(() => ({ listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), getSettings: vi.fn() }));
+const api = vi.hoisted(() => ({ listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), saveFilemanagerFile: vi.fn(), getSettings: vi.fn() }));
 vi.mock("../services/tauri", () => ({ appApi: api }));
 const context = { siteId: "site-a", siteName: "Website A", siteUrl: "https://a.test" };
 const listing = (path: string, items: FilemanagerDirectoryListing["items"] = []): FilemanagerDirectoryListing => ({ currentPath: path, isRoot: path === "/", parentPath: path === "/" ? null : path.slice(0, path.lastIndexOf("/")) || "/", items, truncated: false });
@@ -12,6 +13,27 @@ const file = (name: string, path: string, extension: string | null = "php") => (
 const create = () => mount(FilemanagerBrowser, { props: { context, authorizationToken: "token-a" } });
 
 describe("Filemanager directorybrowser", () => {
+  it("saves with site-bound credentials, updates the preview and guards route changes", async () => {
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/:site', component: { template: '<div />' } }] });
+    await router.push('/site-a');
+    api.listFilemanagerDirectory.mockResolvedValue(listing('/', [file('edit.php', '/edit.php')]));
+    const source = { fileName: 'edit.php', relativePath: '/edit.php', sizeBytes: 3, fileType: 'php', extension: 'php', textContent: 'old', binary: false, truncated: false, editVersion: 'a'.repeat(64) };
+    api.readFilemanagerFile.mockResolvedValue(source);
+    api.saveFilemanagerFile.mockResolvedValue({ ...source, textContent: 'new', editVersion: 'b'.repeat(64) });
+    const w = mount(FilemanagerBrowser, { props: { context, authorizationToken: 'token-a' }, global: { plugins: [router] } });
+    await flushPromises(); await w.get('[aria-label="Bekijk edit.php"]').trigger('click'); await flushPromises();
+    const click = async (text: string) => { await w.findAll('button').find((b) => b.text() === text)!.trigger('click'); await flushPromises(); };
+    await click('Bewerken'); await w.get('textarea').setValue('new'); await click('Opslaan');
+    expect(api.saveFilemanagerFile).toHaveBeenCalledWith('site-a', 'token-a', { path: '/edit.php', content: 'new', expectedVersion: source.editVersion });
+    expect(w.get('.file-preview-code').text()).toBe('new');
+    await click('Bewerken'); await w.get('textarea').setValue('unsaved');
+    const blocked = router.push('/site-b'); await flushPromises();
+    expect(w.text()).toContain('Wijzigingen verwerpen?');
+    await w.get('[aria-label="Wijzigingen verwerpen?"] .button.secondary').trigger('click'); await blocked;
+    expect(router.currentRoute.value.path).toBe('/site-a');
+    const allowed = router.push('/site-b'); await flushPromises(); await click('Verwerpen'); await allowed;
+    expect(router.currentRoute.value.path).toBe('/site-b'); w.unmount();
+  });
   beforeEach(() => { vi.resetAllMocks(); api.getSettings.mockResolvedValue({ scanConcurrency: 4, filePreviewMode: "normal", markdownPreviewMode: "raw" }); });
 
   it("loads the root once and shows directory and file metadata", async () => {

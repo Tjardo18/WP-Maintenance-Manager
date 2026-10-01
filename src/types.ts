@@ -115,7 +115,7 @@ export type TrustedFileStatus = "trusted" | "changed" | "missing" | "unchecked";
 export interface TrustedFile { id: string; siteId: string; siteName: string; relativePath: string; trustedSha256: string; currentSha256?: string; sizeBytes: number; currentSizeBytes?: number; modifiedAtSnapshot?: string; currentModifiedAt?: string; fileType: string; status: TrustedFileStatus; trustedAt: string; lastCheckedAt?: string; note?: string; active: boolean }
 export interface TrustedFileInput { siteId: string; findingId: string; note?: string }
 export interface SecurityPolicyMutationResult { scan?: ScanResult; findingException?: FindingException; trustedFile?: TrustedFile }
-export interface FileContentPreview { fileName: string; relativePath: string; sizeBytes: number; modifiedAt?: string; fileType: string; extension?: string; textContent?: string; imageMimeType?: string; imageDataBase64?: string; rawDataBase64?: string; binary: boolean; truncated: boolean }
+export interface FileContentPreview { editVersion?: string; fileName: string; relativePath: string; sizeBytes: number; modifiedAt?: string; fileType: string; extension?: string; textContent?: string; imageMimeType?: string; imageDataBase64?: string; rawDataBase64?: string; binary: boolean; truncated: boolean }
 export interface FilePreview extends FileContentPreview { finding: Finding }
 export interface ChecksumDeleteFailure { findingId: string; path?: string; error: TechnicalError }
 export interface ChecksumDeleteResult { requested: number; deleted: number; deletedPaths: string[]; failures: ChecksumDeleteFailure[]; scan?: ScanResult; rescanError?: TechnicalError }

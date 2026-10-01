@@ -7,7 +7,7 @@ import type { FilemanagerContext } from "../types/filemanager";
 const api = vi.hoisted(() => ({ getFilemanagerContext: vi.fn(), beginFilemanagerReauthentication: vi.fn(), openFilemanager: vi.fn(), getFilemanagerAuthorization: vi.fn(), closeFilemanager: vi.fn(), listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), getSettings: vi.fn() }));
 const route = reactive({ params: { id: "site-a" } });
 vi.mock("../services/tauri", () => ({ appApi: api }));
-vi.mock("vue-router", () => ({ useRoute: () => route, RouterLink: { props: ["to"], template: '<a :href="to"><slot /></a>' } }));
+vi.mock("vue-router", async (importOriginal) => ({ ...await importOriginal<typeof import("vue-router")>(), useRoute: () => route, RouterLink: { props: ["to"], template: '<a :href="to"><slot /></a>' } }));
 const context = (id: string): FilemanagerContext => ({ siteId: id, siteName: id, siteUrl: `https://${id}.test` });
 
 describe("Filemanager website context", () => {

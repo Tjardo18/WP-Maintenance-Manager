@@ -62,6 +62,16 @@ describe("Tauri authentication boundary", () => {
     expect(invokeMock).toHaveBeenCalledTimes(1);
   });
 
+  it("sends source as authenticated structured input, never a shell command or URL", async () => {
+    const input = { path: "/my plugin.php", content: "<?php echo '$HOME ; 中文';", expectedVersion: "a".repeat(64) };
+    invokeMock.mockResolvedValueOnce({ textContent: input.content });
+    await appApi.saveFilemanagerFile("site-a", "access-a", input);
+    expect(invokeMock).toHaveBeenCalledWith("save_filemanager_file", { siteId: "site-a", authorizationToken: "access-a", input, sessionToken: "active-app-session" });
+    authApi.setSessionToken();
+    await expect(appApi.saveFilemanagerFile("site-a", "access-a", input)).rejects.toMatchObject({ category: "locked" });
+    expect(invokeMock).toHaveBeenCalledOnce();
+  });
+
   it("uses dedicated site-bound filemanager endpoints and requires the app session on each", async () => {
     const password = crypto.randomUUID();
     const token = crypto.randomUUID();
