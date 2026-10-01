@@ -4,7 +4,7 @@ import FilemanagerBrowser from "./FilemanagerBrowser.vue";
 import type { FilemanagerDirectoryListing } from "../types/filemanager";
 import { createMemoryHistory, createRouter } from "vue-router";
 
-const api = vi.hoisted(() => ({ listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), saveFilemanagerFile: vi.fn(), getSettings: vi.fn() }));
+const api = vi.hoisted(() => ({ listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), saveFilemanagerFile: vi.fn(), createFilemanagerFile: vi.fn(), createFilemanagerDirectory: vi.fn(), deleteFilemanagerItem: vi.fn(), getSettings: vi.fn() }));
 vi.mock("../services/tauri", () => ({ appApi: api }));
 const context = { siteId: "site-a", siteName: "Website A", siteUrl: "https://a.test" };
 const listing = (path: string, items: FilemanagerDirectoryListing["items"] = []): FilemanagerDirectoryListing => ({ currentPath: path, isRoot: path === "/", parentPath: path === "/" ? null : path.slice(0, path.lastIndexOf("/")) || "/", items, truncated: false });
@@ -35,6 +35,33 @@ describe("Filemanager directorybrowser", () => {
     expect(router.currentRoute.value.path).toBe('/site-b'); w.unmount();
   });
   beforeEach(() => { vi.resetAllMocks(); api.getSettings.mockResolvedValue({ scanConcurrency: 4, filePreviewMode: "normal", markdownPreviewMode: "raw" }); });
+
+  it("creates a file in the current directory, refreshes and opens it", async () => {
+    api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", [directory("wp-content", "/wp-content")])).mockResolvedValueOnce(listing("/wp-content", [])).mockResolvedValueOnce(listing("/wp-content", [file("test.php", "/wp-content/test.php")]));
+    api.createFilemanagerFile.mockResolvedValue({ path: "/wp-content/test.php", name: "test.php", kind: "file" });
+    api.readFilemanagerFile.mockResolvedValue({ fileName: "test.php", relativePath: "/wp-content/test.php", sizeBytes: 0, fileType: "php", extension: "php", textContent: "", binary: false, truncated: false, editVersion: "a".repeat(64) });
+    const wrapper = create(); await flushPromises(); await wrapper.get('[title="Open wp-content"]').trigger("click"); await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text().includes("Nieuw bestand"))!.trigger("click");
+    await wrapper.get("#filemanager-new-name").setValue("test.php"); await wrapper.findAll("button").find((button) => button.text() === "Aanmaken")!.trigger("click"); await flushPromises();
+    expect(api.createFilemanagerFile).toHaveBeenCalledWith("site-a", "token-a", { directory: "/wp-content", name: "test.php" });
+    expect(api.readFilemanagerFile).toHaveBeenCalledWith("site-a", "token-a", "/wp-content/test.php");
+    expect(wrapper.text()).toContain("Bestand aangemaakt."); expect(wrapper.text()).toContain("Bewerken");
+  });
+
+  it("confirms delete, refreshes after success and keeps the item on cancellation/failure", async () => {
+    const item = file("old.php", "/old.php");
+    api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", [item])).mockResolvedValueOnce(listing("/", []));
+    api.deleteFilemanagerItem.mockResolvedValue({ path: "/old.php", name: "old.php", kind: "file" });
+    const wrapper = create(); await flushPromises();
+    await wrapper.get('[aria-label="Verwijder bestand old.php"]').trigger("click");
+    expect(wrapper.text()).toContain("Weet je zeker dat je old.php wilt verwijderen?");
+    await wrapper.get('[aria-label="Bestand verwijderen?"] .button.secondary').trigger("click");
+    expect(api.deleteFilemanagerItem).not.toHaveBeenCalled();
+    await wrapper.get('[aria-label="Verwijder bestand old.php"]').trigger("click"); await wrapper.findAll("button").find((button) => button.text() === "Verwijderen")!.trigger("click"); await flushPromises();
+    expect(api.deleteFilemanagerItem).toHaveBeenCalledWith("site-a", "token-a", { path: "/old.php", expectedKind: "file" });
+    expect(wrapper.text()).toContain("Bestand verwijderd.");
+    api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", [item])); api.deleteFilemanagerItem.mockRejectedValueOnce({ category: "filemanager_directory_not_empty", userMessage: "Deze map is niet leeg." });
+  });
 
   it("loads the root once and shows directory and file metadata", async () => {
     api.listFilemanagerDirectory.mockResolvedValueOnce(listing("/", [directory("wp-content", "/wp-content"), file("index.php", "/index.php")]));
