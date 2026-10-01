@@ -159,6 +159,36 @@ pub(crate) fn delete_filemanager_item(
     })
 }
 
+pub(crate) fn change_filemanager_permissions(
+    session: &Session,
+    root: &str,
+    input: &crate::filemanager_mutation::PermissionInput,
+) -> Result<(), AppError> {
+    mutate_filemanager(session, root, |remote| {
+        crate::filemanager_mutation::change_permissions(remote, root, input)
+    })
+}
+
+pub(crate) fn change_filemanager_permissions_bulk(
+    session: &Session,
+    root: &str,
+    input: &crate::filemanager_mutation::BulkPermissionInput,
+) -> Result<crate::filemanager_mutation::BulkResult, AppError> {
+    mutate_filemanager(session, root, |remote| {
+        crate::filemanager_mutation::change_permissions_bulk(remote, root, input)
+    })
+}
+
+pub(crate) fn delete_filemanager_bulk(
+    session: &Session,
+    root: &str,
+    input: &crate::filemanager_mutation::BulkInput,
+) -> Result<crate::filemanager_mutation::BulkResult, AppError> {
+    mutate_filemanager(session, root, |remote| {
+        crate::filemanager_mutation::delete_bulk(remote, root, input)
+    })
+}
+
 fn mutate_filemanager<T>(
     session: &Session,
     _root: &str,
@@ -169,7 +199,7 @@ fn mutate_filemanager<T>(
     let mut remote = FilemanagerSftp {
         session,
         sftp,
-        deadline: Instant::now() + Duration::from_secs(20),
+        deadline: Instant::now() + Duration::from_secs(180),
     };
     operation(&mut remote)
 }
@@ -438,6 +468,22 @@ impl crate::filemanager_directory::DirectoryTransport for FilemanagerSftp<'_> {
 }
 
 impl crate::filemanager_mutation::MutationTransport for FilemanagerSftp<'_> {
+    fn set_permissions(&mut self, path: &str, mode: u32) -> Result<(), AppError> {
+        self.before_call()?;
+        self.sftp
+            .setstat(
+                Path::new(path),
+                ssh2::FileStat {
+                    size: None,
+                    uid: None,
+                    gid: None,
+                    perm: Some(mode),
+                    atime: None,
+                    mtime: None,
+                },
+            )
+            .map_err(filemanager_file_error)
+    }
     fn create_file_exclusive(&mut self, path: &str) -> Result<(), AppError> {
         self.before_call()?;
         let mut file = self
