@@ -72,6 +72,17 @@ describe("Tauri authentication boundary", () => {
     expect(invokeMock).toHaveBeenCalledOnce();
   });
 
+  it("uses site-bound structured mutations for named create and individual delete", async () => {
+    const token = "access-a";
+    invokeMock.mockResolvedValue({});
+    await appApi.createFilemanagerFile("site-a", token, { directory: "/plugins", name: "test $; 中文.php" });
+    await appApi.createFilemanagerDirectory("site-a", token, { directory: "/plugins", name: ".cache" });
+    await appApi.deleteFilemanagerItem("site-a", token, { path: "/plugins/test $; 中文.php", expectedKind: "file" });
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "create_filemanager_file", { siteId: "site-a", authorizationToken: token, input: { directory: "/plugins", name: "test $; 中文.php" }, sessionToken: "active-app-session" });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "create_filemanager_directory", { siteId: "site-a", authorizationToken: token, input: { directory: "/plugins", name: ".cache" }, sessionToken: "active-app-session" });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "delete_filemanager_item", { siteId: "site-a", authorizationToken: token, input: { path: "/plugins/test $; 中文.php", expectedKind: "file" }, sessionToken: "active-app-session" });
+  });
+
   it("uses dedicated site-bound filemanager endpoints and requires the app session on each", async () => {
     const password = crypto.randomUUID();
     const token = crypto.randomUUID();
