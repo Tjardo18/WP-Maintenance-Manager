@@ -255,6 +255,40 @@ impl FilemanagerAccessManager {
         })
     }
 
+    pub fn create_file(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        input: &crate::filemanager_mutation::CreateInput,
+    ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::create_filemanager_file(connection, &site.wordpress_path, input)
+        })
+    }
+    pub fn create_directory(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        input: &crate::filemanager_mutation::CreateInput,
+    ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::create_filemanager_directory(connection, &site.wordpress_path, input)
+        })
+    }
+    pub fn delete_item(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        input: &crate::filemanager_mutation::DeleteInput,
+    ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::delete_filemanager_item(connection, &site.wordpress_path, input)
+        })
+    }
+
     fn with_entry<T>(
         &self,
         session: &str,

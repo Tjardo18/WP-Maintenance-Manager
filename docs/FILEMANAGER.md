@@ -1,4 +1,4 @@
-# Filemanager — authentication, safe paths, browser, previews and editing
+# Filemanager — authentication, safe paths, browser, previews, editing and mutations
 
 This feature is developed on `feature/filemanager`, with phase 1 on
 `feature/filemanager-phase-1-foundation` and phase 2 on
@@ -6,7 +6,8 @@ This feature is developed on `feature/filemanager`, with phase 1 on
 `feature/filemanager-phase-3-directory-backend`, followed by phase 4 on
 `feature/filemanager-phase-4-directory-browser` and phase 5 on
 `feature/filemanager-phase-5-file-preview`, followed by phase 6 on
-`feature/filemanager-phase-6-file-editing`. It must not be merged into `main`
+`feature/filemanager-phase-6-file-editing`, followed by phase 7 on
+`feature/filemanager-phase-7-create-delete`. It must not be merged into `main`
 without a later explicit instruction. The application version is unchanged.
 
 ## Existing architecture and reuse
@@ -315,8 +316,9 @@ the full flow, permission/ownership handling, limits and live-verification steps
 Future write operations belong in `filemanager.rs`, with the established
 `ssh.rs` transport, backend-owned site context and centralized path validation.
 Do not use metadata or UI state as authorization and do not substitute stored
-credentials for the two-password gate. Creating/deleting files, permission
-controls, downloads, archives and bulk operations have not been implemented.
+credentials for the two-password gate. Phase 7 adds only named create and
+individual non-recursive delete; see [FILEMANAGER_MUTATIONS.md](FILEMANAGER_MUTATIONS.md).
+Permission controls, downloads, archives and bulk operations have not been implemented.
 
 ## Verification
 

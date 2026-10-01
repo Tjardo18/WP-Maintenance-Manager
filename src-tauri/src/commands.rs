@@ -933,6 +933,110 @@ pub fn save_filemanager_file(
 }
 
 #[tauri::command(async)]
+pub fn create_filemanager_file(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    input: crate::filemanager_mutation::CreateInput,
+    state: State<'_, AppState>,
+) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+    require_auth(&state, &session_token)?;
+    mutate_filemanager_item(
+        &state,
+        &session_token,
+        &site_id,
+        &authorization_token,
+        &input.directory,
+        |site, directory| {
+            let input = crate::filemanager_mutation::CreateInput {
+                directory: directory.into(),
+                name: input.name.clone(),
+            };
+            state
+                .filemanager_access
+                .create_file(&session_token, site, &authorization_token, &input)
+        },
+    )
+}
+
+#[tauri::command(async)]
+pub fn create_filemanager_directory(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    input: crate::filemanager_mutation::CreateInput,
+    state: State<'_, AppState>,
+) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+    require_auth(&state, &session_token)?;
+    mutate_filemanager_item(
+        &state,
+        &session_token,
+        &site_id,
+        &authorization_token,
+        &input.directory,
+        |site, directory| {
+            let input = crate::filemanager_mutation::CreateInput {
+                directory: directory.into(),
+                name: input.name.clone(),
+            };
+            state.filemanager_access.create_directory(
+                &session_token,
+                site,
+                &authorization_token,
+                &input,
+            )
+        },
+    )
+}
+
+#[tauri::command(async)]
+pub fn delete_filemanager_item(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    input: crate::filemanager_mutation::DeleteInput,
+    state: State<'_, AppState>,
+) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+    require_auth(&state, &session_token)?;
+    mutate_filemanager_item(
+        &state,
+        &session_token,
+        &site_id,
+        &authorization_token,
+        &input.path,
+        |site, path| {
+            let input = crate::filemanager_mutation::DeleteInput {
+                path: path.into(),
+                expected_kind: input.expected_kind,
+            };
+            state
+                .filemanager_access
+                .delete_item(&session_token, site, &authorization_token, &input)
+        },
+    )
+}
+
+fn mutate_filemanager_item<T>(
+    state: &AppState,
+    session: &str,
+    site_id: &str,
+    token: &str,
+    requested: &str,
+    operation: impl FnOnce(&Site, &str) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    require_auth(state, session)?;
+    require_filemanager_auth(state, session, site_id, token)?;
+    let site = state.database.get_site(site_id)?.site;
+    let requested = crate::filemanager_paths::VirtualPath::parse(requested)?;
+    let result = operation(&site, requested.as_str());
+    require_auth(state, session)?;
+    if result.is_ok() {
+        require_filemanager_auth(state, session, site_id, token)?;
+    }
+    result
+}
+
+#[tauri::command(async)]
 pub fn save_site(
     session_token: String,
     mut input: SiteInput,
