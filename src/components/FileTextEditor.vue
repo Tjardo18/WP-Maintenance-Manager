@@ -25,5 +25,5 @@ onMounted(() => input.value?.focus());
 .file-text-editor pre { flex:none;min-width:4ch;overflow:hidden;text-align:right;background:#101d18;color:#9cb2a7;border-right:1px solid #30423a;user-select:none; }
 .file-text-editor textarea { flex:1;min-width:0;width:100%;border:0;border-radius:0;background:#15221d;color:#e6f0eb;resize:none;white-space:pre;overflow:auto;overscroll-behavior:contain; }
 .file-text-editor textarea:focus { outline:2px solid #6abfa1;outline-offset:-2px; }
-:global(.preview-modal.fullscreen) .file-text-editor { flex:1 1 0;max-height:none;height:auto; }
+.preview-modal.fullscreen .file-text-editor { flex:1 1 0;max-height:none;height:auto; }
 </style>
