@@ -572,4 +572,38 @@ mod tests {
             assert!(manager.authorize(&session, &site, &token).is_err());
         }
     }
+
+    #[test]
+    fn save_rejects_other_site_and_simultaneous_writes_before_transport() {
+        let manager = FilemanagerAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        let token = manager.install_test_access(&session, &site);
+        let mut other = site.clone();
+        other.id = Uuid::new_v4().to_string();
+        let input = crate::filemanager_edit::SaveInput {
+            path: "/test.php".into(),
+            content: "text".into(),
+            expected_version: "a".repeat(64),
+        };
+        assert_eq!(
+            manager
+                .save_file(&session, &other, &token, &input, || panic!(
+                    "cross-site transport"
+                ))
+                .unwrap_err()
+                .category,
+            "filemanager_auth_required"
+        );
+        let _locked = manager.saves.lock().unwrap();
+        assert_eq!(
+            manager
+                .save_file(&session, &site, &token, &input, || panic!(
+                    "concurrent transport"
+                ))
+                .unwrap_err()
+                .category,
+            "filemanager_busy"
+        );
+    }
 }

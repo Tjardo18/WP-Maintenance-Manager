@@ -401,7 +401,7 @@ fn decode_sftp_path<T>(operation: impl FnOnce() -> Result<T, ssh2::Error>) -> Re
 fn filemanager_timeout() -> AppError {
     let mut error = AppError::unauthorized(
         "filemanager_timeout",
-        "Het ophalen van de map duurde te lang. Verbind opnieuw en probeer het nogmaals.",
+        "De filemanageractie duurde te lang. Verbind opnieuw en controleer de serverinhoud voordat je opnieuw opslaat.",
     );
     error.retryable = true;
     error
@@ -445,7 +445,23 @@ fn filemanager_sftp_error(error: ssh2::Error) -> AppError {
 }
 
 fn filemanager_file_error(error: ssh2::Error) -> AppError {
-    let mapped = filemanager_sftp_error(error);
+    let code = error.code();
+    let mut mapped = filemanager_sftp_error(error);
+    if matches!(code, ssh2::ErrorCode::SFTP(8 | 14 | 15)) {
+        mapped.category = "filemanager_write_failed".into();
+        mapped.user_message = match code {
+            ssh2::ErrorCode::SFTP(8) => "De server ondersteunt een vereiste veilige bestandsactie niet (bij opslaan is ook SFTP fsync vereist).".into(),
+            _ => "Opslaan is mislukt door onvoldoende vrije schijfruimte of quota.".into(),
+        };
+    }
+    if mapped.category == "filemanager_permission_denied" {
+        mapped.user_message =
+            "De SSH-gebruiker heeft onvoldoende rechten voor dit bestand of de bijbehorende map."
+                .into();
+    }
+    if mapped.category == "filemanager_sftp_failed" {
+        mapped.user_message = "De bestandsactie via SFTP is mislukt. Opslaan is niet bevestigd; controleer de serverinhoud na opnieuw verbinden.".into();
+    }
     match mapped.category.as_str() {
         "filemanager_directory_missing" => AppError::unauthorized(
             "filemanager_file_missing",
