@@ -940,6 +940,7 @@ pub fn create_filemanager_file(
     input: crate::filemanager_mutation::CreateInput,
     state: State<'_, AppState>,
 ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+    require_auth(&state, &session_token)?;
     mutate_filemanager_item(
         &state,
         &session_token,
@@ -966,6 +967,7 @@ pub fn create_filemanager_directory(
     input: crate::filemanager_mutation::CreateInput,
     state: State<'_, AppState>,
 ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+    require_auth(&state, &session_token)?;
     mutate_filemanager_item(
         &state,
         &session_token,
@@ -995,6 +997,7 @@ pub fn delete_filemanager_item(
     input: crate::filemanager_mutation::DeleteInput,
     state: State<'_, AppState>,
 ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
+    require_auth(&state, &session_token)?;
     mutate_filemanager_item(
         &state,
         &session_token,
