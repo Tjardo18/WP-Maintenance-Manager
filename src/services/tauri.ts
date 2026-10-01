@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { FilemanagerAuthorization, FilemanagerContext, FilemanagerDirectoryListing, FilemanagerFilePreview, FilemanagerMutationKind, FilemanagerMutationResult } from "../types/filemanager";
+import type { FilemanagerAuthorization, FilemanagerBulkItem, FilemanagerBulkResult, FilemanagerContext, FilemanagerDirectoryListing, FilemanagerFilePreview, FilemanagerMutationKind, FilemanagerMutationResult } from "../types/filemanager";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppSettings, AuditEvent, AuthStatus, BulkScanStart, ChecksumDeleteProgress, ChecksumDeleteResult, ConnectionTestResult, CoreOperationInfo, CoreOperationResult, DatabaseCleanupOption, DatabaseCleanupRequest, DatabaseCleanupResult, DatabaseCleanupTarget, ErrorLogFilter, ErrorLogPage, FilePreview, FindingException, FindingExceptionInput, LoginResult, MaintenanceRun, MaintenanceStep, PasswordChangeInput, ScanJobState, ScanResult, SecurityPolicyMutationResult, Site, SiteChangeHistory, SiteChangeSummary, SiteInput, SnapshotDiff, SnapshotHistoryItem, SnapshotMetadata, TerminalChallengeInfo, TerminalConnectionInfo, TerminalOutputEvent, TerminalStatusEvent, TrustedFile, TrustedFileInput, UpdateItem, VulnerabilityRefreshJobState, WordfenceIntegrationStatus, WordPressUserDeleteInput, WordPressUsersData, WordPressUserUpdateInput, WpCliCatalog, WpCliCommandInspection, WpCliExecutionResult } from "../types";
 import type { MediaKeyCommand } from "./keyboardShortcuts";
@@ -202,6 +202,18 @@ export const appApi = {
   async deleteFilemanagerItem(siteId: string, authorizationToken: string, input: { path: string; expectedKind: FilemanagerMutationKind }): Promise<FilemanagerMutationResult> {
     if (!isTauri()) throw new Error("De filemanager is alleen beschikbaar in de desktopapp.");
     return call("delete_filemanager_item", { siteId, authorizationToken, input });
+  },
+  async changeFilemanagerPermissions(siteId: string, authorizationToken: string, input: FilemanagerBulkItem & { mode: string }): Promise<void> {
+    if (!isTauri()) throw new Error("De filemanager is alleen beschikbaar in de desktopapp.");
+    return call("change_filemanager_permissions", { siteId, authorizationToken, input });
+  },
+  async changeFilemanagerPermissionsBulk(siteId: string, authorizationToken: string, input: { directory: string; items: FilemanagerBulkItem[]; mode: string }): Promise<FilemanagerBulkResult> {
+    if (!isTauri()) throw new Error("De filemanager is alleen beschikbaar in de desktopapp.");
+    return call("change_filemanager_permissions_bulk", { siteId, authorizationToken, input });
+  },
+  async deleteFilemanagerBulk(siteId: string, authorizationToken: string, input: { directory: string; items: FilemanagerBulkItem[] }): Promise<FilemanagerBulkResult> {
+    if (!isTauri()) throw new Error("De filemanager is alleen beschikbaar in de desktopapp.");
+    return call("delete_filemanager_bulk", { siteId, authorizationToken, input });
   },
   async saveFilemanagerFile(siteId: string, authorizationToken: string, input: { path: string; content: string; expectedVersion: string }): Promise<FilemanagerFilePreview> {
     if (!isTauri()) throw new Error("De filemanager is alleen beschikbaar in de desktopapp.");
