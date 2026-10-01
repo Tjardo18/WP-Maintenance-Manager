@@ -897,6 +897,42 @@ fn read_filemanager_file_internal(
 }
 
 #[tauri::command(async)]
+pub fn save_filemanager_file(
+    session_token: String,
+    site_id: String,
+    authorization_token: String,
+    input: crate::filemanager_edit::SaveInput,
+    state: State<'_, AppState>,
+) -> Result<crate::models::FileContentPreview, AppError> {
+    require_auth(&state, &session_token)?;
+    crate::filemanager_edit::validate_input(&input.content, &input.expected_version)?;
+    read_filemanager_file_internal(
+        &state,
+        &session_token,
+        &site_id,
+        &authorization_token,
+        &input.path,
+        |site, path| {
+            let normalized = crate::filemanager_edit::SaveInput {
+                path: path.into(),
+                content: input.content.clone(),
+                expected_version: input.expected_version.clone(),
+            };
+            state.filemanager_access.save_file(
+                &session_token,
+                site,
+                &authorization_token,
+                &normalized,
+                || {
+                    require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)
+                        .map(|_| ())
+                },
+            )
+        },
+    )
+}
+
+#[tauri::command(async)]
 pub fn save_site(
     session_token: String,
     mut input: SiteInput,
@@ -5239,6 +5275,7 @@ mod tests {
             assert_eq!(site.id, a.id);
             assert_eq!(path, "/my plugin.php");
             Ok(crate::models::FileContentPreview {
+                edit_version: None,
                 file_name: "my plugin.php".into(),
                 relative_path: path.into(),
                 size_bytes: 4,

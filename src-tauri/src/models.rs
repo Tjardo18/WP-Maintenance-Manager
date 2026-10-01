@@ -671,6 +671,8 @@ pub struct ChecksumFindingRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileContentPreview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_version: Option<String>,
     pub file_name: String,
     pub relative_path: String,
     pub size_bytes: u64,

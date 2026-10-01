@@ -23,6 +23,8 @@ struct Access {
 
 #[derive(Default)]
 pub struct FilemanagerAccessManager {
+    // Serialize saves across access tokens, including two editors of the same site.
+    saves: Mutex<()>,
     // Separate instance: terminal challenges can never authorize this feature.
     challenges: TerminalAccessManager,
     access: Mutex<Vec<Access>>,
@@ -225,6 +227,32 @@ impl FilemanagerAccessManager {
             self.authorize(session, site, token)?;
         }
         result
+    }
+
+    pub fn save_file(
+        &self,
+        session: &str,
+        site: &Site,
+        token: &str,
+        input: &crate::filemanager_edit::SaveInput,
+        authorize: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::models::FileContentPreview, AppError> {
+        let _save = self.saves.try_lock().map_err(|_| {
+            AppError::unauthorized(
+                "filemanager_busy",
+                "Er wordt al een bestand opgeslagen. Probeer het zo opnieuw.",
+            )
+        })?;
+        self.with_connection(session, site, token, |connection| {
+            crate::ssh::save_filemanager_file(
+                connection,
+                &site.wordpress_path,
+                &input.path,
+                &input.content,
+                &input.expected_version,
+                &authorize,
+            )
+        })
     }
 
     fn with_entry<T>(

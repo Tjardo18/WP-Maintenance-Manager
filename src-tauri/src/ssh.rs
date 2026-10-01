@@ -9,7 +9,7 @@ use chrono::{SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
 use ssh2::Session;
 use std::{
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     net::{TcpStream, ToSocketAddrs},
     path::Path,
     time::{Duration, Instant},
@@ -60,23 +60,38 @@ pub(crate) fn read_filemanager_file(
     if !crate::filemanager_paths::same_file_snapshot(resolved.stat(), &opened) {
         return Err(filemanager_file_changed());
     }
+    resolved.revalidate(&mut remote)?;
     let mut bytes = Vec::with_capacity(limit.min(opened.size.unwrap_or(0) as usize));
-    file.by_ref()
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
+    let mut buffer = [0; 16 * 1024];
+    while bytes.len() <= limit {
+        remote.before_call()?;
+        let available = buffer.len().min(limit + 1 - bytes.len());
+        let n = file.read(&mut buffer[..available]).map_err(|error| {
             let mut result = AppError::unauthorized(
                 "filemanager_file_read_failed",
                 "Het bestand kon niet veilig worden gelezen.",
             );
-            result.technical_details = Some(error.to_string());
+            result.technical_details = Some(format!(
+                "I/O kind: {:?}; OS code: {:?}",
+                error.kind(),
+                error.raw_os_error()
+            ));
             result.retryable = true;
             result
         })?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..n]);
+    }
     let final_stat = resolved.revalidate(&mut remote)?;
     let truncated = bytes.len() > limit || final_stat.size.is_some_and(|size| size > limit as u64);
     bytes.truncate(limit);
-    Ok(crate::filemanager_file::build_preview(
+    let edit_version = (!truncated
+        && final_stat.size == Some(bytes.len() as u64)
+        && crate::filemanager_edit::editable(requested, &bytes))
+    .then(|| crate::filemanager_edit::version(resolved.absolute(), &bytes, &final_stat));
+    let mut preview = crate::filemanager_file::build_preview(
         resolved.relative().as_str(),
         RemoteFileRead {
             bytes,
@@ -84,7 +99,226 @@ pub(crate) fn read_filemanager_file(
             modified_unix: final_stat.mtime,
             truncated,
         },
-    ))
+    );
+    preview.edit_version = edit_version;
+    Ok(preview)
+}
+
+pub(crate) fn save_filemanager_file(
+    session: &Session,
+    root: &str,
+    requested: &str,
+    content: &str,
+    expected: &str,
+    authorize: impl Fn() -> Result<(), AppError>,
+) -> Result<crate::models::FileContentPreview, AppError> {
+    crate::filemanager_edit::validate_input(content, expected)?;
+    session.set_timeout(5_000);
+    let mut channel = session.channel_session().map_err(filemanager_file_error)?;
+    channel.subsystem("sftp").map_err(filemanager_file_error)?;
+    crate::sftp_replace::handshake(&mut channel)?;
+    let mut remote = FilemanagerSftp {
+        session,
+        sftp: session.sftp().map_err(filemanager_file_error)?,
+        deadline: Instant::now() + Duration::from_secs(30),
+    };
+    let mut writer = FilemanagerWriter {
+        remote: &mut remote,
+        channel,
+    };
+    crate::filemanager_edit::save(&mut writer, root, requested, content, expected, authorize)
+}
+
+struct FilemanagerWriter<'a, 'b> {
+    remote: &'a mut FilemanagerSftp<'b>,
+    channel: ssh2::Channel,
+}
+
+impl crate::filemanager_paths::RemotePaths for FilemanagerWriter<'_, '_> {
+    fn realpath(&mut self, path: &str) -> Result<String, AppError> {
+        self.remote.realpath(path)
+    }
+    fn lstat(&mut self, path: &str) -> Result<ssh2::FileStat, AppError> {
+        self.remote.lstat(path)
+    }
+}
+
+impl crate::filemanager_edit::EditTransport for FilemanagerWriter<'_, '_> {
+    type Temp = Option<ssh2::File>;
+    fn read(
+        &mut self,
+        target: &crate::filemanager_paths::ResolvedFile,
+    ) -> Result<Vec<u8>, AppError> {
+        self.remote.before_call()?;
+        let mut file = self
+            .remote
+            .sftp
+            .open(Path::new(target.absolute()))
+            .map_err(filemanager_file_error)?;
+        crate::filemanager_edit::verify_handle(
+            target,
+            &file.stat().map_err(filemanager_file_error)?,
+        )?;
+        target.revalidate(self.remote)?;
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 16 * 1024];
+        loop {
+            self.remote.before_call()?;
+            let n = file.read(&mut buffer).map_err(filemanager_write_io_error)?;
+            if n == 0 {
+                break;
+            }
+            if bytes.len() + n > crate::filemanager_file::TEXT_PREVIEW_LIMIT_BYTES {
+                return Err(crate::filemanager_edit::error(
+                    "too_large",
+                    "Dit bestand is te groot om te bewerken.",
+                ));
+            }
+            bytes.extend_from_slice(&buffer[..n]);
+        }
+        crate::filemanager_edit::verify_handle(
+            target,
+            &file.stat().map_err(filemanager_file_error)?,
+        )?;
+        if target.stat().size != Some(bytes.len() as u64) {
+            return Err(crate::filemanager_edit::conflict());
+        }
+        Ok(bytes)
+    }
+    fn check_writable(
+        &mut self,
+        target: &crate::filemanager_paths::ResolvedFile,
+    ) -> Result<(), AppError> {
+        self.remote.before_call()?;
+        // Probe actual file permissions/ACL without changing contents or creating missing files.
+        let mut handle = self
+            .remote
+            .sftp
+            .open_mode(
+                Path::new(target.absolute()),
+                ssh2::OpenFlags::WRITE,
+                0,
+                ssh2::OpenType::File,
+            )
+            .map_err(filemanager_file_error)?;
+        crate::filemanager_edit::verify_handle(
+            target,
+            &handle.stat().map_err(filemanager_file_error)?,
+        )?;
+        handle.close().map_err(filemanager_file_error)
+    }
+    fn create_temp(&mut self, path: &str) -> Result<Self::Temp, AppError> {
+        self.remote.before_call()?;
+        self.remote
+            .sftp
+            .open_mode(
+                Path::new(path),
+                ssh2::OpenFlags::READ
+                    | ssh2::OpenFlags::WRITE
+                    | ssh2::OpenFlags::CREATE
+                    | ssh2::OpenFlags::EXCLUSIVE,
+                0o600,
+                ssh2::OpenType::File,
+            )
+            .map(Some)
+            .map_err(filemanager_file_error)
+    }
+    fn stage(
+        &mut self,
+        temp: &mut Self::Temp,
+        content: &[u8],
+        original: &ssh2::FileStat,
+    ) -> Result<(), AppError> {
+        let file = temp.as_mut().unwrap();
+        for chunk in content.chunks(16 * 1024) {
+            self.remote.before_call()?;
+            std::io::Write::write_all(file, chunk).map_err(filemanager_write_io_error)?;
+        }
+        self.remote.before_call()?;
+        let current = file.stat().map_err(filemanager_file_error)?;
+        let (Some(uid), Some(gid), Some(mode)) = (original.uid, original.gid, original.perm) else {
+            return Err(crate::filemanager_edit::error(
+                "metadata_invalid",
+                "Eigenaarschap en permissies konden niet betrouwbaar worden vastgesteld.",
+            ));
+        };
+        if current.uid != Some(uid) || current.gid != Some(gid) {
+            file.setstat(ssh2::FileStat {
+                size: None,
+                uid: Some(uid),
+                gid: Some(gid),
+                perm: None,
+                atime: None,
+                mtime: None,
+            })
+            .map_err(filemanager_file_error)?;
+        }
+        file.setstat(ssh2::FileStat {
+            size: None,
+            uid: None,
+            gid: None,
+            perm: Some(mode & 0o7777),
+            atime: None,
+            mtime: None,
+        })
+        .map_err(filemanager_file_error)?;
+        let staged = file.stat().map_err(filemanager_file_error)?;
+        if staged.size != Some(content.len() as u64)
+            || staged.perm != original.perm
+            || staged.uid != original.uid
+            || staged.gid != original.gid
+        {
+            return Err(crate::filemanager_edit::error(
+                "metadata_invalid",
+                "De oorspronkelijke permissies of het eigenaarschap konden niet behouden worden. Het originele bestand is niet vervangen.",
+            ));
+        }
+        self.remote.before_call()?;
+        file.fsync().map_err(filemanager_file_error)?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(filemanager_write_io_error)?;
+        let mut verified = Vec::new();
+        file.take(content.len() as u64 + 1)
+            .read_to_end(&mut verified)
+            .map_err(filemanager_write_io_error)?;
+        if verified != content {
+            return Err(crate::filemanager_edit::error(
+                "write_failed",
+                "De tijdelijke inhoud kon niet worden bevestigd; het origineel blijft behouden.",
+            ));
+        }
+        temp.take().unwrap().close().map_err(filemanager_file_error)
+    }
+    fn replace(
+        &mut self,
+        temp_path: &str,
+        target: &crate::filemanager_paths::ResolvedFile,
+    ) -> Result<(), AppError> {
+        self.remote.before_call()?;
+        crate::sftp_replace::replace(&mut self.channel, temp_path, target.absolute())
+    }
+    fn cleanup(&mut self, temp_path: &str) -> Result<(), AppError> {
+        // One bounded best-effort attempt, even after the operation's deadline elapsed.
+        self.remote.session.set_timeout(2_000);
+        match self.remote.sftp.unlink(Path::new(temp_path)) {
+            Ok(()) => Ok(()),
+            Err(error) if matches!(error.code(), ssh2::ErrorCode::SFTP(2 | 10)) => Ok(()),
+            Err(error) => Err(filemanager_file_error(error)),
+        }
+    }
+}
+
+fn filemanager_write_io_error(cause: std::io::Error) -> AppError {
+    let mut error = crate::filemanager_edit::error(
+        "write_failed",
+        "De bestandsoverdracht is mislukt. Controleer verbinding, schrijfrechten, schijfruimte en quota. Opslaan is niet bevestigd.",
+    );
+    error.technical_details = Some(format!(
+        "I/O kind: {:?}; OS code: {:?}",
+        cause.kind(),
+        cause.raw_os_error()
+    ));
+    error
 }
 
 struct FilemanagerSftp<'a> {

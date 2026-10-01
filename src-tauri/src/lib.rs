@@ -12,6 +12,7 @@ mod error;
 mod error_log;
 mod filemanager;
 mod filemanager_directory;
+mod filemanager_edit;
 mod filemanager_file;
 mod filemanager_paths;
 mod health;
@@ -21,6 +22,7 @@ mod models;
 mod parsers;
 mod scan_jobs;
 mod security_policy;
+mod sftp_replace;
 pub mod snapshot_builder;
 pub mod snapshot_diff;
 pub mod snapshot_repository;
@@ -103,6 +105,7 @@ pub fn run() {
             commands::get_filemanager_authorization,
             commands::list_filemanager_directory,
             commands::read_filemanager_file,
+            commands::save_filemanager_file,
             commands::close_filemanager,
             commands::save_site,
             commands::delete_site,
