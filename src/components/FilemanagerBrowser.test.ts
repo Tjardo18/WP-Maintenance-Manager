@@ -13,6 +13,33 @@ const file = (name: string, path: string, extension: string | null = "php") => (
 const create = () => mount(FilemanagerBrowser, { props: { context, authorizationToken: "token-a" } });
 
 describe("Filemanager directorybrowser", () => {
+  it("clears open mutation dialogs when the website changes", async () => {
+    api.listFilemanagerDirectory.mockResolvedValue(listing('/', [file('a.php', '/a.php')]));
+    const w = create(); await flushPromises();
+    await w.get('[aria-label="Verwijder bestand a.php"]').trigger('click');
+    await w.setProps({ context: { ...context, siteId: 'site-b' }, authorizationToken: 'token-b' });
+    await flushPromises();
+    expect(w.find('[aria-label="Bestand verwijderen?"]').exists()).toBe(false);
+    expect(api.deleteFilemanagerItem).not.toHaveBeenCalled();
+    w.unmount();
+  });
+
+  it("ignores a late create response after switching websites and back", async () => {
+    api.listFilemanagerDirectory.mockResolvedValue(listing('/', []));
+    let finish!: (value: unknown) => void;
+    api.createFilemanagerFile.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const w = create(); await flushPromises();
+    await w.findAll('button').find((b) => b.text().includes('Nieuw bestand'))!.trigger('click');
+    await w.get('#filemanager-new-name').setValue('old.php');
+    await w.findAll('button').find((b) => b.text() === 'Aanmaken')!.trigger('click');
+    await w.setProps({ context: { ...context, siteId: 'site-b' }, authorizationToken: 'token-b' }); await flushPromises();
+    await w.setProps({ context, authorizationToken: 'new-token-a' }); await flushPromises();
+    const calls = api.listFilemanagerDirectory.mock.calls.length;
+    finish({ path: '/old.php', name: 'old.php', kind: 'file' }); await flushPromises();
+    expect(api.listFilemanagerDirectory).toHaveBeenCalledTimes(calls);
+    expect(w.text()).not.toContain('Bestand aangemaakt.');
+    w.unmount();
+  });
   it("saves with site-bound credentials, updates the preview and guards route changes", async () => {
     const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/:site', component: { template: '<div />' } }] });
     await router.push('/site-a');

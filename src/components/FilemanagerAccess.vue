@@ -36,14 +36,17 @@ function reset(message?: string) {
   error.value = message;
 }
 
+function expireAccess() {
+  globalThis.clearTimeout(timer);
+  if (step.value === "ready" && browser.value?.hasUnsavedChanges()) {
+    void release(token);
+    error.value = "De verificatie is verlopen. Niet-opgeslagen tekst blijft zichtbaar; kopieer deze indien nodig voordat je opnieuw verifieert.";
+  } else reset("De verificatie is verlopen. Bevestig beide wachtwoorden opnieuw.");
+}
+
 function expireAfter(seconds: number) {
   globalThis.clearTimeout(timer);
-  timer = setTimeout(() => {
-    if (step.value === "ready" && browser.value?.hasUnsavedChanges()) {
-      void release(token);
-      error.value = "De verificatie is verlopen. Niet-opgeslagen tekst blijft zichtbaar; kopieer deze indien nodig voordat je opnieuw verifieert.";
-    } else reset("De verificatie is verlopen. Bevestig beide wachtwoorden opnieuw.");
-  }, Math.max(0, seconds) * 1000);
+  timer = setTimeout(expireAccess, Math.max(0, seconds) * 1000);
 }
 
 async function submit() {
@@ -85,7 +88,7 @@ onUnmounted(() => reset());
 <template>
   <template v-if="step === 'ready' && token">
     <p v-if="error" class="error-banner" role="alert">{{ error }} <button class="button small secondary" @click="reauthenticate">Opnieuw verifiëren</button></p>
-    <FilemanagerBrowser ref="browser" :context="context" :authorization-token="token" @expired="reset('De filemanagerverificatie is verlopen. Bevestig beide wachtwoorden opnieuw.')" />
+    <FilemanagerBrowser ref="browser" :context="context" :authorization-token="token" @expired="expireAccess" />
   </template>
   <form v-else class="filemanager-auth" :aria-busy="busy" @submit.prevent="submit">
     <LockKeyhole :size="28" />
