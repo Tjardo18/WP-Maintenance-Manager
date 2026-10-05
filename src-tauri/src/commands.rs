@@ -828,6 +828,7 @@ pub fn list_filemanager_directory(
                 site,
                 &authorization_token,
                 path,
+                || require_auth(&state, &session_token),
             )
         },
     )
@@ -871,9 +872,13 @@ pub fn read_filemanager_file(
         &authorization_token,
         &requested_path,
         |site, path| {
-            state
-                .filemanager_access
-                .read_file(&session_token, site, &authorization_token, path)
+            state.filemanager_access.read_file(
+                &session_token,
+                site,
+                &authorization_token,
+                path,
+                || require_auth(&state, &session_token),
+            )
         },
     )
 }
@@ -953,9 +958,13 @@ pub fn create_filemanager_file(
                 directory: directory.into(),
                 name: input.name.clone(),
             };
-            state
-                .filemanager_access
-                .create_file(&session_token, site, &authorization_token, &input)
+            state.filemanager_access.create_file(
+                &session_token,
+                site,
+                &authorization_token,
+                &input,
+                || require_auth(&state, &session_token),
+            )
         },
     )
 }
@@ -985,6 +994,7 @@ pub fn create_filemanager_directory(
                 site,
                 &authorization_token,
                 &input,
+                || require_auth(&state, &session_token),
             )
         },
     )
@@ -1010,9 +1020,13 @@ pub fn delete_filemanager_item(
                 path: path.into(),
                 expected_kind: input.expected_kind,
             };
-            state
-                .filemanager_access
-                .delete_item(&session_token, site, &authorization_token, &input)
+            state.filemanager_access.delete_item(
+                &session_token,
+                site,
+                &authorization_token,
+                &input,
+                || require_auth(&state, &session_token),
+            )
         },
     )
 }
@@ -1043,6 +1057,7 @@ pub fn change_filemanager_permissions(
                     expected_kind: input.expected_kind,
                     mode: input.mode.clone(),
                 },
+                || require_auth(&state, &session_token),
             )
         },
     )
@@ -1069,6 +1084,7 @@ pub fn change_filemanager_permissions_bulk(
         &site,
         &authorization_token,
         &input,
+        || require_auth(&state, &session_token),
     )?;
     require_auth(&state, &session_token)?;
     require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
@@ -1092,6 +1108,7 @@ pub fn delete_filemanager_bulk(
         &site,
         &authorization_token,
         &input,
+        || require_auth(&state, &session_token),
     )?;
     require_auth(&state, &session_token)?;
     require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
@@ -1111,6 +1128,7 @@ pub fn download_filemanager_items(
     crate::filemanager_mutation::validate_bulk(&input)?;
     require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
     let site = state.database.get_site(&site_id)?.site;
+    let _download = state.filemanager_access.reserve_download()?;
     let name = crate::filemanager_download::suggested_name(&input);
     let selected = app
         .dialog()
@@ -1125,34 +1143,24 @@ pub fn download_filemanager_items(
     let destination = destination.into_path().map_err(|_| {
         AppError::validation("Kies een gewone lokale bestandslocatie voor de download.")
     })?;
-    let parent = destination
-        .parent()
-        .ok_or_else(|| AppError::validation("De gekozen downloadlocatie is ongeldig."))?;
-    if !destination.is_absolute() || destination.exists() {
-        return Err(AppError::validation(
-            "Kies een nieuwe lokale bestandsnaam; bestaande bestanden worden niet overschreven.",
-        ));
-    }
-    let mut staged = tempfile::Builder::new()
-        .prefix(".wpmm-download-")
-        .tempfile_in(parent)
-        .map_err(|_| AppError::validation("De gekozen downloadmap is niet schrijfbaar."))?;
-    let mut result = state.filemanager_access.download(
-        &session_token,
-        &site,
-        &authorization_token,
-        &input,
-        staged.as_file_mut(),
-    )?;
-    staged
-        .as_file()
-        .sync_all()
-        .map_err(|_| AppError::validation("De download kon niet veilig worden weggeschreven."))?;
-    require_auth(&state, &session_token)?;
-    require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
-    staged.persist_noclobber(&destination).map_err(|_| AppError::validation("Het downloadbestand kon niet worden opgeslagen. Controleer of de naam inmiddels bestaat en of er voldoende ruimte is."))?;
-    result.saved_to = Some(destination.to_string_lossy().into_owned());
-    Ok(Some(result))
+    crate::filemanager_download::save_local(
+        &destination,
+        |output| {
+            state.filemanager_access.download(
+                &session_token,
+                &site,
+                &authorization_token,
+                &input,
+                output,
+                || require_auth(&state, &session_token),
+            )
+        },
+        || {
+            require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)
+                .map(|_| ())
+        },
+    )
+    .map(Some)
 }
 
 fn mutate_filemanager_item<T>(

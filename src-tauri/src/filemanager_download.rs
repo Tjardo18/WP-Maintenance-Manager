@@ -84,6 +84,34 @@ pub struct DownloadResult {
     pub saved_to: Option<String>,
 }
 
+/// Shared by the native download command and disk-failure regression tests.
+/// The final name becomes visible only after successful transfer and authorization.
+pub fn save_local(
+    destination: &std::path::Path,
+    transfer: impl FnOnce(&mut std::fs::File) -> Result<DownloadResult, AppError>,
+    authorize: impl Fn() -> Result<(), AppError>,
+) -> Result<DownloadResult, AppError> {
+    authorize()?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AppError::validation("De gekozen downloadlocatie is ongeldig."))?;
+    if !destination.is_absolute() || destination.exists() {
+        return Err(AppError::validation(
+            "Kies een nieuwe lokale bestandsnaam; bestaande bestanden worden niet overschreven.",
+        ));
+    }
+    let mut staged = tempfile::Builder::new()
+        .prefix(".wpmm-download-")
+        .tempfile_in(parent)
+        .map_err(|_| AppError::validation("De gekozen downloadmap is niet schrijfbaar."))?;
+    let mut result = transfer(staged.as_file_mut())?;
+    staged.as_file().sync_all().map_err(write_error)?;
+    authorize()?;
+    staged.persist_noclobber(destination).map_err(|_| AppError::validation("Het downloadbestand kon niet worden opgeslagen. Controleer of de naam inmiddels bestaat en of er voldoende ruimte is."))?;
+    result.saved_to = Some(destination.to_string_lossy().into_owned());
+    Ok(result)
+}
+
 pub fn suggested_name(input: &BulkInput) -> String {
     let archive = input.items.len() != 1 || input.items[0].expected_kind != ItemKind::File;
     let raw = if input.items.len() == 1 {
@@ -97,7 +125,7 @@ pub fn suggested_name(input: &BulkInput) -> String {
         .take(160)
         .collect();
     clean = clean.trim().trim_end_matches('.').to_string();
-    if clean.is_empty() {
+    if clean.is_empty() || reserved_windows_name(&clean) {
         clean = "download".into();
     }
     if archive {
@@ -129,6 +157,27 @@ fn zip_error(_: zip::result::ZipError) -> AppError {
     )
 }
 
+fn reserved_windows_name(name: &str) -> bool {
+    let base = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_uppercase();
+    matches!(
+        base.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || base
+        .strip_prefix("COM")
+        .or_else(|| base.strip_prefix("LPT"))
+        .is_some_and(|n| {
+            matches!(
+                n,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+}
+
 fn safe_entry(path: &str) -> Result<String, AppError> {
     if path.is_empty() || path.starts_with('/') || path.contains('\\') {
         return Err(failure(
@@ -138,7 +187,11 @@ fn safe_entry(path: &str) -> Result<String, AppError> {
     }
     for component in path.trim_end_matches('/').split('/') {
         validate_name(component)?;
-        if component.contains(':') {
+        if component.contains(':')
+            || component.ends_with('.')
+            || component.ends_with(' ')
+            || reserved_windows_name(component)
+        {
             return Err(failure(
                 "filemanager_archive_path",
                 "Dit bestand heeft een naam die niet veilig in een ZIP-archief kan worden opgenomen.",
@@ -233,11 +286,14 @@ pub fn write_download<W: Write + Seek>(
         .rev()
         .map(|(path, entry, kind)| (path, entry, kind, 0))
         .collect();
+    // Count queued descendants too: a wide, deep tree must not build an unbounded stack.
+    for _ in 0..stack.len() {
+        budget.add_file()?;
+    }
     while let Some((path, entry, kind, depth)) = stack.pop() {
         budget.check()?;
         match kind {
             ItemKind::File => {
-                budget.add_file()?;
                 let file = resolve_file(remote, root, path.as_str())?;
                 if file
                     .stat()
@@ -252,7 +308,6 @@ pub fn write_download<W: Write + Seek>(
                 remote.copy_file(&file, &mut archive, &mut budget)?;
             }
             ItemKind::Directory => {
-                budget.add_file()?;
                 if depth >= MAX_ARCHIVE_DEPTH {
                     return Err(failure(
                         "filemanager_archive_depth",
@@ -272,6 +327,7 @@ pub fn write_download<W: Write + Seek>(
                     ));
                 }
                 for item in listing.items.into_iter().rev() {
+                    budget.add_file()?;
                     let child_kind = match item.kind {
                         EntryKind::File => ItemKind::File,
                         EntryKind::Directory => ItemKind::Directory,
@@ -453,6 +509,86 @@ mod tests {
         assert_eq!(suggested_name(&quoted), "ab.php");
     }
     #[test]
+    fn local_staging_cleans_failures_revocation_and_collision_without_overwriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("result.zip");
+        let partial = save_local(
+            &destination,
+            |file| {
+                file.write_all(b"partial data").unwrap();
+                Err(failure("filemanager_download_write_failed", "Disk full"))
+            },
+            || Ok(()),
+        );
+        assert!(partial.is_err());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+
+        let allowed = std::cell::Cell::new(true);
+        let revoked = save_local(
+            &destination,
+            |file| {
+                file.write_all(b"secret").unwrap();
+                allowed.set(false);
+                Ok(DownloadResult {
+                    file_name: "result.zip".into(),
+                    bytes: 6,
+                    archived: true,
+                    saved_to: None,
+                })
+            },
+            || {
+                if allowed.get() {
+                    Ok(())
+                } else {
+                    Err(failure("locked", "Locked"))
+                }
+            },
+        );
+        assert!(revoked.is_err());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+
+        let collision = save_local(
+            &destination,
+            |file| {
+                file.write_all(b"download").unwrap();
+                std::fs::write(&destination, b"other writer").unwrap();
+                Ok(DownloadResult {
+                    file_name: "result.zip".into(),
+                    bytes: 8,
+                    archived: true,
+                    saved_to: None,
+                })
+            },
+            || Ok(()),
+        );
+        assert!(collision.is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"other writer");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn local_success_publishes_only_completed_server_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("index.php");
+        let result = save_local(
+            &destination,
+            |file| {
+                write_download(
+                    &mut Remote::fixture(),
+                    "/srv/site/root",
+                    &selected(&[("/index.php", ItemKind::File)]),
+                    file,
+                )
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"<?php echo 1;");
+        assert_eq!(result.saved_to.as_deref(), destination.to_str());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert!(save_local(&destination, |_| panic!("must not overwrite"), || Ok(())).is_err());
+    }
+    #[test]
     fn archive_contains_only_selected_relative_paths_and_nested_files() {
         let mut remote = Remote::fixture();
         let input = selected(&[
@@ -518,6 +654,11 @@ mod tests {
             "a\\b",
             "a/../b",
             "a\nb",
+            ".. /outside.php",
+            "folder./file.txt",
+            "folder /file.txt",
+            "CON.txt",
+            "nested/NUL",
         ] {
             assert!(safe_entry(path).is_err(), "{path:?}");
         }

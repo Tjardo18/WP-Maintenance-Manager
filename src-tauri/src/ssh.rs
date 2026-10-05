@@ -23,11 +23,14 @@ pub(crate) fn list_filemanager_directory(
     session: &Session,
     root: &str,
     requested: &str,
+    authorize: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<crate::filemanager_directory::DirectoryListing, AppError> {
     let deadline = Instant::now() + Duration::from_secs(20);
+    authorize()?;
     session.set_timeout(5_000);
     let sftp = session.sftp().map_err(filemanager_sftp_error)?;
     let mut remote = FilemanagerSftp {
+        authorize,
         session,
         sftp,
         deadline,
@@ -40,11 +43,14 @@ pub(crate) fn read_filemanager_file(
     session: &Session,
     root: &str,
     requested: &str,
+    authorize: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<crate::models::FileContentPreview, AppError> {
     let deadline = Instant::now() + Duration::from_secs(20);
+    authorize()?;
     session.set_timeout(5_000);
     let sftp = session.sftp().map_err(filemanager_sftp_error)?;
     let mut remote = FilemanagerSftp {
+        authorize,
         session,
         sftp,
         deadline,
@@ -113,11 +119,13 @@ pub(crate) fn save_filemanager_file(
     authorize: impl Fn() -> Result<(), AppError>,
 ) -> Result<crate::models::FileContentPreview, AppError> {
     crate::filemanager_edit::validate_input(content, expected)?;
+    authorize()?;
     session.set_timeout(5_000);
     let mut channel = session.channel_session().map_err(filemanager_file_error)?;
     channel.subsystem("sftp").map_err(filemanager_file_error)?;
     crate::sftp_replace::handshake(&mut channel)?;
     let mut remote = FilemanagerSftp {
+        authorize: &authorize,
         session,
         sftp: session.sftp().map_err(filemanager_file_error)?,
         deadline: Instant::now() + Duration::from_secs(30),
@@ -126,15 +134,16 @@ pub(crate) fn save_filemanager_file(
         remote: &mut remote,
         channel,
     };
-    crate::filemanager_edit::save(&mut writer, root, requested, content, expected, authorize)
+    crate::filemanager_edit::save(&mut writer, root, requested, content, expected, &authorize)
 }
 
 pub(crate) fn create_filemanager_file(
     session: &Session,
     root: &str,
     input: &crate::filemanager_mutation::CreateInput,
+    authorize: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
-    mutate_filemanager(session, root, |remote| {
+    mutate_filemanager(session, root, authorize, |remote| {
         crate::filemanager_mutation::create_file(remote, root, input)
     })
 }
@@ -143,8 +152,9 @@ pub(crate) fn create_filemanager_directory(
     session: &Session,
     root: &str,
     input: &crate::filemanager_mutation::CreateInput,
+    authorize: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
-    mutate_filemanager(session, root, |remote| {
+    mutate_filemanager(session, root, authorize, |remote| {
         crate::filemanager_mutation::create_directory(remote, root, input)
     })
 }
@@ -153,8 +163,9 @@ pub(crate) fn delete_filemanager_item(
     session: &Session,
     root: &str,
     input: &crate::filemanager_mutation::DeleteInput,
+    authorize: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
-    mutate_filemanager(session, root, |remote| {
+    mutate_filemanager(session, root, authorize, |remote| {
         crate::filemanager_mutation::delete_item(remote, root, input)
     })
 }
@@ -163,8 +174,9 @@ pub(crate) fn change_filemanager_permissions(
     session: &Session,
     root: &str,
     input: &crate::filemanager_mutation::PermissionInput,
+    authorize: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<(), AppError> {
-    mutate_filemanager(session, root, |remote| {
+    mutate_filemanager(session, root, authorize, |remote| {
         crate::filemanager_mutation::change_permissions(remote, root, input)
     })
 }
@@ -173,8 +185,9 @@ pub(crate) fn change_filemanager_permissions_bulk(
     session: &Session,
     root: &str,
     input: &crate::filemanager_mutation::BulkPermissionInput,
+    authorize: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<crate::filemanager_mutation::BulkResult, AppError> {
-    mutate_filemanager(session, root, |remote| {
+    mutate_filemanager(session, root, authorize, |remote| {
         crate::filemanager_mutation::change_permissions_bulk(remote, root, input)
     })
 }
@@ -183,8 +196,9 @@ pub(crate) fn delete_filemanager_bulk(
     session: &Session,
     root: &str,
     input: &crate::filemanager_mutation::BulkInput,
+    authorize: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<crate::filemanager_mutation::BulkResult, AppError> {
-    mutate_filemanager(session, root, |remote| {
+    mutate_filemanager(session, root, authorize, |remote| {
         crate::filemanager_mutation::delete_bulk(remote, root, input)
     })
 }
@@ -194,10 +208,13 @@ pub(crate) fn write_filemanager_download<W: std::io::Write + std::io::Seek>(
     root: &str,
     input: &crate::filemanager_mutation::BulkInput,
     output: &mut W,
+    authorize: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<crate::filemanager_download::DownloadResult, AppError> {
+    authorize()?;
     session.set_timeout(5_000);
     let sftp = session.sftp().map_err(filemanager_sftp_error)?;
     let mut remote = FilemanagerSftp {
+        authorize,
         session,
         sftp,
         deadline: Instant::now() + crate::filemanager_download::DOWNLOAD_TIMEOUT,
@@ -208,11 +225,14 @@ pub(crate) fn write_filemanager_download<W: std::io::Write + std::io::Seek>(
 fn mutate_filemanager<T>(
     session: &Session,
     _root: &str,
+    authorize: &dyn Fn() -> Result<(), AppError>,
     operation: impl FnOnce(&mut FilemanagerSftp<'_>) -> Result<T, AppError>,
 ) -> Result<T, AppError> {
+    authorize()?;
     session.set_timeout(5_000);
     let sftp = session.sftp().map_err(filemanager_file_error)?;
     let mut remote = FilemanagerSftp {
+        authorize,
         session,
         sftp,
         deadline: Instant::now() + Duration::from_secs(180),
@@ -413,6 +433,7 @@ fn filemanager_write_io_error(cause: std::io::Error) -> AppError {
 }
 
 struct FilemanagerSftp<'a> {
+    authorize: &'a dyn Fn() -> Result<(), AppError>,
     session: &'a Session,
     sftp: ssh2::Sftp,
     deadline: Instant,
@@ -420,6 +441,7 @@ struct FilemanagerSftp<'a> {
 
 impl FilemanagerSftp<'_> {
     fn before_call(&self) -> Result<(), AppError> {
+        (self.authorize)()?;
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(filemanager_timeout());
