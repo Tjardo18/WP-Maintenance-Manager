@@ -209,8 +209,8 @@ It does not supersede the NOT VERIFIED live checks above.
 - PASS D — files and directories combined.
 - PASS D — safe relative archive entries.
 - PASS D — no absolute server root in archive.
-- PASS D/E (partial) — random exclusive tempfiles; server HTTP/private ACL validation NOT VERIFIED.
-- PASS D/E (partial) — local cleanup proven; remote cleanup modeled, unavailable SSH cleanup cannot be guaranteed.
+- NOT VERIFIED in full — random exclusive tempfiles tested (D/E); server HTTP/private ACL validation still required.
+- NOT VERIFIED on a live server — local cleanup proven (D), remote cleanup modeled (E); unavailable SSH cleanup cannot be guaranteed.
 
 ### Security
 
