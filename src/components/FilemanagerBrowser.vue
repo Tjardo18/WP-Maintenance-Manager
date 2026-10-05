@@ -10,9 +10,15 @@ import { formatDate } from "../utils/format";
 import FilemanagerBreadcrumbs from "./FilemanagerBreadcrumbs.vue";
 import ChecksumFilePreview from "./ChecksumFilePreview.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
+import { vDialogFocus } from "../utils/dialogFocus";
 const props = defineProps<{ context: FilemanagerContext; authorizationToken: string }>();
 const emit = defineEmits<{ expired: [] }>();
 const listing = ref<FilemanagerDirectoryListing>(); const loading = ref(false); const error = ref<string>(); const history = ref<string[]>([]);
+let contextGeneration = 0;
+function captureContext() {
+  const generation = contextGeneration;
+  return { site: props.context.siteId, token: props.authorizationToken, current: () => generation === contextGeneration };
+}
 let requestId = 0; let previewRequestId = 0;
 const preview = ref<FilemanagerFilePreview>(); const previewComponent = ref<InstanceType<typeof ChecksumFilePreview>>(); const previewLoadingPath = ref<string>(); const previewError = ref<string>();
 const filePreviewMode = ref<FilePreviewMode>("normal"); const markdownPreviewMode = ref<MarkdownPreviewMode>("raw");
@@ -27,41 +33,139 @@ const allSelected = computed(() => selectable.value.length > 0 && selectedCount.
 const partlySelected = computed(() => selectedCount.value > 0 && !allSelected.value);
 const selectAllInput = ref<{ indeterminate: boolean }>();
 watch([partlySelected, selectAllInput], () => { if (selectAllInput.value) selectAllInput.value.indeterminate = partlySelected.value; }, { flush: "post" });
-watch(() => props.context.siteId, () => { selectedPaths.value = new Set(); listing.value = undefined; history.value = []; closePreview(); requestId += 1; loading.value = false; void load("/"); });
+watch(() => [props.context.siteId, props.authorizationToken], () => {
+  contextGeneration += 1; requestId += 1;
+  closePreview(); selectedPaths.value = new Set(); listing.value = undefined; history.value = [];
+  createKind.value = undefined; deleteTarget.value = undefined; permissionTarget.value = undefined;
+  bulkPermissionOpen.value = false; bulkDeleteOpen.value = false; bulkResult.value = undefined;
+  createError.value = undefined; deleteError.value = undefined; actionError.value = undefined; downloadError.value = undefined; feedback.value = undefined;
+  loading.value = false; createBusy.value = false; deleteBusy.value = false; actionBusy.value = false; downloadBusy.value = false;
+  void load("/");
+});
 function toggleSelection(path: string) { const next = new Set(selectedPaths.value); if (next.has(path)) next.delete(path); else next.add(path); selectedPaths.value = next; }
 function toggleSelectAll() { selectedPaths.value = allSelected.value ? new Set() : new Set(selectable.value.map((item) => item.path)); }
 function selectedPayload() { return selectedItems.value.map((item) => ({ path: item.path, expectedKind: item.kind as FilemanagerMutationKind })); }
-async function downloadItems(items: FilemanagerDirectoryItem[]) { if (busy.value || !listing.value || !items.length || items.length > 100) return; const site = props.context.siteId; const directory = listing.value.currentPath; downloadBusy.value = true; downloadError.value = undefined; try { const result = await appApi.downloadFilemanagerItems(site, props.authorizationToken, { directory, items: items.map((item) => ({ path: item.path, expectedKind: item.kind as FilemanagerMutationKind })) }); if (site !== props.context.siteId || directory !== listing.value?.currentPath) return; if (result) feedback.value = `Download opgeslagen: ${result.savedTo ?? result.fileName}`; } catch (cause) { if (site !== props.context.siteId) return; if (authorizationExpired(cause) && categoryOf(cause) !== "filemanager_file_read_failed") { emit("expired"); return; } downloadError.value = errorMessage(cause); } finally { downloadBusy.value = false; } }
+async function downloadItems(items: FilemanagerDirectoryItem[]) {
+  if (busy.value || !listing.value || !items.length || items.length > 100) return;
+  const ctx = captureContext(); const directory = listing.value.currentPath;
+  downloadBusy.value = true; downloadError.value = undefined; feedback.value = undefined;
+  try {
+    const result = await appApi.downloadFilemanagerItems(ctx.site, ctx.token, { directory, items: items.map((item) => ({ path: item.path, expectedKind: item.kind as FilemanagerMutationKind })) });
+    if (ctx.current() && directory === listing.value?.currentPath && result) feedback.value = `Download opgeslagen: ${result.savedTo ?? result.fileName}`;
+  } catch (cause) {
+    if (!ctx.current()) return;
+    if (authorizationExpired(cause) && categoryOf(cause) !== "filemanager_file_read_failed") { emit("expired"); return; }
+    downloadError.value = errorMessage(cause);
+  } finally { if (ctx.current()) downloadBusy.value = false; }
+}
 function openPermissions(item?: FilemanagerDirectoryItem) { if (busy.value || actionBusy.value) return; permissionTarget.value = item; bulkPermissionOpen.value = !item; permissionMode.value = item?.permissions?.match(/^[0-7]{3}$/) ? item.permissions : ""; actionError.value = undefined; bulkResult.value = undefined; }
 function closeAction() { if (actionBusy.value) return; permissionTarget.value = undefined; bulkPermissionOpen.value = false; bulkDeleteOpen.value = false; actionError.value = undefined; }
 function showBulkResult(result: FilemanagerBulkResult, verb: string) { bulkResult.value = result; feedback.value = `${result.succeeded} van ${result.requested} ${result.requested === 1 ? "item" : "items"} ${verb}.`; if (result.failed) actionError.value = `${result.failed} ${result.failed === 1 ? "item kon" : "items konden"} niet worden verwerkt.`; }
-async function refreshMetadata(site: string, directory: string) { try { const result = await appApi.listFilemanagerDirectory(site, props.authorizationToken, directory); if (site === props.context.siteId && listing.value?.currentPath === directory) { listing.value = result; selectedPaths.value = new Set(); } } catch (cause) { if (site !== props.context.siteId) return; if (authorizationExpired(cause)) emit("expired"); else error.value = `Permissions zijn toegepast, maar de map kon niet worden vernieuwd: ${errorMessage(cause)}`; } }
-async function applyPermissions() { if (actionBusy.value || !/^[0-7]{3}$/.test(permissionMode.value) || bulkPermissionOpen.value && selectedCount.value > 100) return; const site = props.context.siteId; const directory = listing.value?.currentPath; if (!directory) return; actionBusy.value = true; actionError.value = undefined; try { if (permissionTarget.value) { const target = permissionTarget.value; await appApi.changeFilemanagerPermissions(site, props.authorizationToken, { path: target.path, expectedKind: target.kind as FilemanagerMutationKind, mode: permissionMode.value }); if (site !== props.context.siteId) return; feedback.value = `Permissions van ${target.name} gewijzigd naar ${permissionMode.value}.`; permissionTarget.value = undefined; } else { const result = await appApi.changeFilemanagerPermissionsBulk(site, props.authorizationToken, { directory, items: selectedPayload(), mode: permissionMode.value }); if (site !== props.context.siteId) return; showBulkResult(result, "aangepast"); bulkPermissionOpen.value = false; } await refreshMetadata(site, directory); } catch (cause) { if (site !== props.context.siteId) return; if (authorizationExpired(cause)) { emit("expired"); return; } actionError.value = errorMessage(cause); } finally { actionBusy.value = false; if (site !== props.context.siteId) void load("/"); } }
-async function confirmBulkDelete() { if (actionBusy.value || !listing.value || selectedCount.value > 100) return; const site = props.context.siteId; const directory = listing.value.currentPath; const items = selectedPayload(); if (preview.value && items.some((item) => item.path === preview.value?.relativePath) && !(await requestLeave())) return; if (site !== props.context.siteId || directory !== listing.value?.currentPath) return; actionBusy.value = true; actionError.value = undefined; try { const result = await appApi.deleteFilemanagerBulk(site, props.authorizationToken, { directory, items }); if (site !== props.context.siteId) return; showBulkResult(result, "verwijderd"); bulkDeleteOpen.value = false; selectedPaths.value = new Set(); if (preview.value && items.some((item) => item.path === preview.value?.relativePath)) closePreview(); await load(directory, "refresh"); } catch (cause) { if (site !== props.context.siteId) return; if (authorizationExpired(cause)) { emit("expired"); return; } actionError.value = errorMessage(cause); } finally { actionBusy.value = false; if (site !== props.context.siteId) void load("/"); } }
+async function refreshMetadata(ctx: ReturnType<typeof captureContext>, directory: string) {
+  try {
+    const result = await appApi.listFilemanagerDirectory(ctx.site, ctx.token, directory);
+    if (ctx.current() && listing.value?.currentPath === directory) { listing.value = result; selectedPaths.value = new Set(); }
+  } catch (cause) {
+    if (!ctx.current()) return;
+    if (authorizationExpired(cause)) emit("expired");
+    else error.value = `De actie is uitgevoerd, maar de map kon niet worden vernieuwd: ${errorMessage(cause)}`;
+  }
+}
+async function applyPermissions() {
+  if (actionBusy.value || !/^[0-7]{3}$/.test(permissionMode.value) || bulkPermissionOpen.value && (selectedCount.value === 0 || selectedCount.value > 100)) return;
+  const ctx = captureContext(); const directory = listing.value?.currentPath; if (!directory) return;
+  const mode = permissionMode.value; const target = permissionTarget.value;
+  actionBusy.value = true; actionError.value = undefined; feedback.value = undefined;
+  try {
+    if (target) {
+      await appApi.changeFilemanagerPermissions(ctx.site, ctx.token, { path: target.path, expectedKind: target.kind as FilemanagerMutationKind, mode });
+      if (!ctx.current()) return;
+      feedback.value = `Permissions van ${target.name} gewijzigd naar ${mode}.`; permissionTarget.value = undefined;
+    } else {
+      const result = await appApi.changeFilemanagerPermissionsBulk(ctx.site, ctx.token, { directory, items: selectedPayload(), mode });
+      if (!ctx.current()) return;
+      showBulkResult(result, "aangepast"); bulkPermissionOpen.value = false;
+    }
+    await refreshMetadata(ctx, directory);
+  } catch (cause) {
+    if (!ctx.current()) return;
+    if (authorizationExpired(cause)) { emit("expired"); return; }
+    actionError.value = errorMessage(cause);
+  } finally { if (ctx.current()) actionBusy.value = false; }
+}
+async function confirmBulkDelete() {
+  if (actionBusy.value || !listing.value || !selectedCount.value || selectedCount.value > 100) return;
+  const ctx = captureContext(); const directory = listing.value.currentPath; const items = selectedPayload();
+  if (preview.value && items.some((item) => item.path === preview.value?.relativePath) && !(await requestLeave())) return;
+  if (!ctx.current() || directory !== listing.value?.currentPath) return;
+  actionBusy.value = true; actionError.value = undefined;
+  try {
+    const result = await appApi.deleteFilemanagerBulk(ctx.site, ctx.token, { directory, items });
+    if (!ctx.current()) return;
+    showBulkResult(result, "verwijderd"); bulkDeleteOpen.value = false; selectedPaths.value = new Set();
+    if (preview.value && items.some((item) => item.path === preview.value?.relativePath)) closePreview();
+    await load(directory, "refresh");
+  } catch (cause) {
+    if (!ctx.current()) return;
+    if (authorizationExpired(cause)) { emit("expired"); return; }
+    actionError.value = errorMessage(cause);
+  } finally { if (ctx.current()) actionBusy.value = false; }
+}
 const router = inject(routerKey, undefined); const removeNavigationGuard = router?.beforeEach(async () => await previewComponent.value?.requestLeave() ?? true);
 async function requestLeave() { return await previewComponent.value?.requestLeave() ?? true; }
 defineExpose({ requestLeave, hasUnsavedChanges: () => previewComponent.value?.hasUnsavedChanges() ?? false });
-const canGoBack = computed(() => history.value.length > 0 && !loading.value && !actionBusy.value && !downloadBusy.value); const canGoUp = computed(() => Boolean(listing.value?.parentPath) && !loading.value && !actionBusy.value && !downloadBusy.value); const busy = computed(() => loading.value || createBusy.value || deleteBusy.value || actionBusy.value || downloadBusy.value);
+const canGoBack = computed(() => history.value.length > 0 && !busy.value); const canGoUp = computed(() => Boolean(listing.value?.parentPath) && !busy.value); const busy = computed(() => loading.value || createBusy.value || deleteBusy.value || actionBusy.value || downloadBusy.value);
 const categoryOf = (cause: unknown) => typeof cause === "object" && cause !== null && "category" in cause && typeof (cause as { category?: unknown }).category === "string" ? (cause as { category: string }).category : undefined;
 const authorizationExpired = (cause: unknown) => ["filemanager_auth_required", "filemanager_disconnected", "filemanager_timeout", "filemanager_sftp_failed", "filemanager_file_read_failed", "locked", "session_expired", "invalid_session"].includes(categoryOf(cause) ?? "");
 function formatBytes(bytes: number | null) { if (bytes === null) return "—"; if (bytes < 1024) return `${bytes} B`; const units = ["KB", "MB", "GB", "TB"]; let value = bytes / 1024; let unit = 0; while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; } return `${value.toLocaleString("nl-NL", { maximumFractionDigits: 1 })} ${units[unit]}`; }
 function typeLabel(item: FilemanagerDirectoryItem) { return item.kind === "directory" ? "Map" : item.kind === "symlink" ? "Symlink" : item.kind === "other" ? "Overig" : item.extension ? item.extension.toUpperCase() : "Bestand"; }
 function itemIcon(item: FilemanagerDirectoryItem) { return item.kind === "directory" ? Folder : item.extension && ["zip", "gz", "tar", "rar", "7z"].includes(item.extension) ? FileArchive : item.extension && ["php", "js", "css", "html", "json", "md", "xml", "twig", "scss"].includes(item.extension) ? FileCode2 : item.kind === "file" ? File : FileQuestion; }
 function closePreview() { previewRequestId += 1; preview.value = undefined; previewLoadingPath.value = undefined; previewError.value = undefined; }
-async function load(path: string, source: "normal" | "back" | "refresh" = "normal") { if (actionBusy.value && source !== "refresh" || loading.value && source !== "refresh") return; if (preview.value && !(await requestLeave())) return; closePreview(); selectedPaths.value = new Set(); if (source !== "refresh") { bulkResult.value = undefined; feedback.value = undefined; } const request = ++requestId; const site = props.context.siteId; loading.value = true; error.value = undefined; try { const result = await appApi.listFilemanagerDirectory(site, props.authorizationToken, path); if (request !== requestId || site !== props.context.siteId || result.currentPath !== path) return; const previous = listing.value?.currentPath; listing.value = result; if (source === "normal" && previous && previous !== result.currentPath) history.value.push(previous); if (source === "back") history.value.pop(); } catch (cause) { if (request !== requestId || site !== props.context.siteId) return; listing.value = undefined; if (authorizationExpired(cause)) { emit("expired"); return; } error.value = errorMessage(cause); } finally { if (request === requestId) loading.value = false; } }
+async function load(path: string, source: "normal" | "back" | "refresh" = "normal") { if (busy.value && source !== "refresh") return; const ctx = captureContext(); if (preview.value && !(await requestLeave())) return; if (!ctx.current()) return; closePreview(); selectedPaths.value = new Set(); if (source !== "refresh") { bulkResult.value = undefined; feedback.value = undefined; } const request = ++requestId; const site = props.context.siteId; loading.value = true; error.value = undefined; try { const result = await appApi.listFilemanagerDirectory(site, props.authorizationToken, path); if (request !== requestId || site !== props.context.siteId || result.currentPath !== path) return; const previous = listing.value?.currentPath; listing.value = result; if (source === "normal" && previous && previous !== result.currentPath) history.value.push(previous); if (source === "back") history.value.pop(); } catch (cause) { if (request !== requestId || site !== props.context.siteId) return; listing.value = undefined; if (authorizationExpired(cause)) { emit("expired"); return; } error.value = errorMessage(cause); } finally { if (request === requestId) loading.value = false; } }
 function openDirectory(item: FilemanagerDirectoryItem) { if (item.kind === "directory") void load(item.path); }
-async function openFile(item: FilemanagerDirectoryItem) { if (item.kind !== "file" || previewLoadingPath.value === item.path || !(await requestLeave())) return; const request = ++previewRequestId; previewLoadingPath.value = item.path; previewError.value = undefined; preview.value = undefined; try { const result = await appApi.readFilemanagerFile(props.context.siteId, props.authorizationToken, item.path); if (request !== previewRequestId || result.relativePath !== item.path) return; preview.value = result; } catch (cause) { if (request !== previewRequestId) return; if (authorizationExpired(cause)) { emit("expired"); return; } previewError.value = errorMessage(cause); } finally { if (request === previewRequestId) previewLoadingPath.value = undefined; } }
+async function openFile(item: FilemanagerDirectoryItem) { const ctx = captureContext(); if (item.kind !== "file" || previewLoadingPath.value === item.path || !(await requestLeave())) return; if (!ctx.current()) return; const request = ++previewRequestId; previewLoadingPath.value = item.path; previewError.value = undefined; preview.value = undefined; try { const result = await appApi.readFilemanagerFile(ctx.site, ctx.token, item.path); if (request !== previewRequestId || result.relativePath !== item.path) return; preview.value = result; } catch (cause) { if (request !== previewRequestId) return; if (authorizationExpired(cause)) { emit("expired"); return; } previewError.value = errorMessage(cause); } finally { if (request === previewRequestId) previewLoadingPath.value = undefined; } }
 function openCreate(kind: "file" | "directory") { if (busy.value || !listing.value) return; createKind.value = kind; newName.value = ""; createError.value = undefined; }
 function closeCreate() { if (!createBusy.value) { createKind.value = undefined; createError.value = undefined; } }
-async function createItem() { if (!createKind.value || !listing.value || !newName.value.trim() || createBusy.value) return; createBusy.value = true; createError.value = undefined; feedback.value = undefined; try { const current = listing.value.currentPath; const result = createKind.value === "file" ? await appApi.createFilemanagerFile(props.context.siteId, props.authorizationToken, { directory: current, name: newName.value }) : await appApi.createFilemanagerDirectory(props.context.siteId, props.authorizationToken, { directory: current, name: newName.value }); createKind.value = undefined; await load(current, "refresh"); feedback.value = result.kind === "file" ? "Bestand aangemaakt." : "Map aangemaakt."; if (result.kind === "file") { const item = listing.value?.items.find((entry) => entry.path === result.path); if (item) await openFile(item); } } catch (cause) { if (authorizationExpired(cause)) { emit("expired"); return; } createError.value = errorMessage(cause); } finally { createBusy.value = false; } }
-async function requestDelete(item: FilemanagerDirectoryItem) { if (!(["file", "directory", "symlink"] as string[]).includes(item.kind) || busy.value) return; if (preview.value?.relativePath === item.path) { if (!(await requestLeave())) return; closePreview(); } deleteTarget.value = item; deleteError.value = undefined; }
+async function createItem() {
+  if (!createKind.value || !listing.value || !newName.value.trim() || createBusy.value) return;
+  const ctx = captureContext(); const directory = listing.value.currentPath;
+  const input = { directory, name: newName.value }; const kind = createKind.value;
+  createBusy.value = true; createError.value = undefined; feedback.value = undefined;
+  try {
+    const result = kind === "file" ? await appApi.createFilemanagerFile(ctx.site, ctx.token, input) : await appApi.createFilemanagerDirectory(ctx.site, ctx.token, input);
+    if (!ctx.current()) return;
+    createKind.value = undefined; await load(directory, "refresh");
+    if (!ctx.current()) return;
+    feedback.value = result.kind === "file" ? "Bestand aangemaakt." : "Map aangemaakt.";
+    if (result.kind === "file") { const item = listing.value?.items.find((entry) => entry.path === result.path); if (item) await openFile(item); }
+  } catch (cause) {
+    if (!ctx.current()) return;
+    if (authorizationExpired(cause)) { emit("expired"); return; }
+    createError.value = errorMessage(cause);
+  } finally { if (ctx.current()) createBusy.value = false; }
+}
+async function requestDelete(item: FilemanagerDirectoryItem) { const ctx = captureContext(); if (!(["file", "directory", "symlink"] as string[]).includes(item.kind) || busy.value) return; if (preview.value?.relativePath === item.path) { if (!(await requestLeave()) || !ctx.current()) return; closePreview(); } if (!ctx.current()) return; deleteTarget.value = item; deleteError.value = undefined; }
 function closeDelete() { if (!deleteBusy.value) { deleteTarget.value = undefined; deleteError.value = undefined; } }
-async function confirmDelete() { const target = deleteTarget.value; if (!target || deleteBusy.value) return; deleteBusy.value = true; deleteError.value = undefined; feedback.value = undefined; try { const result = await appApi.deleteFilemanagerItem(props.context.siteId, props.authorizationToken, { path: target.path, expectedKind: target.kind as FilemanagerMutationKind }); const current = listing.value?.currentPath ?? "/"; deleteTarget.value = undefined; await load(current, "refresh"); feedback.value = result.kind === "directory" ? "Map verwijderd." : "Bestand verwijderd."; } catch (cause) { if (authorizationExpired(cause)) { emit("expired"); return; } deleteError.value = errorMessage(cause); } finally { deleteBusy.value = false; } }
+async function confirmDelete() {
+  const target = deleteTarget.value; if (!target || deleteBusy.value) return;
+  const ctx = captureContext(); const directory = listing.value?.currentPath ?? "/";
+  deleteBusy.value = true; deleteError.value = undefined; feedback.value = undefined;
+  try {
+    const result = await appApi.deleteFilemanagerItem(ctx.site, ctx.token, { path: target.path, expectedKind: target.kind as FilemanagerMutationKind });
+    if (!ctx.current()) return;
+    deleteTarget.value = undefined; await load(directory, "refresh");
+    if (ctx.current()) feedback.value = result.kind === "directory" ? "Map verwijderd." : "Bestand verwijderd.";
+  } catch (cause) {
+    if (!ctx.current()) return;
+    if (authorizationExpired(cause)) { emit("expired"); return; }
+    deleteError.value = errorMessage(cause);
+  } finally { if (ctx.current()) deleteBusy.value = false; }
+}
 async function saveFile(content: string, expectedVersion: string) { const path = preview.value?.relativePath; const request = previewRequestId; if (!path) throw new Error("Open het bestand opnieuw."); const result = await appApi.saveFilemanagerFile(props.context.siteId, props.authorizationToken, { path, content, expectedVersion }); if (request !== previewRequestId || result.relativePath !== path) throw new Error("De bestandscontext is gewijzigd. Open het bestand opnieuw."); return result; }
 function fileSaved(result: FilemanagerFilePreview) { if (preview.value?.relativePath !== result.relativePath) return; preview.value = result; const item = listing.value?.items.find((entry) => entry.path === result.relativePath); if (item) { item.size = result.sizeBytes; item.modifiedAt = result.modifiedAt ?? null; } }
 async function reloadFile() { const path = preview.value?.relativePath; const request = previewRequestId; if (!path) return; const result = await appApi.readFilemanagerFile(props.context.siteId, props.authorizationToken, path); if (request === previewRequestId && result.relativePath === path) fileSaved(result); }
 function goBack() { const path = history.value[history.value.length - 1]; if (path) void load(path, "back"); } function goUp() { if (listing.value?.parentPath) void load(listing.value.parentPath); }
-onMounted(() => { void load("/"); void appApi.getSettings().then((settings) => { filePreviewMode.value = settings.filePreviewMode; markdownPreviewMode.value = settings.markdownPreviewMode; }).catch(() => undefined); }); onBeforeUnmount(() => { removeNavigationGuard?.(); requestId += 1; previewRequestId += 1; });
+onMounted(() => { void load("/"); void appApi.getSettings().then((settings) => { filePreviewMode.value = settings.filePreviewMode; markdownPreviewMode.value = settings.markdownPreviewMode; }).catch(() => undefined); }); onBeforeUnmount(() => { contextGeneration += 1; removeNavigationGuard?.(); requestId += 1; previewRequestId += 1; });
 </script>
 <template>
   <section class="filemanager-browser" :aria-busy="busy">
@@ -87,9 +191,9 @@ onMounted(() => { void load("/"); void appApi.getSettings().then((settings) => {
     </table></div>
     <ChecksumFilePreview v-if="preview" ref="previewComponent" :preview="preview" :save-file="saveFile" :reload-file="reloadFile" :default-fullscreen="filePreviewMode === 'fullscreen'" :default-markdown-mode="markdownPreviewMode" close-label="Terug naar map" @saved="fileSaved" @close="closePreview" />
   </section>
-  <div v-if="createKind" class="modal-backdrop" role="presentation" @click.self="closeCreate"><section class="modal" role="dialog" aria-modal="true" :aria-label="createKind === 'file' ? 'Nieuw bestand' : 'Nieuwe map'"><h2>{{ createKind === 'file' ? 'Nieuw bestand' : 'Nieuwe map' }}</h2><p class="modal-copy">Maak dit item aan in <code>{{ listing?.currentPath }}</code>.</p><p v-if="createError" class="error-banner" role="alert">{{ createError }}</p><label for="filemanager-new-name">{{ createKind === 'file' ? 'Bestandsnaam' : 'Mapnaam' }}</label><input id="filemanager-new-name" v-model="newName" :disabled="createBusy" autocomplete="off" @keydown.enter.prevent="createItem" /><div class="modal-actions"><button class="button secondary" :disabled="createBusy" @click="closeCreate">Annuleren</button><button class="button primary" :disabled="createBusy || !newName.trim()" @click="createItem"><LoaderCircle v-if="createBusy" class="spin" :size="15" />{{ createBusy ? 'Aanmaken…' : 'Aanmaken' }}</button></div></section></div>
+  <div v-if="createKind" class="modal-backdrop" role="presentation" @click.self="closeCreate"><section v-dialog-focus="closeCreate" class="modal" role="dialog" aria-modal="true" :aria-label="createKind === 'file' ? 'Nieuw bestand' : 'Nieuwe map'"><h2>{{ createKind === 'file' ? 'Nieuw bestand' : 'Nieuwe map' }}</h2><p class="modal-copy">Maak dit item aan in <code>{{ listing?.currentPath }}</code>.</p><p v-if="createError" class="error-banner" role="alert">{{ createError }}</p><label for="filemanager-new-name">{{ createKind === 'file' ? 'Bestandsnaam' : 'Mapnaam' }}</label><input id="filemanager-new-name" v-model="newName" :disabled="createBusy" autocomplete="off" @keydown.enter.prevent="createItem" /><div class="modal-actions"><button class="button secondary" :disabled="createBusy" @click="closeCreate">Annuleren</button><button class="button primary" :disabled="createBusy || !newName.trim()" @click="createItem"><LoaderCircle v-if="createBusy" class="spin" :size="15" />{{ createBusy ? 'Aanmaken…' : 'Aanmaken' }}</button></div></section></div>
   <ConfirmDialog v-if="deleteTarget" :title="deleteTarget.kind === 'directory' ? 'Map verwijderen?' : 'Bestand verwijderen?'" confirm-label="Verwijderen" danger :busy="deleteBusy" @cancel="closeDelete" @confirm="confirmDelete"><p>Weet je zeker dat je <strong>{{ deleteTarget.name }}</strong> wilt verwijderen?</p><p v-if="deleteTarget.kind === 'directory'">Alleen een lege map kan worden verwijderd.</p><p v-if="deleteError" class="error-banner" role="alert">{{ deleteError }}</p></ConfirmDialog>
-  <div v-if="permissionTarget || bulkPermissionOpen" class="modal-backdrop" role="presentation" @click.self="closeAction"><section class="modal" role="dialog" aria-modal="true" aria-label="Permissions wijzigen"><h2>Permissions wijzigen</h2><p v-if="permissionTarget">{{ permissionTarget.kind === 'directory' ? 'Map' : 'Bestand' }}: <strong>{{ permissionTarget.name }}</strong><br />Huidige permissions: <code>{{ permissionTarget.permissions ?? 'onbekend' }}</code></p><p v-else>Nieuwe permissions worden toegepast op {{ selectedCount }} geselecteerde items in deze map, zonder onderliggende bestanden te wijzigen.</p><p v-if="permissionTarget?.kind === 'directory'" class="filemanager-warning">Het wijzigen van maprechten kan de toegang tot die map beperken.</p><label for="filemanager-permissions">Nieuwe permissions</label><input id="filemanager-permissions" v-model="permissionMode" inputmode="numeric" maxlength="3" pattern="[0-7]{3}" :disabled="actionBusy" autocomplete="off" autofocus @keydown.enter.prevent="applyPermissions" /><small>Drie octale cijfers, bijvoorbeeld 644 of 755.</small><p v-if="actionError" class="error-banner" role="alert">{{ actionError }}</p><div class="modal-actions"><button class="button secondary" :disabled="actionBusy" @click="closeAction">Annuleren</button><button class="button primary" :disabled="actionBusy || !/^[0-7]{3}$/.test(permissionMode)" @click="applyPermissions">{{ actionBusy ? 'Toepassen…' : 'Toepassen' }}</button></div></section></div>
+  <div v-if="permissionTarget || bulkPermissionOpen" class="modal-backdrop" role="presentation" @click.self="closeAction"><section v-dialog-focus="closeAction" class="modal" role="dialog" aria-modal="true" aria-label="Permissions wijzigen"><h2>Permissions wijzigen</h2><p v-if="permissionTarget">{{ permissionTarget.kind === 'directory' ? 'Map' : 'Bestand' }}: <strong>{{ permissionTarget.name }}</strong><br />Huidige permissions: <code>{{ permissionTarget.permissions ?? 'onbekend' }}</code></p><p v-else>Nieuwe permissions worden toegepast op {{ selectedCount }} geselecteerde items in deze map, zonder onderliggende bestanden te wijzigen.</p><p v-if="permissionTarget?.kind === 'directory'" class="filemanager-warning">Het wijzigen van maprechten kan de toegang tot die map beperken.</p><label for="filemanager-permissions">Nieuwe permissions</label><input id="filemanager-permissions" v-model="permissionMode" inputmode="numeric" maxlength="3" pattern="[0-7]{3}" :disabled="actionBusy" autocomplete="off" autofocus @keydown.enter.prevent="applyPermissions" /><small>Drie octale cijfers, bijvoorbeeld 644 of 755.</small><p v-if="actionError" class="error-banner" role="alert">{{ actionError }}</p><div class="modal-actions"><button class="button secondary" :disabled="actionBusy" @click="closeAction">Annuleren</button><button class="button primary" :disabled="actionBusy || !/^[0-7]{3}$/.test(permissionMode)" @click="applyPermissions">{{ actionBusy ? 'Toepassen…' : 'Toepassen' }}</button></div></section></div>
   <ConfirmDialog v-if="bulkDeleteOpen" title="Geselecteerde items verwijderen?" :confirm-label="`${selectedCount} items verwijderen`" danger :busy="actionBusy" @cancel="closeAction" @confirm="confirmBulkDelete"><p>Weet je zeker dat je deze {{ selectedCount }} items wilt verwijderen?</p><ul><li v-for="item in selectedItems.slice(0, 5)" :key="item.path">{{ item.name }}</li></ul><p v-if="selectedCount > 5">En nog {{ selectedCount - 5 }} andere items.</p><p>Alleen lege mappen worden verwijderd. Dit kan niet ongedaan worden gemaakt.</p><p v-if="actionError" class="error-banner" role="alert">{{ actionError }}</p></ConfirmDialog>
 </template>
 <style scoped>

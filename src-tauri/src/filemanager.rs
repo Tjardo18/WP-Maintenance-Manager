@@ -25,6 +25,7 @@ struct Access {
 pub struct FilemanagerAccessManager {
     // Serialize saves across access tokens, including two editors of the same site.
     saves: Mutex<()>,
+    downloads: Mutex<()>,
     // Separate instance: terminal challenges can never authorize this feature.
     challenges: TerminalAccessManager,
     access: Mutex<Vec<Access>>,
@@ -58,6 +59,15 @@ fn configuration(site: &Site) -> [u8; 32] {
 }
 
 impl FilemanagerAccessManager {
+    pub fn reserve_download(&self) -> Result<std::sync::MutexGuard<'_, ()>, AppError> {
+        self.downloads.try_lock().map_err(|_| {
+            AppError::unauthorized(
+                "filemanager_busy",
+                "Er is al een download of opslagdialoog actief. Rond deze eerst af.",
+            )
+        })
+    }
+
     pub fn begin(&self, session: &str, site: &Site) -> Result<TerminalChallengeInfo, AppError> {
         let challenge = self.challenges.create_challenge(session, &site.id)?;
         let mut entries = self.access.lock().map_err(|_| denied())?;
@@ -174,9 +184,15 @@ impl FilemanagerAccessManager {
         site: &Site,
         token: &str,
         requested: &str,
+        authorize: impl Fn() -> Result<(), AppError>,
     ) -> Result<crate::filemanager_directory::DirectoryListing, AppError> {
-        self.with_connection(session, site, token, |connection| {
-            crate::ssh::list_filemanager_directory(connection, &site.wordpress_path, requested)
+        self.with_connection(session, site, token, &authorize, |connection, check| {
+            crate::ssh::list_filemanager_directory(
+                connection,
+                &site.wordpress_path,
+                requested,
+                check,
+            )
         })
     }
 
@@ -186,9 +202,10 @@ impl FilemanagerAccessManager {
         site: &Site,
         token: &str,
         requested: &str,
+        authorize: impl Fn() -> Result<(), AppError>,
     ) -> Result<crate::models::FileContentPreview, AppError> {
-        self.with_connection(session, site, token, |connection| {
-            crate::ssh::read_filemanager_file(connection, &site.wordpress_path, requested)
+        self.with_connection(session, site, token, &authorize, |connection, check| {
+            crate::ssh::read_filemanager_file(connection, &site.wordpress_path, requested, check)
         })
     }
 
@@ -197,7 +214,8 @@ impl FilemanagerAccessManager {
         session: &str,
         site: &Site,
         token: &str,
-        operation: impl FnOnce(&ssh2::Session) -> Result<T, AppError>,
+        authorize: &dyn Fn() -> Result<(), AppError>,
+        operation: impl FnOnce(&ssh2::Session, &dyn Fn() -> Result<(), AppError>) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let connection = self.with_entry(session, site, token, true, |entry| {
             entry.connection.clone().ok_or_else(denied)
@@ -209,7 +227,12 @@ impl FilemanagerAccessManager {
                 "Er is al een filemanageractie bezig voor deze toegang. Probeer het zo opnieuw.",
             )
         })?;
-        let result = operation(&guard);
+        let check = || {
+            authorize()?;
+            self.authorize(session, site, token).map(|_| ())
+        };
+        check()?;
+        let result = operation(&guard, &check);
         drop(guard);
         if result.as_ref().is_err_and(|error| {
             matches!(
@@ -243,14 +266,14 @@ impl FilemanagerAccessManager {
                 "Er wordt al een bestand opgeslagen. Probeer het zo opnieuw.",
             )
         })?;
-        self.with_connection(session, site, token, |connection| {
+        self.with_connection(session, site, token, &authorize, |connection, check| {
             crate::ssh::save_filemanager_file(
                 connection,
                 &site.wordpress_path,
                 &input.path,
                 &input.content,
                 &input.expected_version,
-                &authorize,
+                check,
             )
         })
     }
@@ -261,9 +284,10 @@ impl FilemanagerAccessManager {
         site: &Site,
         token: &str,
         input: &crate::filemanager_mutation::CreateInput,
+        authorize: impl Fn() -> Result<(), AppError>,
     ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
-        self.with_connection(session, site, token, |connection| {
-            crate::ssh::create_filemanager_file(connection, &site.wordpress_path, input)
+        self.with_connection(session, site, token, &authorize, |connection, check| {
+            crate::ssh::create_filemanager_file(connection, &site.wordpress_path, input, check)
         })
     }
     pub fn create_directory(
@@ -272,9 +296,10 @@ impl FilemanagerAccessManager {
         site: &Site,
         token: &str,
         input: &crate::filemanager_mutation::CreateInput,
+        authorize: impl Fn() -> Result<(), AppError>,
     ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
-        self.with_connection(session, site, token, |connection| {
-            crate::ssh::create_filemanager_directory(connection, &site.wordpress_path, input)
+        self.with_connection(session, site, token, &authorize, |connection, check| {
+            crate::ssh::create_filemanager_directory(connection, &site.wordpress_path, input, check)
         })
     }
     pub fn delete_item(
@@ -283,9 +308,10 @@ impl FilemanagerAccessManager {
         site: &Site,
         token: &str,
         input: &crate::filemanager_mutation::DeleteInput,
+        authorize: impl Fn() -> Result<(), AppError>,
     ) -> Result<crate::filemanager_mutation::MutationResult, AppError> {
-        self.with_connection(session, site, token, |connection| {
-            crate::ssh::delete_filemanager_item(connection, &site.wordpress_path, input)
+        self.with_connection(session, site, token, &authorize, |connection, check| {
+            crate::ssh::delete_filemanager_item(connection, &site.wordpress_path, input, check)
         })
     }
 
@@ -295,9 +321,15 @@ impl FilemanagerAccessManager {
         site: &Site,
         token: &str,
         input: &crate::filemanager_mutation::PermissionInput,
+        authorize: impl Fn() -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        self.with_connection(session, site, token, |connection| {
-            crate::ssh::change_filemanager_permissions(connection, &site.wordpress_path, input)
+        self.with_connection(session, site, token, &authorize, |connection, check| {
+            crate::ssh::change_filemanager_permissions(
+                connection,
+                &site.wordpress_path,
+                input,
+                check,
+            )
         })
     }
 
@@ -307,9 +339,15 @@ impl FilemanagerAccessManager {
         site: &Site,
         token: &str,
         input: &crate::filemanager_mutation::BulkPermissionInput,
+        authorize: impl Fn() -> Result<(), AppError>,
     ) -> Result<crate::filemanager_mutation::BulkResult, AppError> {
-        self.with_connection(session, site, token, |connection| {
-            crate::ssh::change_filemanager_permissions_bulk(connection, &site.wordpress_path, input)
+        self.with_connection(session, site, token, &authorize, |connection, check| {
+            crate::ssh::change_filemanager_permissions_bulk(
+                connection,
+                &site.wordpress_path,
+                input,
+                check,
+            )
         })
     }
 
@@ -319,9 +357,10 @@ impl FilemanagerAccessManager {
         site: &Site,
         token: &str,
         input: &crate::filemanager_mutation::BulkInput,
+        authorize: impl Fn() -> Result<(), AppError>,
     ) -> Result<crate::filemanager_mutation::BulkResult, AppError> {
-        self.with_connection(session, site, token, |connection| {
-            crate::ssh::delete_filemanager_bulk(connection, &site.wordpress_path, input)
+        self.with_connection(session, site, token, &authorize, |connection, check| {
+            crate::ssh::delete_filemanager_bulk(connection, &site.wordpress_path, input, check)
         })
     }
 
@@ -332,9 +371,16 @@ impl FilemanagerAccessManager {
         token: &str,
         input: &crate::filemanager_mutation::BulkInput,
         output: &mut W,
+        authorize: impl Fn() -> Result<(), AppError>,
     ) -> Result<crate::filemanager_download::DownloadResult, AppError> {
-        self.with_connection(session, site, token, |connection| {
-            crate::ssh::write_filemanager_download(connection, &site.wordpress_path, input, output)
+        self.with_connection(session, site, token, &authorize, |connection, check| {
+            crate::ssh::write_filemanager_download(
+                connection,
+                &site.wordpress_path,
+                input,
+                output,
+                check,
+            )
         })
     }
 
@@ -427,6 +473,15 @@ pub fn context(database: &Database, site_id: &str) -> Result<FilemanagerContext,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_dialog_reservation_is_exclusive_and_released() {
+        let manager = FilemanagerAccessManager::default();
+        let reservation = manager.reserve_download().unwrap();
+        assert!(manager.reserve_download().is_err());
+        drop(reservation);
+        assert!(manager.reserve_download().is_ok());
+    }
     use uuid::Uuid;
 
     fn site() -> Site {
@@ -620,9 +675,10 @@ mod tests {
         let token = manager.install_test_access(&session, &site);
         assert!(
             manager
-                .with_connection(&session, &site, &token, |_| {
+                .with_connection(&session, &site, &token, &|| Ok(()), |_, check| {
                     // No global mutex is held, so close can complete while I/O is in flight.
                     manager.close(&session, &site.id, &token);
+                    assert_eq!(check().unwrap_err().category, "filemanager_auth_required");
                     Ok(())
                 })
                 .is_err()
@@ -641,10 +697,10 @@ mod tests {
         ] {
             let token = manager.install_test_access(&session, &site);
             let result: Result<(), AppError> =
-                manager.with_connection(&session, &site, &token, |_| {
+                manager.with_connection(&session, &site, &token, &|| Ok(()), |_, _| {
                     assert_eq!(
                         manager
-                            .with_connection(&session, &site, &token, |_| Ok(()))
+                            .with_connection(&session, &site, &token, &|| Ok(()), |_, _| Ok(()))
                             .unwrap_err()
                             .category,
                         "filemanager_busy"
@@ -708,11 +764,119 @@ mod tests {
         let mut output = std::io::Cursor::new(Vec::new());
         assert_eq!(
             manager
-                .download(&session, &other, &token, &input, &mut output)
+                .download(&session, &other, &token, &input, &mut output, || Ok(()))
                 .unwrap_err()
                 .category,
             "filemanager_auth_required"
         );
         assert!(output.get_ref().is_empty());
+    }
+
+    #[test]
+    fn every_filesystem_service_rejects_cross_site_and_expired_access_before_transport() {
+        use crate::filemanager_mutation::{
+            BulkInput, BulkPermissionInput, CreateInput, DeleteInput, ItemKind, PermissionInput,
+        };
+        for expired in [false, true] {
+            let manager = FilemanagerAccessManager::default();
+            let original = site();
+            let session = Uuid::new_v4().to_string();
+            let token = manager.install_test_access(&session, &original);
+            let mut requested = original.clone();
+            if expired {
+                manager.access.lock().unwrap()[0].expires = Instant::now() - Duration::from_secs(1);
+            } else {
+                requested.id = Uuid::new_v4().to_string();
+            }
+            let create = CreateInput {
+                directory: "/".into(),
+                name: "a.php".into(),
+            };
+            let item = DeleteInput {
+                path: "/a.php".into(),
+                expected_kind: ItemKind::File,
+            };
+            let permission = PermissionInput {
+                path: item.path.clone(),
+                expected_kind: item.expected_kind,
+                mode: "644".into(),
+            };
+            let bulk = BulkInput {
+                directory: "/".into(),
+                items: vec![item.clone()],
+            };
+            let permissions = BulkPermissionInput {
+                directory: "/".into(),
+                items: bulk.items.clone(),
+                mode: "644".into(),
+            };
+            let save = crate::filemanager_edit::SaveInput {
+                path: item.path.clone(),
+                content: "test".into(),
+                expected_version: "a".repeat(64),
+            };
+            let mut output = std::io::Cursor::new(Vec::new());
+            let results = [
+                manager
+                    .list_directory(&session, &requested, &token, "/", || Ok(()))
+                    .map(|_| ()),
+                manager
+                    .read_file(&session, &requested, &token, "/a.php", || Ok(()))
+                    .map(|_| ()),
+                manager
+                    .save_file(&session, &requested, &token, &save, || Ok(()))
+                    .map(|_| ()),
+                manager
+                    .create_file(&session, &requested, &token, &create, || Ok(()))
+                    .map(|_| ()),
+                manager
+                    .create_directory(&session, &requested, &token, &create, || Ok(()))
+                    .map(|_| ()),
+                manager
+                    .delete_item(&session, &requested, &token, &item, || Ok(()))
+                    .map(|_| ()),
+                manager.change_permissions(&session, &requested, &token, &permission, || Ok(())),
+                manager
+                    .delete_bulk(&session, &requested, &token, &bulk, || Ok(()))
+                    .map(|_| ()),
+                manager
+                    .change_permissions_bulk(&session, &requested, &token, &permissions, || Ok(()))
+                    .map(|_| ()),
+                manager
+                    .download(&session, &requested, &token, &bulk, &mut output, || Ok(()))
+                    .map(|_| ()),
+            ];
+            for result in results {
+                assert_eq!(result.unwrap_err().category, "filemanager_auth_required");
+            }
+            assert!(output.get_ref().is_empty());
+        }
+    }
+
+    #[test]
+    fn operation_guard_rechecks_app_session_and_fixed_access_expiry() {
+        let manager = FilemanagerAccessManager::default();
+        let site = site();
+        let session = Uuid::new_v4().to_string();
+        let token = manager.install_test_access(&session, &site);
+        let app_active = std::cell::Cell::new(true);
+        let validate_app = || {
+            if app_active.get() {
+                Ok(())
+            } else {
+                Err(AppError::unauthorized("locked", "Vergrendeld"))
+            }
+        };
+        manager
+            .with_connection(&session, &site, &token, &validate_app, |_, check| {
+                check()?;
+                app_active.set(false);
+                assert_eq!(check().unwrap_err().category, "locked");
+                app_active.set(true);
+                manager.access.lock().unwrap()[0].expires = Instant::now() - Duration::from_secs(1);
+                assert_eq!(check().unwrap_err().category, "filemanager_auth_required");
+                Ok(())
+            })
+            .unwrap_err();
     }
 }

@@ -9,12 +9,16 @@ This feature is developed on `feature/filemanager`, with phase 1 on
 `feature/filemanager-phase-6-file-editing`, followed by phase 7 on
 `feature/filemanager-phase-7-create-delete`, followed by phase 8 on
 `feature/filemanager-phase-8-permissions-bulk`, followed by phase 9 on
-`feature/filemanager-phase-9-downloads`. It must not be merged into `main`
+`feature/filemanager-phase-9-downloads`, followed by the phase-10 audit on
+`feature/filemanager-phase-10-hardening`. It must not be merged into `main`
 without a later explicit instruction. The application version is unchanged.
 Phase 8 permission and bulk safety rules are in
 [`FILEMANAGER_PERMISSIONS_BULK.md`](FILEMANAGER_PERMISSIONS_BULK.md).
 Phase 9 download and archive safety rules are in
 [`FILEMANAGER_DOWNLOADS.md`](FILEMANAGER_DOWNLOADS.md).
+The current acceptance evidence, fixes and remaining live-verification gates are
+in [`FILEMANAGER_AUDIT.md`](FILEMANAGER_AUDIT.md). Phase descriptions below are
+historical: phases 1–9 are implemented, not pending work.
 
 ## Existing architecture and reuse
 
@@ -222,9 +226,11 @@ revokes filemanager access; ordinary missing-directory/permission errors do not.
 authorization token. Only after its server-side guard succeeds does it mount
 `FilemanagerBrowser.vue`; the browser receives the current website context and
 that ephemeral token as props. An authorization error from a directory request
-emits `expired` back to the access component, which immediately unmounts the
-browser, clears its state, revokes access through the existing cleanup flow and
-returns to the app-password step. No directory content remains visible.
+emits `expired` back to the access component. Normally it unmounts the browser,
+clears its state, revokes access and returns to the app-password step. Since
+phase 6/10, a dirty editor instead retains its in-memory draft with an explicit
+expired-access message and discard/re-authentication action; backend access is
+revoked either way. Application lock still clears protected content.
 
 The browser makes exactly one `appApi.listFilemanagerDirectory(siteId, token,
 virtualPath)` request for each successful navigation. It does not derive a server
@@ -317,9 +323,9 @@ SFTP backend stages, verifies and atomically replaces existing files without
 truncating the original. See [FILEMANAGER_EDITING.md](FILEMANAGER_EDITING.md) for
 the full flow, permission/ownership handling, limits and live-verification steps.
 
-## Next phases (not implemented)
+## Phases 7–9: create/delete, permissions/bulk and downloads
 
-Future write operations belong in `filemanager.rs`, with the established
+Write operations belong in `filemanager.rs`, with the established
 `ssh.rs` transport, backend-owned site context and centralized path validation.
 Do not use metadata or UI state as authorization and do not substitute stored
 credentials for the two-password gate. Phase 7 adds only named create and

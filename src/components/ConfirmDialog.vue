@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { AlertTriangle, X } from "@lucide/vue";
+import { vDialogFocus } from "../utils/dialogFocus";
 const props = defineProps<{ title: string; confirmLabel?: string; busy?: boolean; danger?: boolean; confirmDisabled?: boolean; wide?: boolean }>();
 const emit = defineEmits<{ confirm: []; cancel: [] }>();
 function cancel() { if (!props.busy) emit("cancel"); }
 </script>
 <template>
   <div class="modal-backdrop" role="presentation" @click.self="cancel">
-    <section :class="['modal', { 'modal-wide': wide }]" role="dialog" aria-modal="true" :aria-label="title">
+    <section v-dialog-focus="cancel" :class="['modal', { 'modal-wide': wide }]" role="dialog" aria-modal="true" :aria-label="title">
       <button class="icon-button modal-close" aria-label="Sluiten" :disabled="busy" @click="cancel"><X :size="18" /></button>
       <span class="modal-icon"><AlertTriangle :size="23" /></span>
       <h2>{{ title }}</h2><div class="modal-copy"><slot /></div>

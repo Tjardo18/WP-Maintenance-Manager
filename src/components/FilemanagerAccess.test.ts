@@ -1,6 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FilemanagerAccess from "./FilemanagerAccess.vue";
+import FilemanagerBrowser from "./FilemanagerBrowser.vue";
 
 const api = vi.hoisted(() => ({ beginFilemanagerReauthentication: vi.fn(), openFilemanager: vi.fn(), getFilemanagerAuthorization: vi.fn(), closeFilemanager: vi.fn(), listFilemanagerDirectory: vi.fn(), readFilemanagerFile: vi.fn(), getSettings: vi.fn() }));
 vi.mock("../services/tauri", () => ({ appApi: api }));
@@ -107,7 +108,7 @@ describe("filemanager two-password gate", () => {
     wrapper.unmount();
   });
 
-  it("revokes timed-out access but keeps an unsaved draft until confirmed discarded", async () => {
+  it.each(["timer", "backend"])("revokes %s access but keeps an unsaved draft until confirmed discarded", async (source) => {
     vi.useFakeTimers();
     api.listFilemanagerDirectory.mockResolvedValue({ currentPath: '/', isRoot: true, parentPath: null, items: [{ name: 'a.php', path: '/a.php', kind: 'file', size: 3, extension: 'php', permissions: '644', modifiedAt: null }], truncated: false });
     api.readFilemanagerFile.mockResolvedValue({ fileName: 'a.php', relativePath: '/a.php', fileType: 'php', sizeBytes: 3, textContent: 'old', binary: false, truncated: false, editVersion: 'a'.repeat(64) });
@@ -115,7 +116,8 @@ describe("filemanager two-password gate", () => {
     await w.get('[aria-label="Bekijk a.php"]').trigger('click'); await flushPromises();
     await w.findAll('button').find((b) => b.text() === 'Bewerken')!.trigger('click');
     await w.get('textarea').setValue('draft');
-    await vi.advanceTimersByTimeAsync(899000);
+    if (source === "timer") await vi.advanceTimersByTimeAsync(899000);
+    else { w.findComponent(FilemanagerBrowser).vm.$emit('expired'); await flushPromises(); }
     expect(api.closeFilemanager).toHaveBeenCalledWith('site-a', 'challenge-a');
     expect((w.get('textarea').element as HTMLTextAreaElement).value).toBe('draft');
     expect(w.text()).toContain('verlopen');
