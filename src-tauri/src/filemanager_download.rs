@@ -646,6 +646,56 @@ mod tests {
         );
     }
     #[test]
+    fn archive_builder_rejects_unsafe_descendants_and_counts_queued_entries() {
+        for name in [".. ", "folder.", "CON.txt", "NUL"] {
+            let mut remote = Remote::fixture();
+            remote.files.insert(
+                format!("/srv/site/root/wp-content/{name}"),
+                b"unsafe".to_vec(),
+            );
+            let mut output = Cursor::new(Vec::new());
+            assert_eq!(
+                write_download(
+                    &mut remote,
+                    "/srv/site/root",
+                    &selected(&[("/wp-content", ItemKind::Directory)]),
+                    &mut output
+                )
+                .unwrap_err()
+                .category,
+                "filemanager_archive_path"
+            );
+        }
+
+        let mut remote = Remote::fixture();
+        let mut directory = "/srv/site/root/wp-content".to_string();
+        for _ in 0..3 {
+            for index in 0..3400 {
+                remote
+                    .files
+                    .insert(format!("{directory}/file-{index}.txt"), vec![]);
+            }
+            directory.push_str("/child");
+            remote.dirs.insert(directory.clone());
+        }
+        // Directories sort before files. Reject excessive queued work before copying
+        // the first file, rather than discovering the limit only after processing it.
+        remote.fail_read = true;
+        let mut output = Cursor::new(Vec::new());
+        assert_eq!(
+            write_download(
+                &mut remote,
+                "/srv/site/root",
+                &selected(&[("/wp-content", ItemKind::Directory)]),
+                &mut output
+            )
+            .unwrap_err()
+            .category,
+            "filemanager_archive_limit"
+        );
+    }
+
+    #[test]
     fn archive_entries_reject_zip_slip_and_windows_paths() {
         for path in [
             "../escape",

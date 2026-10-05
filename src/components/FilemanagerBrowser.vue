@@ -144,7 +144,7 @@ async function createItem() {
     createError.value = errorMessage(cause);
   } finally { if (ctx.current()) createBusy.value = false; }
 }
-async function requestDelete(item: FilemanagerDirectoryItem) { const ctx = captureContext(); if (!(["file", "directory", "symlink"] as string[]).includes(item.kind) || busy.value) return; if (preview.value?.relativePath === item.path) { if (!(await requestLeave())) return; closePreview(); } if (!ctx.current()) return; deleteTarget.value = item; deleteError.value = undefined; }
+async function requestDelete(item: FilemanagerDirectoryItem) { const ctx = captureContext(); if (!(["file", "directory", "symlink"] as string[]).includes(item.kind) || busy.value) return; if (preview.value?.relativePath === item.path) { if (!(await requestLeave()) || !ctx.current()) return; closePreview(); } if (!ctx.current()) return; deleteTarget.value = item; deleteError.value = undefined; }
 function closeDelete() { if (!deleteBusy.value) { deleteTarget.value = undefined; deleteError.value = undefined; } }
 async function confirmDelete() {
   const target = deleteTarget.value; if (!target || deleteBusy.value) return;

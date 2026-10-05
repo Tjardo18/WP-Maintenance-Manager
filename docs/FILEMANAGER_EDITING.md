@@ -1,8 +1,10 @@
 # Filemanager phase 6 — existing text files
 
 This phase targets `feature/filemanager`, never `main`/`master`. No dependencies,
-database migrations or application-version changes are required. Creating or
-deleting user files, downloads and permission controls are not implemented.
+database migrations or application-version changes are required. Creating/deleting
+files, permissions and downloads were added in phases 7–9; this document describes
+the phase-6 editing design. See [FILEMANAGER_AUDIT.md](FILEMANAGER_AUDIT.md) for
+the phase-10 verification scope and rollout gates.
 
 ## User flow
 
