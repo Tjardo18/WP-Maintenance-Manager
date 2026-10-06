@@ -156,6 +156,7 @@ mod tests {
     #[derive(Default)]
     struct Remote {
         entries: HashMap<String, ssh2::FileStat>,
+        aliases: HashMap<String, String>,
         unlinked: Vec<String>,
         lookups: Vec<String>,
         fail: Option<&'static str>,
@@ -181,7 +182,11 @@ mod tests {
     }
     impl RemotePaths for Remote {
         fn realpath(&mut self, path: &str) -> Result<String, AppError> {
-            Ok(path.into())
+            Ok(self
+                .aliases
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| path.into()))
         }
         fn lstat(&mut self, path: &str) -> Result<ssh2::FileStat, AppError> {
             self.lookups.push(path.into());
@@ -419,5 +424,36 @@ mod tests {
         }
         list_directory(&mut remote, ROOT, "/", NOW, true).unwrap();
         assert_eq!(remote.unlinked.len(), MAX_CLEANUP_CANDIDATES);
+    }
+
+    #[test]
+    fn external_symlink_target_and_canonical_escape_remain_untouched() {
+        let mut remote = Remote::fixture();
+        remote
+            .entries
+            .insert("/etc/passwd".into(), stat(0o100644, Some(0)));
+        let link = remote.add(&new_name(), 0o120777, 7200);
+        remote.aliases.insert(link.clone(), "/etc/passwd".into());
+        list_directory(&mut remote, ROOT, "/", NOW, true).unwrap();
+        assert!(remote.entries.contains_key(&link));
+        assert!(remote.entries.contains_key("/etc/passwd"));
+        assert!(
+            !remote
+                .lookups
+                .iter()
+                .any(|p| p == &link || p == "/etc/passwd")
+        );
+        let temp = remote.add(&new_name(), 0o100600, 7200);
+        remote
+            .aliases
+            .insert(temp.clone(), "/srv/site-a-backup/file".into());
+        assert_eq!(
+            list_directory(&mut remote, ROOT, "/", NOW, true)
+                .unwrap_err()
+                .category,
+            "filemanager_outside_root"
+        );
+        assert!(remote.entries.contains_key(&temp));
+        assert!(remote.unlinked.is_empty());
     }
 }
