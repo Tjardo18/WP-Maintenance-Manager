@@ -81,6 +81,10 @@ a conflict. A successful first editor invalidates a second editor's old token.
 Write/quota/permission/replace failures attempt removal of only the operation's
 own temporary file. A collision is never cleaned up. After a lost connection,
 cleanup may be impossible; the error warns of a possible `.wpmm-save-*.tmp` residue.
+On later interactive directory opening, bounded best-effort recovery can remove
+strictly recognized regular save temps older than one hour. It does not change
+the safe-write sequence. See [FILEMANAGER_SAVE_RECOVERY.md](FILEMANAGER_SAVE_RECOVERY.md)
+for the exact UUID pattern, age/concurrency checks, failure behavior and limits.
 No content, passwords or server-provided error text is logged; diagnostics use
 numeric SFTP/OS codes. An unconfirmed save never returns success.
 

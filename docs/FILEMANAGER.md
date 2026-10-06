@@ -19,6 +19,8 @@ Phase 9 download and archive safety rules are in
 The current acceptance evidence, fixes and remaining live-verification gates are
 in [`FILEMANAGER_AUDIT.md`](FILEMANAGER_AUDIT.md). Phase descriptions below are
 historical: phases 1–9 are implemented, not pending work.
+Post-audit interrupted-save recovery is documented in
+[`FILEMANAGER_SAVE_RECOVERY.md`](FILEMANAGER_SAVE_RECOVERY.md).
 
 ## Existing architecture and reuse
 
