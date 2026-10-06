@@ -160,7 +160,7 @@ pub fn save(
         return response(&target, original);
     }
     let parent = target.absolute().rsplit_once('/').unwrap().0;
-    let temp_path = format!("{parent}/.wpmm-save-{}.tmp", uuid::Uuid::new_v4());
+    let temp_path = format!("{parent}/{}", crate::filemanager_save_temp::new_name());
     // Only clean up a temp that was actually created by this operation (EXCL).
     let mut temp = remote.create_temp(&temp_path)?;
     let result = (|| {
@@ -193,7 +193,7 @@ pub fn save(
     drop(temp);
     result.map_err(|mut failure| {
         if remote.cleanup(&temp_path).is_err() {
-            failure.user_message.push_str(" Een tijdelijk .wpmm-save-*.tmp-bestand kon mogelijk niet worden opgeruimd. Controleer de map na opnieuw verbinden.");
+            failure.user_message.push_str(" Een tijdelijk .wpmm-save-*.tmp-bestand kan zijn achtergebleven. Controleer na opnieuw verbinden eerst de serverinhoud. Bij later openen van deze map probeert de app eigen tijdelijke savebestanden ouder dan één uur veilig op te ruimen.");
         }
         failure
     })
@@ -351,6 +351,86 @@ mod tests {
             self.files.remove(temp);
             Ok(())
         }
+    }
+
+    impl crate::filemanager_directory::DirectoryTransport for Remote {
+        type Handle = std::collections::VecDeque<(String, ssh2::FileStat)>;
+        fn open_directory(
+            &mut self,
+            path: &crate::filemanager_paths::ResolvedDirectory,
+        ) -> Result<Self::Handle, AppError> {
+            let prefix = format!("{}/", path.absolute());
+            Ok(self
+                .files
+                .iter()
+                .filter_map(|(p, f)| {
+                    let name = p.strip_prefix(&prefix)?;
+                    (!name.contains('/')).then(|| (name.to_string(), f.stat.clone()))
+                })
+                .collect())
+        }
+        fn next_entry(
+            &mut self,
+            handle: &mut Self::Handle,
+        ) -> Result<Option<(String, ssh2::FileStat)>, AppError> {
+            Ok(handle.pop_front())
+        }
+    }
+    impl crate::filemanager_save_temp::CleanupTransport for Remote {
+        fn begin_cleanup(&mut self, _: std::time::Duration) {}
+        fn unlink_save_temp(&mut self, file: &ResolvedFile) -> Result<(), AppError> {
+            self.cleanup(file.absolute())
+        }
+    }
+
+    #[test]
+    fn interrupted_save_preserves_original_and_later_listing_recovers_only_old_temp() {
+        let mut remote = Remote::new("atomic-test.txt", b"versie 3", 0o100644);
+        let original = remote.files["/srv/site/atomic-test.txt"].clone();
+        let revision = remote.revision("atomic-test.txt");
+        remote.fail = "disconnect";
+        let failure = save(
+            &mut remote,
+            "/srv/site",
+            "/atomic-test.txt",
+            "versie 4",
+            &revision,
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(failure.user_message.contains("achtergebleven"));
+        assert!(failure.user_message.contains("serverinhoud"));
+        assert_eq!(remote.replaced, 0);
+        assert_eq!(remote.temps(), 1);
+        let temp = remote
+            .files
+            .iter()
+            .find(|(p, _)| p.contains(".wpmm-save-"))
+            .unwrap()
+            .1;
+        assert!(temp.bytes.is_empty());
+        assert_eq!(temp.stat.perm, Some(0o100600));
+        remote.fail = "";
+        // Reconnect immediately: recent file remains. Later: only the owned pattern is removed.
+        crate::filemanager_save_temp::list_directory(&mut remote, "/srv/site", "/", 105, true)
+            .unwrap();
+        assert_eq!(remote.temps(), 1);
+        remote
+            .files
+            .insert("/srv/site/plugin.tmp".into(), original.clone());
+        let listing =
+            crate::filemanager_save_temp::list_directory(&mut remote, "/srv/site", "/", 3701, true)
+                .unwrap();
+        assert_eq!(remote.temps(), 0);
+        assert_eq!(listing.items.len(), 2);
+        assert!(remote.files.contains_key("/srv/site/plugin.tmp"));
+        let after = &remote.files["/srv/site/atomic-test.txt"];
+        assert_eq!(after.bytes, b"versie 3");
+        assert_eq!(after.stat.perm, original.stat.perm);
+        assert_eq!(
+            (after.stat.uid, after.stat.gid),
+            (original.stat.uid, original.stat.gid)
+        );
     }
 
     #[test]

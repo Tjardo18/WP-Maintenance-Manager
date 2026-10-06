@@ -17,6 +17,7 @@ mod filemanager_edit;
 mod filemanager_file;
 mod filemanager_mutation;
 mod filemanager_paths;
+mod filemanager_save_temp;
 mod health;
 mod maintenance;
 mod media_keys;

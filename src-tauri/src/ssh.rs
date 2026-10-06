@@ -24,6 +24,7 @@ pub(crate) fn list_filemanager_directory(
     root: &str,
     requested: &str,
     authorize: &dyn Fn() -> Result<(), AppError>,
+    cleanup_allowed: bool,
 ) -> Result<crate::filemanager_directory::DirectoryListing, AppError> {
     let deadline = Instant::now() + Duration::from_secs(20);
     authorize()?;
@@ -35,7 +36,13 @@ pub(crate) fn list_filemanager_directory(
         sftp,
         deadline,
     };
-    crate::filemanager_directory::list_directory(&mut remote, root, requested)
+    crate::filemanager_save_temp::list_directory(
+        &mut remote,
+        root,
+        requested,
+        Utc::now().timestamp().max(0) as u64,
+        cleanup_allowed,
+    )
 }
 
 // Uses the same authenticated phase-2 SFTP session and phase-3 root resolver as listings.
@@ -449,6 +456,21 @@ impl FilemanagerSftp<'_> {
         self.session
             .set_timeout(remaining.as_millis().clamp(1, 5_000) as u32);
         Ok(())
+    }
+}
+
+impl crate::filemanager_save_temp::CleanupTransport for FilemanagerSftp<'_> {
+    fn begin_cleanup(&mut self, budget: Duration) {
+        self.deadline = self.deadline.min(Instant::now() + budget);
+    }
+    fn unlink_save_temp(
+        &mut self,
+        file: &crate::filemanager_paths::ResolvedFile,
+    ) -> Result<(), AppError> {
+        self.before_call()?;
+        self.sftp
+            .unlink(Path::new(file.absolute()))
+            .map_err(filemanager_file_error)
     }
 }
 

@@ -186,12 +186,16 @@ impl FilemanagerAccessManager {
         requested: &str,
         authorize: impl Fn() -> Result<(), AppError>,
     ) -> Result<crate::filemanager_directory::DirectoryListing, AppError> {
+        // Use the existing process-wide save lock: cleanup and saves never overlap.
+        // A busy save skips opportunistic cleanup, not the ordinary listing.
+        let cleanup_guard = self.saves.try_lock().ok();
         self.with_connection(session, site, token, &authorize, |connection, check| {
             crate::ssh::list_filemanager_directory(
                 connection,
                 &site.wordpress_path,
                 requested,
                 check,
+                cleanup_guard.is_some(),
             )
         })
     }
