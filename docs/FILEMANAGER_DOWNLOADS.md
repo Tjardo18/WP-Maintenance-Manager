@@ -35,6 +35,15 @@ absolute WordPress root. Changes or read errors while fetching a file abort the
 operation rather than reporting a successful incomplete download. An open
 editor's unsaved buffer is never used: downloads read the saved server version.
 
+When multiple items are selected, the native save dialog suggests
+`<site-name>-YYYY-MM-DD-HH-mm.zip`, using the site's stored display name and
+the computer's local time when the download command starts. Unsafe filename
+characters become separators, repeated separators collapse, and an empty name
+falls back to `website`. The user may change the name in the save dialog; the
+archive result reports the actual chosen name. A second save with the same
+name cannot overwrite an existing download. Single-file and single-directory
+download names are unchanged.
+
 Limits: 4 GiB of source file data per download, 10,000 ZIP entries (files and
 directories), 64 nested directory levels, 100 selected top-level items, 5,000
 items per directory listing, and a 10-minute operation deadline. The entry limit

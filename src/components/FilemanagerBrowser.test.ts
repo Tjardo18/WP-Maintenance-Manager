@@ -66,7 +66,7 @@ describe("Filemanager directorybrowser", () => {
   it("downloads one server file directly and keeps the selection after a bulk archive", async () => {
     const items = [file("index.php", "/index.php"), directory("wp-content", "/wp-content")];
     api.listFilemanagerDirectory.mockResolvedValue(listing("/", items));
-    api.downloadFilemanagerItems.mockResolvedValueOnce({ fileName: "index.php", bytes: 12, archived: false, savedTo: "C:\\Downloads\\index.php" }).mockResolvedValueOnce({ fileName: "filemanager-download.zip", bytes: 20, archived: true, savedTo: "C:\\Downloads\\filemanager-download.zip" });
+    api.downloadFilemanagerItems.mockResolvedValueOnce({ fileName: "index.php", bytes: 12, archived: false, savedTo: "C:\\Downloads\\index.php" }).mockResolvedValueOnce({ fileName: "website-a-2026-10-01-14-59.zip", bytes: 20, archived: true, savedTo: "C:\\Downloads\\website-a-2026-10-01-14-59.zip" });
     const wrapper = create(); await flushPromises();
     await wrapper.get('[aria-label="Download index.php"]').trigger("click"); await flushPromises();
     expect(api.downloadFilemanagerItems).toHaveBeenCalledWith("site-a", "token-a", { directory: "/", items: [{ path: "/index.php", expectedKind: "file" }] });
@@ -75,7 +75,7 @@ describe("Filemanager directorybrowser", () => {
     await wrapper.findAll(".filemanager-bulk-toolbar button").find((button) => button.text().includes("Downloaden"))!.trigger("click"); await flushPromises();
     expect(api.downloadFilemanagerItems).toHaveBeenLastCalledWith("site-a", "token-a", { directory: "/", items: [{ path: "/index.php", expectedKind: "file" }, { path: "/wp-content", expectedKind: "directory" }] });
     expect(wrapper.text()).toContain("2 items geselecteerd");
-    expect(wrapper.text()).toContain("filemanager-download.zip");
+    expect(wrapper.text()).toContain("website-a-2026-10-01-14-59.zip");
   });
 
   it("shows download failures and disables duplicate requests while saving", async () => {

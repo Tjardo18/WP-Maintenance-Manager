@@ -1129,7 +1129,11 @@ pub fn download_filemanager_items(
     require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)?;
     let site = state.database.get_site(&site_id)?.site;
     let _download = state.filemanager_access.reserve_download()?;
-    let name = crate::filemanager_download::suggested_name(&input);
+    let name = crate::filemanager_download::suggested_name_for_site(
+        &input,
+        &site.name,
+        chrono::Local::now().fixed_offset(),
+    );
     let selected = app
         .dialog()
         .file()
@@ -1143,17 +1147,25 @@ pub fn download_filemanager_items(
     let destination = destination.into_path().map_err(|_| {
         AppError::validation("Kies een gewone lokale bestandslocatie voor de download.")
     })?;
+    let saved_name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or(name);
     crate::filemanager_download::save_local(
         &destination,
         |output| {
-            state.filemanager_access.download(
+            let mut result = state.filemanager_access.download(
                 &session_token,
                 &site,
                 &authorization_token,
                 &input,
                 output,
                 || require_auth(&state, &session_token),
-            )
+            )?;
+            if input.items.len() > 1 {
+                result.file_name = saved_name.clone();
+            }
+            Ok(result)
         },
         || {
             require_filemanager_auth(&state, &session_token, &site_id, &authorization_token)

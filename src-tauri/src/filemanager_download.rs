@@ -7,6 +7,7 @@ use crate::{
         ResolvedFile, VirtualPath, resolve_directory, resolve_file, validate_name,
     },
 };
+use chrono::{DateTime, FixedOffset};
 use serde::Serialize;
 use std::{
     io::{Seek, Write},
@@ -133,6 +134,29 @@ pub fn suggested_name(input: &BulkInput) -> String {
     } else {
         clean
     }
+}
+
+/// Name for a multi-selection archive shown by the native save dialog.
+/// Single file and single directory downloads retain their existing names.
+pub fn suggested_name_for_site(
+    input: &BulkInput,
+    site_name: &str,
+    started_at: DateTime<FixedOffset>,
+) -> String {
+    if input.items.len() <= 1 {
+        return suggested_name(input);
+    }
+    let mut slug = String::new();
+    for character in site_name.to_lowercase().chars() {
+        if character.is_alphanumeric() && slug.len() + character.len_utf8() <= 100 {
+            slug.push(character);
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "website" } else { slug };
+    format!("{slug}-{}.zip", started_at.format("%Y-%m-%d-%H-%M"))
 }
 
 fn failure(category: &str, message: &str) -> AppError {
@@ -377,6 +401,7 @@ mod tests {
         filemanager_mutation::DeleteInput,
         filemanager_paths::{RemotePaths, ResolvedDirectory},
     };
+    use chrono::TimeZone;
     use std::{
         collections::{HashMap, HashSet, VecDeque},
         io::{Cursor, Read},
@@ -495,6 +520,68 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+    #[test]
+    fn multi_selection_name_uses_site_title_and_local_start_minute() {
+        let started = FixedOffset::east_opt(2 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 10, 1, 14, 59, 42)
+            .unwrap();
+        let bulk = selected(&[
+            ("/index.php", ItemKind::File),
+            ("/wp-content", ItemKind::Directory),
+        ]);
+        assert_eq!(
+            suggested_name_for_site(&bulk, "Yellowbrand", started),
+            "yellowbrand-2026-10-01-14-59.zip"
+        );
+        assert_eq!(
+            suggested_name_for_site(&bulk, "CTL-VU", started),
+            "ctl-vu-2026-10-01-14-59.zip"
+        );
+        assert_eq!(
+            suggested_name_for_site(&bulk, "dev.yellowbrand.nl", started),
+            "dev-yellowbrand-nl-2026-10-01-14-59.zip"
+        );
+        assert_eq!(
+            suggested_name_for_site(&bulk, "  /:*?\"<>|  ", started),
+            "website-2026-10-01-14-59.zip"
+        );
+        assert_eq!(
+            suggested_name_for_site(&bulk, "My / Private:Site?", started),
+            "my-private-site-2026-10-01-14-59.zip"
+        );
+        assert_eq!(
+            suggested_name_for_site(&bulk, "CON", started),
+            "con-2026-10-01-14-59.zip"
+        );
+        assert_eq!(
+            suggested_name_for_site(&bulk, &"A".repeat(400), started).len(),
+            121
+        );
+        let later = started + chrono::Duration::minutes(1);
+        assert_ne!(
+            suggested_name_for_site(&bulk, "Yellowbrand", later),
+            suggested_name_for_site(&bulk, "Yellowbrand", started)
+        );
+    }
+
+    #[test]
+    fn individual_file_and_directory_download_names_stay_the_same() {
+        let started = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 10, 1, 14, 59, 0)
+            .unwrap();
+        let file = selected(&[("/index.php", ItemKind::File)]);
+        let directory = selected(&[("/wp-content", ItemKind::Directory)]);
+        assert_eq!(
+            suggested_name_for_site(&file, "Yellowbrand", started),
+            "index.php"
+        );
+        assert_eq!(
+            suggested_name_for_site(&directory, "Yellowbrand", started),
+            "wp-content.zip"
+        );
     }
     #[test]
     fn direct_file_streams_original_bytes_and_sanitizes_suggested_name() {
