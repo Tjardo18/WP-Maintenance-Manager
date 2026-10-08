@@ -179,4 +179,56 @@ describe("NestedSiteDiscovery", () => {
     expect(wrapper.emitted("saved")?.[0]).toEqual([course]);
     expect(wrapper.text()).toContain("2 extra WordPress-installaties zijn gekoppeld.");
   });
+
+  it("reconnects a detached grandchild using its existing site ID", async () => {
+    const replacementParent: Site = {
+      ...parent,
+      id: "replacement-dev-id",
+      name: "dev yellowbrand",
+      url: "https://dev.yellowbrand.nl/",
+      wordpressPath: "/home/yellowbrand/domains/yellowbrand.nl/public_html/dev",
+      parentSiteId: parent.id,
+      relationType: "subdomain",
+      parentDirectory: "dev",
+    };
+    const detachedGrandchild: Site = {
+      ...parent,
+      id: "existing-portal-id",
+      name: "Portal op maat",
+      url: "https://dev.yellowbrand.nl/portal/",
+      wordpressPath: "/home/yellowbrand/domains/yellowbrand.nl/public_html/dev/portal",
+      parentSiteId: null,
+      relationType: null,
+      parentDirectory: null,
+    };
+    mockApi.testConnection.mockResolvedValueOnce(connectionResult(["portal"]))
+      .mockResolvedValueOnce(connectionResult());
+    mockApi.saveSite.mockResolvedValue({
+      ...detachedGrandchild,
+      parentSiteId: replacementParent.id,
+      relationType: "subdirectory",
+      parentDirectory: "portal",
+    });
+
+    const wrapper = mount(NestedSiteDiscovery, { props: { parent: replacementParent, sites: [parent, replacementParent, detachedGrandchild] } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("Al geregistreerd");
+    await wrapper.get('input[type="radio"][value="subdirectory"]').setValue();
+    await flushPromises();
+    expect((wrapper.get(".nested-site-details input").element as HTMLInputElement).value).toBe("Portal op maat");
+    await wrapper.get("button.primary").trigger("click");
+    await flushPromises();
+
+    expect(mockApi.saveSite).toHaveBeenCalledTimes(1);
+    expect(mockApi.saveSite).toHaveBeenCalledWith(expect.objectContaining({
+      id: detachedGrandchild.id,
+      name: detachedGrandchild.name,
+      url: detachedGrandchild.url,
+      wordpressPath: detachedGrandchild.wordpressPath,
+      parentSiteId: replacementParent.id,
+      relationType: "subdirectory",
+      parentDirectory: "portal",
+    }));
+    expect(wrapper.text()).toContain("Gekoppeld");
+  });
 });

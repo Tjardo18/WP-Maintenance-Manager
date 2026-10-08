@@ -671,10 +671,14 @@ pub fn list_sites(
 #[tauri::command(async)]
 pub fn save_site(
     session_token: String,
-    mut input: SiteInput,
+    input: SiteInput,
     state: State<'_, AppState>,
 ) -> Result<Site, AppError> {
     require_auth(&state, &session_token)?;
+    save_site_internal(&state, input)
+}
+
+fn save_site_internal(state: &AppState, mut input: SiteInput) -> Result<Site, AppError> {
     validate_site(&input)?;
     validate_site_identity_and_relationship(&state.database, &mut input)?;
     let is_new = input.id.is_none();
@@ -756,6 +760,10 @@ pub fn delete_site(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     require_auth(&state, &session_token)?;
+    delete_site_internal(&state, id)
+}
+
+fn delete_site_internal(state: &AppState, id: String) -> Result<(), AppError> {
     uuid::Uuid::parse_str(&id).map_err(|_| AppError::validation("De website-id is ongeldig."))?;
     state.terminals.close_site(&id);
     state.terminal_access.revoke_site(&id);
@@ -796,6 +804,13 @@ pub fn test_connection(
     state: State<'_, AppState>,
 ) -> Result<ConnectionTestResult, AppError> {
     require_auth(&state, &session_token)?;
+    test_connection_internal(&state, input)
+}
+
+fn test_connection_internal(
+    state: &AppState,
+    input: SiteInput,
+) -> Result<ConnectionTestResult, AppError> {
     let started = Instant::now();
     validate_site(&input)?;
     let existing = match input.id.as_deref() {
@@ -837,7 +852,7 @@ pub fn test_connection(
         Err(error) => {
             steps[0].status = StepStatus::Failed;
             return Ok(failed_connection_with_log(
-                &state, &site, started, steps, None, error,
+                state, &site, started, steps, None, error,
             ));
         }
     };
@@ -862,7 +877,7 @@ pub fn test_connection(
         Some(expected) if expected != fingerprint => {
             steps[1].status = StepStatus::Failed;
             return Ok(failed_connection_with_log(
-                &state,
+                state,
                 &site,
                 started,
                 steps,
@@ -880,7 +895,7 @@ pub fn test_connection(
     if let Err(error) = state.ssh.authenticate(&site, credential.as_deref()) {
         steps[2].status = StepStatus::Failed;
         return Ok(failed_connection_with_log(
-            &state,
+            state,
             &site,
             started,
             steps,
@@ -898,7 +913,7 @@ pub fn test_connection(
     ) {
         steps[3].status = StepStatus::Failed;
         return Ok(failed_connection_with_log(
-            &state,
+            state,
             &site,
             started,
             steps,
@@ -920,7 +935,7 @@ pub fn test_connection(
             error.user_message = "WP-CLI is niet beschikbaar op deze server.".into();
             steps[4].status = StepStatus::Failed;
             return Ok(failed_connection_with_log(
-                &state,
+                state,
                 &site,
                 started,
                 steps,
@@ -941,7 +956,7 @@ pub fn test_connection(
         error.user_message = "Op dit pad is geen werkende WordPress-installatie gevonden.".into();
         steps[5].status = StepStatus::Failed;
         return Ok(failed_connection_with_log(
-            &state,
+            state,
             &site,
             started,
             steps,
@@ -959,7 +974,7 @@ pub fn test_connection(
     ) {
         steps[6].status = StepStatus::Failed;
         return Ok(failed_connection_with_log(
-            &state,
+            state,
             &site,
             started,
             steps,
@@ -1006,7 +1021,7 @@ pub fn test_connection(
         Err(error) => {
             steps[7].status = StepStatus::Failed;
             return Ok(failed_connection_with_log(
-                &state,
+                state,
                 &site,
                 started,
                 steps,
@@ -1020,7 +1035,7 @@ pub fn test_connection(
         Err(error) => {
             steps[7].status = StepStatus::Failed;
             return Ok(failed_connection_with_log(
-                &state,
+                state,
                 &site,
                 started,
                 steps,
@@ -4304,6 +4319,10 @@ fn stored_credential_from_state(
         None => Ok(None),
     }
 }
+
+#[cfg(test)]
+#[path = "commands/child_lifecycle_tests.rs"]
+mod child_lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

@@ -15,6 +15,8 @@ export interface NestedSiteProposal {
   wordpressPath: string;
 }
 
+type NestedSiteConnection = Pick<Site, "id" | "sshHost" | "sshPort" | "sshUsername" | "authMethod" | "keyPath" | "wordpressPath">;
+
 function normalizedDirectory(directory: string) {
   return directory.trim().replace(/^\/+|\/+$/g, "");
 }
@@ -35,8 +37,24 @@ export function joinWordpressPath(parentPath: string, directory: string) {
   return `${parentPath.replace(/\/+$/g, "")}/${normalizedDirectory(directory)}`;
 }
 
+export function reconnectableNestedSite(
+  parent: NestedSiteConnection,
+  directory: string,
+  sites: Site[],
+) {
+  const childPath = joinWordpressPath(parent.wordpressPath, directory);
+  return sites.find((site) => site.id !== parent.id
+    && !site.parentSiteId && !site.relationType && !site.parentDirectory
+    && site.sshHost.toLowerCase() === parent.sshHost.toLowerCase()
+    && site.sshPort === parent.sshPort
+    && site.sshUsername === parent.sshUsername
+    && site.authMethod === parent.authMethod
+    && (site.keyPath ?? "") === (parent.keyPath ?? "")
+    && site.wordpressPath.replace(/\/+$/g, "") === childPath);
+}
+
 export function availableNestedDirectories(
-  parent: Pick<Site, "id" | "sshHost" | "sshPort" | "wordpressPath">,
+  parent: NestedSiteConnection,
   directories: string[],
   sites: Site[],
 ) {
@@ -47,7 +65,8 @@ export function availableNestedDirectories(
       .map((site) => site.wordpressPath.replace(/\/+$/g, "")),
   );
   return [...new Set(directories)]
-    .filter((directory) => !knownPaths.has(joinWordpressPath(parent.wordpressPath, directory)))
+    .filter((directory) => !knownPaths.has(joinWordpressPath(parent.wordpressPath, directory))
+      || Boolean(reconnectableNestedSite(parent, directory, sites)))
     .sort((left, right) => left.localeCompare(right));
 }
 

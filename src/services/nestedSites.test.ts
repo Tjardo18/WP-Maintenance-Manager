@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Site } from "../types";
-import { availableNestedDirectories, buildNestedSiteProposal, joinWordpressPath, rootSiteNameBase } from "./nestedSites";
+import { availableNestedDirectories, buildNestedSiteProposal, joinWordpressPath, reconnectableNestedSite, rootSiteNameBase } from "./nestedSites";
 
 const root = {
   key: "root",
@@ -101,5 +101,19 @@ describe("nested site proposals", () => {
     expect(
       availableNestedDirectories(storedRoot, ["dev", "academy", "academy"], [storedRoot, existingChild]),
     ).toEqual(["academy"]);
+  });
+
+  it("offers a detached existing child for reconnection without offering linked or incompatible sites", () => {
+    const detached: Site = {
+      ...storedRoot,
+      id: "portal-id",
+      url: "https://yellowbrand.nl/portal/",
+      wordpressPath: "/home/yellowbrand/domains/yellowbrand.nl/public_html/portal/",
+    };
+    expect(availableNestedDirectories(storedRoot, ["portal"], [storedRoot, detached])).toEqual(["portal"]);
+    expect(reconnectableNestedSite(storedRoot, "portal", [storedRoot, detached])?.id).toBe("portal-id");
+    const incompatible = { ...detached, sshUsername: "other-user" };
+    expect(availableNestedDirectories(storedRoot, ["portal"], [storedRoot, incompatible])).toEqual([]);
+    expect(reconnectableNestedSite(storedRoot, "portal", [storedRoot, incompatible])).toBeUndefined();
   });
 });

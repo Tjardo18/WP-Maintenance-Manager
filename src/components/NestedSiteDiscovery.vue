@@ -6,6 +6,7 @@ import {
   availableNestedDirectories,
   buildNestedSiteProposal,
   joinWordpressPath,
+  reconnectableNestedSite,
   rootSiteNameBase,
   type NestedSiteParentContext,
 } from "../services/nestedSites";
@@ -32,6 +33,7 @@ interface Candidate {
   error?: string;
   saved?: boolean;
   savedId?: string;
+  existingId?: string;
 }
 
 const props = defineProps<{ parent: Site; sites: Site[] }>();
@@ -116,29 +118,34 @@ function removeDescendants(parentKey: string) {
 function addCandidates(parentKey: string, depth: number, directories: string[]) {
   const parent = contextFor(parentKey);
   if (!parent) return;
-  const available = availableNestedDirectories({
+  const connection = {
     id: parentKey === "root" ? props.parent.id : parentKey,
     sshHost: props.parent.sshHost,
     sshPort: props.parent.sshPort,
+    sshUsername: props.parent.sshUsername,
+    authMethod: props.parent.authMethod,
+    keyPath: props.parent.keyPath,
     wordpressPath: parent.wordpressPath,
-  }, directories, props.sites);
+  };
+  const available = availableNestedDirectories(connection, directories, props.sites);
   const existingKeys = new Set(candidates.value.map((candidate) => candidate.key));
   const additions = available
-    .map((directory) => ({ directory, key: `${parentKey}/${directory}` }))
+    .map((directory) => ({ directory, key: `${parentKey}/${directory}`, existing: reconnectableNestedSite(connection, directory, props.sites) }))
     .filter(({ key }) => !existingKeys.has(key))
-    .map(({ directory, key }): Candidate => ({
+    .map(({ directory, key, existing }): Candidate => ({
       key,
       parentKey,
       depth,
       directory,
       choice: "unselected",
-      name: "",
+      name: existing?.name ?? "",
       nameBase: "",
-      url: "",
+      url: existing?.url ?? "",
       wordpressPath: joinWordpressPath(parent.wordpressPath, directory),
       testGeneration: 0,
       checking: false,
       verified: false,
+      existingId: existing?.id,
     }));
   candidates.value = [...candidates.value, ...additions];
 }
@@ -205,7 +212,13 @@ async function applyChoice(candidate: Candidate) {
     candidate.error = "De bovenliggende website kon niet worden bepaald.";
     return;
   }
-  Object.assign(candidate, buildNestedSiteProposal(parent, candidate.directory, candidate.choice));
+  const proposal = buildNestedSiteProposal(parent, candidate.directory, candidate.choice);
+  const existing = props.sites.find((site) => site.id === candidate.existingId);
+  Object.assign(candidate, {
+    ...proposal,
+    name: existing?.name ?? proposal.name,
+    url: existing?.url ?? proposal.url,
+  });
   await verifyCandidate(candidate);
 }
 
@@ -246,14 +259,16 @@ const candidatesVerified = computed(() => selectedCandidates.value.every(
     && candidate.verifiedSignature === candidateSignature(candidate),
 ));
 const uniqueTargets = computed(() => {
-  const urls = new Set(props.sites.map((site) => site.url.trim().replace(/\/+$/g, "").toLowerCase()));
-  const paths = new Set(props.sites
-    .filter((site) => site.sshHost.toLowerCase() === props.parent.sshHost.toLowerCase() && site.sshPort === props.parent.sshPort)
-    .map((site) => site.wordpressPath.replace(/\/+$/g, "")));
+  const urls = new Set<string>();
+  const paths = new Set<string>();
   for (const candidate of selectedCandidates.value.filter((item) => !item.saved)) {
     const url = candidate.url.trim().replace(/\/+$/g, "").toLowerCase();
     const path = candidate.wordpressPath.replace(/\/+$/g, "");
-    if (urls.has(url) || paths.has(path)) return false;
+    if (urls.has(url) || paths.has(path) || props.sites.some((site) => site.id !== candidate.existingId
+      && (site.url.trim().replace(/\/+$/g, "").toLowerCase() === url
+        || (site.sshHost.toLowerCase() === props.parent.sshHost.toLowerCase()
+          && site.sshPort === props.parent.sshPort
+          && site.wordpressPath.replace(/\/+$/g, "") === path)))) return false;
     urls.add(url);
     paths.add(path);
   }
@@ -282,6 +297,7 @@ async function saveCandidates() {
       if (!parentSiteId) throw new Error(`De parent van ${candidate.name} is nog niet opgeslagen.`);
       const saved = await appApi.saveSite({
         ...siteInput(candidate.name, candidate.url, candidate.wordpressPath, false),
+        id: candidate.existingId,
         parentSiteId,
         relationType,
         parentDirectory: candidate.directory,
@@ -320,7 +336,8 @@ onMounted(discover);
 
         <div v-else class="nested-sites-list nested-discovery-list">
           <article v-for="candidate in orderedCandidates" :key="candidate.key" class="nested-site" :class="{ saved: candidate.saved }" :style="{ marginLeft: `${Math.min(candidate.depth, 5) * 18}px` }">
-            <header><div><small>Gevonden map</small><strong>{{ candidate.directory }}</strong><code>{{ detectedDirectoryPath(candidate) }}</code></div><span v-if="candidate.saved" class="nested-level">Gekoppeld</span><span v-else-if="candidate.depth" class="nested-level">Niveau {{ candidate.depth + 1 }}</span></header>
+            <header><div><small>Gevonden map</small><strong>{{ candidate.directory }}</strong><code>{{ detectedDirectoryPath(candidate) }}</code></div><span v-if="candidate.saved" class="nested-level">Gekoppeld</span><span v-else-if="candidate.existingId" class="nested-level">Al geregistreerd</span><span v-else-if="candidate.depth" class="nested-level">Niveau {{ candidate.depth + 1 }}</span></header>
+            <p v-if="candidate.existingId && !candidate.saved" class="nested-sites-help">Deze installatie staat al in de app. Koppelen hergebruikt de bestaande website en maakt geen duplicaat.</p>
             <fieldset :disabled="candidate.saved || saving">
               <legend>Wat is deze map?</legend>
               <div class="nested-choice-grid">
